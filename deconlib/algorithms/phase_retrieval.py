@@ -105,43 +105,24 @@ def retrieve_phase(
     mse_history = []
     support_error_history = []
     converged = False
+    eps = np.finfo(np.float64).eps
 
     for iteration in range(1, max_iter + 1):
-        # Running mean of pupil estimates across z-planes
-        pupil_sum = np.zeros_like(pupil)
+        # Forward: pupil -> PSF amplitude at all z-planes
+        psf_amplitude = np.fft.ifft2(pupil * propagate_forward, axes=(-2, -1))
 
-        for i in range(nz):
-            # Forward: pupil -> PSF amplitude
-            pupil_defocused = pupil * propagate_forward[i]
-            psf_amplitude = np.fft.ifft2(pupil_defocused)
+        # Replace magnitude with measured, keep phase
+        psf_corrected = measured_mag * psf_amplitude / np.maximum(np.abs(psf_amplitude), eps)
 
-            # Replace magnitude with measured, keep phase
-            computed_mag = np.abs(psf_amplitude)
-            eps = np.finfo(np.float64).eps
-            unit_phase = psf_amplitude / np.maximum(computed_mag, eps)
-            psf_corrected = measured_mag[i] * unit_phase
+        # Backward: corrected PSF -> pupil estimates, then average
+        pupil_avg = (np.fft.fft2(psf_corrected, axes=(-2, -1)) * propagate_backward).mean(axis=0)
 
-            # Backward: corrected PSF -> pupil
-            pupil_corrected = np.fft.fft2(psf_corrected)
-            pupil_estimate = pupil_corrected * propagate_backward[i]
-
-            # Accumulate for running mean
-            pupil_sum += pupil_estimate
-
-        # Average estimate
-        pupil_avg = pupil_sum / nz
-
-        # Compute MSE (using last z-plane as representative)
-        psf_computed = np.abs(np.fft.ifft2(pupil * propagate_forward[-1])) ** 2
-        mse = np.sum((psf_computed - measured_psf[-1]) ** 2) / (
-            np.sum(measured_psf[-1]) + eps
-        )
+        # Compute MSE across all z-planes
+        mse = np.sum((np.abs(psf_amplitude) ** 2 - measured_psf) ** 2) / (total_intensity + eps)
         mse_history.append(float(mse))
 
         # Compute support constraint violation
-        violation_energy = np.sum(np.abs(pupil_avg[~mask]) ** 2)
-        total_energy = np.sum(np.abs(pupil_avg) ** 2) + eps
-        support_error = violation_energy / total_energy
+        support_error = np.sum(np.abs(pupil_avg[~mask]) ** 2) / (np.sum(np.abs(pupil_avg) ** 2) + eps)
         support_error_history.append(float(support_error))
 
         # Callback
