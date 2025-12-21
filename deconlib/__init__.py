@@ -21,8 +21,9 @@ Example:
     >>> # Compute pupil quantities
     >>> pupil_data = compute_pupil_data(config)
     >>>
-    >>> # Generate 3D PSF
-    >>> z_planes = np.linspace(-2, 2, 41)  # 41 planes, 100nm spacing
+    >>> # Generate 3D PSF with FFT-compatible z-coordinates
+    >>> from deconlib import fft_coords
+    >>> z_planes = fft_coords(n=64, spacing=0.1)  # 64 planes, 100nm spacing
     >>> psf = compute_psf(config, pupil_data, z_planes)
 
 Reference:
@@ -43,6 +44,7 @@ from .algorithms import retrieve_phase, PhaseRetrievalResult
 
 # Math utilities (for advanced users)
 from .math import (
+    fft_coords,
     fourier_meshgrid,
     fftshift_1d,
     imshift,
@@ -65,6 +67,7 @@ __all__ = [
     "retrieve_phase",
     "PhaseRetrievalResult",
     # Math utilities
+    "fft_coords",
     "fourier_meshgrid",
     "fftshift_1d",
     "imshift",
