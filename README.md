@@ -16,6 +16,8 @@ pip install -e .
 
 ## Quick Start
 
+The convention for the z-axis coordinate is `z < 0` (negative coordinates) correspond to distance into the sample. When `z > 0`, this is never really the case because this is the distance toward the objective, which is physically unusual for a PSF calculation.
+
 ```python
 from deconlib import (
     OpticalConfig,

@@ -42,7 +42,9 @@ def compute_pupil_data(
         >>> pupil_data = compute_pupil_data(config)
     """
     # Compute frequency coordinates
-    ky, kx = fourier_meshgrid(config.ny, config.nx, spacing=(config.dy, config.dx))
+    ky, kx = fourier_meshgrid(
+        config.ny, config.nx, spacing=(config.dy, config.dx)
+    )
 
     # Radial frequency coordinate
     kxy = np.sqrt(kx * kx + ky * ky)
