@@ -6,49 +6,75 @@ for optical microscopy applications.
 
 Example:
     >>> import numpy as np
-    >>> from deconlib import OpticalConfig, compute_pupil_data, compute_psf
+    >>> from deconlib import Optics, Grid, make_geometry, make_pupil
+    >>> from deconlib import pupil_to_psf, fft_coords
     >>>
     >>> # Define optical system
-    >>> config = OpticalConfig(
-    ...     nx=256, ny=256,
-    ...     dx=0.085, dy=0.085,  # 85nm pixels
+    >>> optics = Optics(
     ...     wavelength=0.525,    # 525nm emission
     ...     na=1.4,              # 1.4 NA objective
     ...     ni=1.515,            # oil immersion
     ...     ns=1.334,            # aqueous sample
     ... )
+    >>> grid = Grid(
+    ...     shape=(256, 256),
+    ...     spacing=(0.085, 0.085),  # 85nm pixels
+    ... )
     >>>
-    >>> # Compute pupil quantities
-    >>> pupil_data = compute_pupil_data(config)
+    >>> # Compute geometry (do once, reuse)
+    >>> geom = make_geometry(grid, optics)
     >>>
-    >>> # Generate 3D PSF with FFT-compatible z-coordinates
-    >>> from deconlib import fft_coords
-    >>> z_planes = fft_coords(n=64, spacing=0.1)  # 64 planes, 100nm spacing
-    >>> psf = compute_psf(config, pupil_data, z_planes)
+    >>> # Create pupil and compute PSF
+    >>> pupil = make_pupil(geom)
+    >>> z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
+    >>> psf = pupil_to_psf(pupil, geom, z)
 
 Reference:
     Hanser, B.M. et al. "Phase-retrieved pupil functions in wide-field
     fluorescence microscopy." Journal of Microscopy 216.1 (2004): 32-48.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-# Core data structures
-from .core import OpticalConfig, PupilData
+# Core data structures (new API)
+from .core import (
+    Optics,
+    Grid,
+    Geometry,
+    make_geometry,
+    make_pupil,
+    apply_apodization,
+    compute_amplitude_correction,
+    # Legacy
+    OpticalConfig,
+)
 
-# Computation functions
-from .compute import compute_pupil_data, compute_psf, compute_psf_confocal, compute_otf
+# PSF/OTF computation
+from .compute import pupil_to_psf, pupil_to_psf_centered, compute_otf
 
-# Algorithms
+# Aberrations
+from .aberrations import (
+    Aberration,
+    apply_aberrations,
+    IndexMismatch,
+    Defocus,
+    ZernikeAberration,
+    ZernikeMode,
+)
+
+# Phase retrieval
 from .algorithms import retrieve_phase, PhaseRetrievalResult
 
-# Math utilities (for advanced users)
+# Math utilities
 from .math import (
     fft_coords,
     fourier_meshgrid,
     fftshift_1d,
     imshift,
+    zernike_polynomial,
     zernike_polynomials,
+    ansi_to_nm,
+    noll_to_ansi,
     pad_to_shape,
 )
 
@@ -56,14 +82,26 @@ __all__ = [
     # Version
     "__version__",
     # Core data structures
-    "OpticalConfig",
-    "PupilData",
-    # Main computation API
-    "compute_pupil_data",
-    "compute_psf",
-    "compute_psf_confocal",
+    "Optics",
+    "Grid",
+    "Geometry",
+    "make_geometry",
+    "make_pupil",
+    "apply_apodization",
+    "compute_amplitude_correction",
+    "OpticalConfig",  # Legacy
+    # PSF/OTF computation
+    "pupil_to_psf",
+    "pupil_to_psf_centered",
     "compute_otf",
-    # Algorithms
+    # Aberrations
+    "Aberration",
+    "apply_aberrations",
+    "IndexMismatch",
+    "Defocus",
+    "ZernikeAberration",
+    "ZernikeMode",
+    # Phase retrieval
     "retrieve_phase",
     "PhaseRetrievalResult",
     # Math utilities
@@ -71,6 +109,9 @@ __all__ = [
     "fourier_meshgrid",
     "fftshift_1d",
     "imshift",
+    "zernike_polynomial",
     "zernike_polynomials",
+    "ansi_to_nm",
+    "noll_to_ansi",
     "pad_to_shape",
 ]
