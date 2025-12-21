@@ -5,7 +5,34 @@ from typing import Sequence
 import numpy as np
 from numpy.fft import fftfreq, rfftfreq
 
-__all__ = ["fftfreq", "rfftfreq", "fourier_meshgrid", "fftshift_1d", "imshift"]
+__all__ = ["fftfreq", "rfftfreq", "fft_coords", "fourier_meshgrid", "fftshift_1d", "imshift"]
+
+
+def fft_coords(n: int, spacing: float = 1.0) -> np.ndarray:
+    """Generate real-space coordinates compatible with FFT conventions.
+
+    Creates coordinates where index 0 corresponds to position 0,
+    and coordinates wrap around at the Nyquist frequency. This is
+    the natural coordinate system for FFT-based computations.
+
+    Args:
+        n: Number of samples.
+        spacing: Sample spacing (e.g., dz for z-axis).
+
+    Returns:
+        1D array of coordinates: [0, d, 2d, ..., -2d, -d] for even n,
+        or [0, d, 2d, ..., -(n//2)*d, ..., -d] for odd n.
+
+    Example:
+        >>> z = fft_coords(8, spacing=0.5)
+        >>> z
+        array([ 0. ,  0.5,  1. ,  1.5, -2. , -1.5, -1. , -0.5])
+
+        >>> # Typical usage for PSF computation:
+        >>> z_planes = fft_coords(nz, dz)
+        >>> psf = compute_psf(config, pupil_data, z_planes)
+    """
+    return fftfreq(n) * n * spacing
 
 
 def fourier_meshgrid(

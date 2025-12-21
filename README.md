@@ -17,8 +17,12 @@ pip install -e .
 ## Quick Start
 
 ```python
-import numpy as np
-from deconlib import OpticalConfig, compute_pupil_data, compute_psf
+from deconlib import (
+    OpticalConfig,
+    compute_pupil_data,
+    compute_psf,
+    fft_coords,
+)
 
 # Define optical system parameters
 config = OpticalConfig(
@@ -33,11 +37,13 @@ config = OpticalConfig(
 # Compute pupil function quantities
 pupil_data = compute_pupil_data(config)
 
-# Generate 3D PSF at specified focal planes
-z_planes = np.linspace(-2, 2, 41)  # 41 planes from -2 to +2 microns
+# Generate 3D PSF using FFT-compatible z-coordinates
+# fft_coords returns [0, dz, 2*dz, ..., -2*dz, -dz] ordering
+nz, dz = 64, 0.1  # 64 planes, 100nm spacing
+z_planes = fft_coords(nz, dz)
 psf = compute_psf(config, pupil_data, z_planes)
 
-print(f"PSF shape: {psf.shape}")  # (41, 256, 256)
+print(f"PSF shape: {psf.shape}")  # (64, 256, 256)
 ```
 
 ## Features
@@ -113,6 +119,7 @@ Z = zernike_polynomials(rho, phi, max_order=4)
 
 ### Math Utilities
 
+- `fft_coords(n, spacing)` - Generate FFT-compatible coordinates (origin at index 0)
 - `fourier_meshgrid(*shape, spacing, real)` - Create frequency coordinate grids
 - `zernike_polynomials(rho, phi, max_order)` - Compute Zernike polynomials
 - `imshift(img, *shifts)` - Sub-pixel image translation via Fourier shift
