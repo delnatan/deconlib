@@ -5,66 +5,78 @@ A pure NumPy library for computing point spread functions (PSF), optical transfe
 ## Installation
 
 ```bash
-uv pip install -e .
-```
-
-Or with pip:
-
-```bash
 pip install -e .
 ```
 
 ## Quick Start
 
-The convention for the z-axis coordinate is `z < 0` (negative coordinates) correspond to distance into the sample. When `z > 0`, this is never really the case because this is the distance toward the objective, which is physically unusual for a PSF calculation.
-
 ```python
+import numpy as np
 from deconlib import (
-    OpticalConfig,
-    compute_pupil_data,
-    compute_psf,
-    fft_coords,
+    Optics, Grid, make_geometry, make_pupil,
+    pupil_to_psf, fft_coords,
 )
 
-# Define optical system parameters
-config = OpticalConfig(
-    nx=256, ny=256,           # image dimensions (pixels)
-    dx=0.085, dy=0.085,       # pixel size (microns)
-    wavelength=0.525,         # emission wavelength (microns)
-    na=1.4,                   # numerical aperture
-    ni=1.515,                 # immersion refractive index (oil)
-    ns=1.334,                 # sample refractive index (water)
+# Define optical system
+optics = Optics(
+    wavelength=0.525,    # emission wavelength (μm)
+    na=1.4,              # numerical aperture
+    ni=1.515,            # immersion index (oil)
+    ns=1.334,            # sample index (water)
 )
 
-# Compute pupil function quantities
-pupil_data = compute_pupil_data(config)
+# Define spatial sampling
+grid = Grid(
+    shape=(256, 256),         # (ny, nx) pixels
+    spacing=(0.085, 0.085),   # (dy, dx) in μm
+)
 
-# Generate 3D PSF using FFT-compatible z-coordinates
-# fft_coords returns [0, dz, 2*dz, ..., -2*dz, -dz] ordering
-nz, dz = 64, 0.1  # 64 planes, 100nm spacing
-z_planes = fft_coords(nz, dz)
-psf = compute_psf(config, pupil_data, z_planes)
+# Compute geometry (do once, reuse for all computations)
+geom = make_geometry(grid, optics)
+
+# Create pupil and compute PSF
+pupil = make_pupil(geom)
+z = fft_coords(n=64, spacing=0.1)  # 64 z-planes, 100nm spacing
+psf = pupil_to_psf(pupil, geom, z)
 
 print(f"PSF shape: {psf.shape}")  # (64, 256, 256)
 ```
 
+### FFT Conventions
+
+- **DC at corner**: PSF output has DC (peak for in-focus) at index (0, 0). Use `fft_coords()` for compatible z-coordinates.
+- **For visualization**: Use `pupil_to_psf_centered()` to get PSF with peak at image center.
+
 ## Features
 
-### Compute OTF
+### Aberrations
+
+Composable aberration system for modifying pupil functions:
 
 ```python
-from deconlib import compute_otf
+from deconlib import (
+    IndexMismatch, ZernikeAberration, ZernikeMode, apply_aberrations
+)
 
-otf = compute_otf(config, pupil_data, z_planes)
+# Refractive index mismatch (imaging 10μm into sample)
+aberr1 = IndexMismatch(depth=10.0)
+
+# Zernike aberrations with named modes
+aberr2 = ZernikeAberration({
+    ZernikeMode.SPHERICAL: 0.5,    # 0.5 rad of spherical aberration
+    ZernikeMode.COMA_X: -0.2,      # horizontal coma
+})
+
+# Apply to pupil
+pupil_aberrated = apply_aberrations(pupil, geom, optics, [aberr1, aberr2])
+psf_aberrated = pupil_to_psf(pupil_aberrated, geom, z)
 ```
 
-### Confocal PSF
-
-```python
-from deconlib import compute_psf_confocal
-
-psf_confocal = compute_psf_confocal(config, pupil_data, z_planes)
-```
+Available Zernike modes (OSA/ANSI indexing):
+- `PISTON`, `TILT_X`, `TILT_Y`
+- `DEFOCUS`, `ASTIG_OBLIQUE`, `ASTIG_VERTICAL`
+- `COMA_X`, `COMA_Y`, `TREFOIL_X`, `TREFOIL_Y`
+- `SPHERICAL`, and higher-order terms
 
 ### Phase Retrieval
 
@@ -73,58 +85,90 @@ Recover the pupil function from measured PSF data:
 ```python
 from deconlib import retrieve_phase
 
-# observed_magnitudes = sqrt(measured PSF intensity), shape (nz, ny, nx)
+# measured_psf: intensity PSF, shape (nz, ny, nx)
 result = retrieve_phase(
-    config,
-    pupil_data,
-    observed_magnitudes,
+    measured_psf,
     z_planes,
-    method="HIO",      # or "ER" for Error Reduction
-    max_iter=500,
-    beta=0.95,         # HIO relaxation parameter
+    geom,
+    method="GS",      # Gerchberg-Saxton (or "HIO" for Hybrid Input-Output)
+    max_iter=100,
 )
 
 retrieved_pupil = result.pupil
-print(f"Converged: {result.converged}, iterations: {result.iterations}")
+print(f"Converged: {result.converged}, MSE: {result.mse_history[-1]:.2e}")
+```
+
+### OTF Computation
+
+```python
+from deconlib import compute_otf
+
+otf = compute_otf(pupil, geom, z)
 ```
 
 ### Zernike Polynomials
 
 ```python
-from deconlib import zernike_polynomials
+from deconlib import zernike_polynomial, zernike_polynomials, ZernikeMode
 
-# Compute Zernike polynomials up to order 4
-rho = pupil_data.kxy / config.pupil_radius  # normalized radial coordinate
-phi = pupil_data.phi                         # azimuthal angle
-Z = zernike_polynomials(rho, phi, max_order=4)
+# Single polynomial
+Z_spherical = zernike_polynomial(ZernikeMode.SPHERICAL, geom.rho, geom.phi)
 
-# Z[4] is defocus, Z[5] and Z[6] are astigmatism, etc.
+# All polynomials up to radial order 4
+Z_all = zernike_polynomials(geom.rho, geom.phi, max_order=4)
+```
+
+### Apodization and Amplitude Corrections
+
+For accurate high-NA modeling:
+
+```python
+from deconlib import make_pupil, apply_apodization, compute_amplitude_correction
+
+# Apodized pupil (1/sqrt(cos θ) factor)
+pupil_apod = make_pupil(geom, apodize=True)
+
+# Fresnel amplitude correction for index mismatch
+amplitude = compute_amplitude_correction(geom, optics)
 ```
 
 ## API Reference
 
-### Data Structures
+### Core Data Structures
 
-- `OpticalConfig` - Immutable optical system parameters
-- `PupilData` - Computed pupil function data (frequencies, mask, angles, etc.)
+| Class | Description |
+|-------|-------------|
+| `Optics` | Immutable optical parameters (wavelength, NA, refractive indices) |
+| `Grid` | Spatial sampling (shape, pixel spacing) |
+| `Geometry` | Precomputed frequency-space quantities (kx, ky, kz, mask, angles) |
 
-### Computation Functions
+### Functions
 
-- `compute_pupil_data(config)` - Compute pupil quantities from optical config
-- `compute_psf(config, pupil_data, z_planes, ...)` - Generate 3D PSF
-- `compute_psf_confocal(config, pupil_data, z_planes, ...)` - Generate confocal PSF
-- `compute_otf(config, pupil_data, z_planes, ...)` - Generate 3D OTF
+| Function | Description |
+|----------|-------------|
+| `make_geometry(grid, optics)` | Create geometry from grid and optics |
+| `make_pupil(geom, apodize=False)` | Create uniform pupil function |
+| `pupil_to_psf(pupil, geom, z)` | Compute 3D PSF (DC at corner) |
+| `pupil_to_psf_centered(...)` | Compute 3D PSF (DC at center) |
+| `compute_otf(pupil, geom, z)` | Compute optical transfer function |
+| `retrieve_phase(psf, z, geom, ...)` | Phase retrieval from PSF |
+| `apply_aberrations(pupil, geom, optics, aberrations)` | Apply aberration list |
 
-### Algorithms
+### Aberration Classes
 
-- `retrieve_phase(config, pupil_data, magnitudes, z_planes, ...)` - Phase retrieval
+| Class | Description |
+|-------|-------------|
+| `IndexMismatch(depth)` | Spherical aberration from RI mismatch |
+| `Defocus(z)` | Fixed defocus offset |
+| `ZernikeAberration(coefficients)` | Arbitrary Zernike aberrations |
 
 ### Math Utilities
 
-- `fft_coords(n, spacing)` - Generate FFT-compatible coordinates (origin at index 0)
-- `fourier_meshgrid(*shape, spacing, real)` - Create frequency coordinate grids
-- `zernike_polynomials(rho, phi, max_order)` - Compute Zernike polynomials
-- `imshift(img, *shifts)` - Sub-pixel image translation via Fourier shift
+| Function | Description |
+|----------|-------------|
+| `fft_coords(n, spacing)` | FFT-compatible coordinates |
+| `zernike_polynomial(j, rho, phi)` | Single Zernike polynomial |
+| `zernike_polynomials(rho, phi, max_order)` | All polynomials up to order |
 
 ## Reference
 

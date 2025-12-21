@@ -1,6 +1,17 @@
 """Core data structures for optical computations."""
 
-from .optics import OpticalConfig
-from .pupil import PupilData
+from .optics import Optics, Grid, Geometry, make_geometry, OpticalConfig
+from .pupil import make_pupil, apply_apodization, compute_amplitude_correction
 
-__all__ = ["OpticalConfig", "PupilData"]
+__all__ = [
+    # New API
+    "Optics",
+    "Grid",
+    "Geometry",
+    "make_geometry",
+    "make_pupil",
+    "apply_apodization",
+    "compute_amplitude_correction",
+    # Legacy (backwards compatibility)
+    "OpticalConfig",
+]

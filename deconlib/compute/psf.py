@@ -2,125 +2,120 @@
 
 import numpy as np
 
-from ..core.optics import OpticalConfig
-from ..core.pupil import PupilData
+from ..core.optics import Geometry, Optics
 
-__all__ = ["compute_psf"]
+__all__ = ["pupil_to_psf", "pupil_to_psf_centered"]
 
 
-def compute_psf(
-    config: OpticalConfig,
-    pupil_data: PupilData,
-    focal_planes: np.ndarray,
-    emitter_z: float = 0.0,
-    center_xy: bool = False,
-    use_retrieved_pupil: bool = False,
+def pupil_to_psf(
+    pupil: np.ndarray,
+    geom: Geometry,
+    z: np.ndarray,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """Compute 3D intensity Point Spread Function.
+    """Compute 3D intensity PSF from complex pupil function.
 
-    Generates the 3D PSF by propagating the pupil function through
-    different focal planes using the angular spectrum method.
+    Uses ifft2 (DC at corner) convention. For centered PSF, use
+    pupil_to_psf_centered() instead.
 
     Args:
-        config: Optical system configuration.
-        pupil_data: Precomputed pupil quantities from compute_pupil_data().
-        focal_planes: 1D array of z-positions (in microns) for each plane.
-            z=0 is the focal plane, negative is toward objective,
-            positive is into sample.
-        emitter_z: Distance of point emitter from coverslip (microns).
-            Negative is into the sample. Used for refractive index
-            mismatch correction. Default is 0.0.
-        center_xy: If True, center the PSF in the middle of the image.
-            If False, PSF peak is at (0, 0). Default is False.
-        use_retrieved_pupil: If True, use pupil_data.pupil instead of
-            the ideal pupil. Default is False.
+        pupil: Complex pupil function, shape (ny, nx).
+        geom: Precomputed geometry from make_geometry().
+        z: Axial positions in μm, shape (nz,). Use fft_coords() for
+            FFT-compatible z-coordinates.
+        normalize: If True, normalize PSF to sum to 1. Default True.
 
     Returns:
-        3D array of shape (nz, ny, nx) containing the intensity PSF,
-        normalized to sum to 1.
+        Intensity PSF, shape (nz, ny, nx). DC (peak for in-focus) at
+        corner (0, 0) of each z-slice.
+
+    Physics:
+        PSF_A(x,y,z) = IFFT{ P(kx,ky) * exp(2πi * kz * z) }
+        PSF(x,y,z) = |PSF_A|²
 
     Example:
-        >>> focal_planes = np.linspace(-2, 2, 41)  # 41 planes, 100nm spacing
-        >>> psf = compute_psf(config, pupil_data, focal_planes)
+        >>> from deconlib import fft_coords
+        >>> z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
+        >>> psf = pupil_to_psf(pupil, geom, z)
     """
-    nz = len(focal_planes)
-    focal_planes = np.asarray(focal_planes).reshape(nz, 1, 1)
+    z = np.atleast_1d(z)
+    nz = len(z)
 
-    # Select pupil to use
-    if use_retrieved_pupil and pupil_data.pupil is not None:
-        pupil = pupil_data.pupil
-    else:
-        pupil = pupil_data.pupil0
+    # Broadcast: z[:, None, None] against kz[None, :, :]
+    # Result shape: (nz, ny, nx)
+    defocus_phase = 2j * np.pi * geom.kz * z[:, np.newaxis, np.newaxis]
 
-    # Compute defocus phase term: exp(i * 2π * z * kz)
-    defocus_phase = 1j * 2.0 * np.pi * focal_planes * pupil_data.kz
+    # Apply defocus to pupil (broadcasting handles (ny,nx) * (nz,ny,nx))
+    pupil_defocused = pupil * np.exp(defocus_phase)
 
-    # Add centering shift if requested
-    if center_xy:
-        sx = (config.nx * config.dx) / 2.0
-        sy = (config.ny * config.dy) / 2.0
-        shift_phase = -1j * 2.0 * np.pi * (sx * pupil_data.kx + sy * pupil_data.ky)
-        defocus_phase = defocus_phase + shift_phase
+    # 2D IFFT of each z-plane (pupil is in frequency space, PSF in real space)
+    # DC remains at corner (0, 0)
+    psf_amplitude = np.fft.ifft2(pupil_defocused, axes=(-2, -1))
 
-    # Compute refractive index mismatch optical path difference
-    if emitter_z != 0.0:
-        opd = emitter_z * (
-            config.ns * np.cos(pupil_data.theta_2)
-            - config.ni * np.cos(pupil_data.theta_1)
-        )
-        opd_phase = 1j * 2.0 * np.pi * opd / config.wavelength
-        pupil_modifier = pupil_data.amplitude * np.exp(opd_phase)
-    else:
-        pupil_modifier = pupil_data.amplitude
+    # Intensity is |amplitude|²
+    psf = np.abs(psf_amplitude) ** 2
 
-    # Broadcast pupil to all z-planes and apply modifiers
-    pupil_3d = pupil[np.newaxis, :, :] * pupil_modifier
-    pupil_3d = pupil_3d * np.exp(defocus_phase)
+    if normalize:
+        total = psf.sum()
+        if total > 0:
+            psf = psf / total
 
-    # Compute amplitude PSF via inverse FFT
-    # (pupil is in frequency space, PSF is in real space)
-    psf_amplitude = np.fft.ifft2(pupil_3d)
-
-    # Intensity is |amplitude|^2
-    psf_intensity = np.abs(psf_amplitude) ** 2
-
-    # Normalize to sum to 1
-    return psf_intensity / np.sum(psf_intensity)
+    return psf
 
 
-def compute_psf_confocal(
-    config: OpticalConfig,
-    pupil_data: PupilData,
-    focal_planes: np.ndarray,
-    emitter_z: float = 0.0,
-    center_xy: bool = False,
-    use_retrieved_pupil: bool = False,
+def pupil_to_psf_centered(
+    pupil: np.ndarray,
+    geom: Geometry,
+    z: np.ndarray,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """Compute 3D confocal PSF (widefield PSF squared).
+    """Compute 3D PSF with peak centered in image.
 
-    This is an approximation of the confocal PSF as the square of
-    the widefield PSF, valid when excitation and detection PSFs
-    are identical.
+    Same as pupil_to_psf() but shifts output so DC (peak for in-focus
+    plane) is at array center. Useful for visualization.
 
     Args:
-        config: Optical system configuration.
-        pupil_data: Precomputed pupil quantities.
-        focal_planes: 1D array of z-positions (microns).
-        emitter_z: Emitter distance from coverslip (microns).
-        center_xy: If True, center the PSF.
-        use_retrieved_pupil: If True, use retrieved pupil.
+        pupil: Complex pupil function, shape (ny, nx).
+        geom: Precomputed geometry from make_geometry().
+        z: Axial positions in μm, shape (nz,).
+        normalize: If True, normalize PSF to sum to 1. Default True.
 
     Returns:
-        3D confocal PSF, normalized to sum to 1.
+        Intensity PSF, shape (nz, ny, nx), with peak at center.
     """
-    psf_wf = compute_psf(
-        config,
-        pupil_data,
-        focal_planes,
-        emitter_z=emitter_z,
-        center_xy=center_xy,
-        use_retrieved_pupil=use_retrieved_pupil,
-    )
+    psf = pupil_to_psf(pupil, geom, z, normalize=normalize)
+    return np.fft.fftshift(psf, axes=(-2, -1))
 
-    psf_confocal = psf_wf ** 2
-    return psf_confocal / np.sum(psf_confocal)
+
+def compute_otf(
+    pupil: np.ndarray,
+    geom: Geometry,
+    z: np.ndarray,
+    normalize: bool = True,
+) -> np.ndarray:
+    """Compute 3D Optical Transfer Function from pupil.
+
+    The OTF is the Fourier transform of the PSF, equivalent to the
+    autocorrelation of the pupil function.
+
+    Args:
+        pupil: Complex pupil function, shape (ny, nx).
+        geom: Precomputed geometry from make_geometry().
+        z: Axial positions in μm, shape (nz,).
+        normalize: If True, normalize OTF so OTF[0,0,0] = 1. Default True.
+
+    Returns:
+        Complex OTF, shape (nz, ny, nx). DC at corner (0, 0).
+    """
+    # PSF with DC at corner
+    psf = pupil_to_psf(pupil, geom, z, normalize=False)
+
+    # OTF is FFT of PSF
+    otf = np.fft.fft2(psf, axes=(-2, -1))
+
+    if normalize:
+        dc = otf[..., 0, 0]
+        # Normalize each z-plane independently
+        otf = otf / np.abs(dc[:, np.newaxis, np.newaxis])
+
+    return otf

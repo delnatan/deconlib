@@ -1,12 +1,11 @@
 """Phase retrieval algorithms for pupil function recovery."""
 
 from dataclasses import dataclass
-from typing import Literal, Callable
+from typing import Callable, Literal
 
 import numpy as np
 
-from ..core.optics import OpticalConfig
-from ..core.pupil import PupilData
+from ..core.optics import Geometry
 
 __all__ = ["retrieve_phase", "PhaseRetrievalResult"]
 
@@ -17,9 +16,9 @@ class PhaseRetrievalResult:
 
     Attributes:
         pupil: Retrieved complex pupil function.
-        mse_history: List of mean squared error at each iteration.
-        support_error_history: List of support constraint violation at each iteration.
-        converged: Whether the algorithm converged (MSE below tolerance).
+        mse_history: Mean squared error at each iteration.
+        support_error_history: Support constraint violation at each iteration.
+        converged: Whether algorithm converged (MSE below tolerance).
         iterations: Number of iterations performed.
     """
 
@@ -31,153 +30,123 @@ class PhaseRetrievalResult:
 
 
 def retrieve_phase(
-    config: OpticalConfig,
-    pupil_data: PupilData,
-    observed_magnitudes: np.ndarray,
+    measured_psf: np.ndarray,
     z_planes: np.ndarray,
-    max_iter: int = 500,
-    method: Literal["ER", "HIO"] = "ER",
-    beta: float = 0.95,
-    center_xy: bool = True,
+    geom: Geometry,
+    max_iter: int = 100,
+    method: Literal["GS", "ER", "HIO"] = "GS",
+    beta: float = 0.9,
     tol: float = 1e-8,
     callback: Callable[[int, float, float], None] | None = None,
 ) -> PhaseRetrievalResult:
-    """Retrieve pupil phase from measured PSF magnitudes.
+    """Retrieve pupil phase from measured PSF intensity images.
 
-    Implements iterative phase retrieval using either Error Reduction (ER)
-    or Hybrid Input-Output (HIO) algorithms based on Fienup's work.
+    Implements iterative phase retrieval using Gerchberg-Saxton (GS),
+    Error Reduction (ER), or Hybrid Input-Output (HIO) algorithms.
 
-    The magnitude data should be sqrt(intensity), not raw intensity.
+    The algorithm alternates between:
+    1. Fourier magnitude constraint (match measured √intensity)
+    2. Pupil support constraint (zero outside NA)
 
     Args:
-        config: Optical system configuration.
-        pupil_data: Precomputed pupil quantities.
-        observed_magnitudes: 3D array of shape (nz, ny, nx) containing
-            the square root of measured PSF intensities.
-        z_planes: 1D array of z-positions corresponding to each plane
-            in observed_magnitudes.
-        max_iter: Maximum number of iterations. Default is 500.
-        method: Algorithm to use - "ER" (Error Reduction) or "HIO"
-            (Hybrid Input-Output). Default is "ER".
-        beta: Relaxation parameter for HIO algorithm (0 < beta < 1).
-            Typical values are 0.9-0.99. Default is 0.95.
-        center_xy: If True, the input PSF data is assumed to be centered
-            in the image (peak at nx/2, ny/2). If False, peak is at (0, 0).
-            Default is True.
-        tol: Convergence tolerance for MSE. Default is 1e-8.
+        measured_psf: Measured intensity PSF, shape (nz, ny, nx).
+            Should have DC at corner (from pupil_to_psf convention).
+        z_planes: z-positions of each PSF slice (μm), shape (nz,).
+        geom: Precomputed geometry from make_geometry().
+        max_iter: Maximum iterations. Default 100.
+        method: Algorithm variant:
+            - "GS": Gerchberg-Saxton (simple averaging)
+            - "ER": Error Reduction (same as GS, zero outside support)
+            - "HIO": Hybrid Input-Output (feedback outside support)
+            Default is "GS".
+        beta: Relaxation parameter for HIO (0 < beta < 1). Default 0.9.
+        tol: Convergence tolerance for MSE. Default 1e-8.
         callback: Optional function called each iteration with
-            (iteration, mse, support_error). Useful for progress display.
+            (iteration, mse, support_error).
 
     Returns:
-        PhaseRetrievalResult containing the retrieved pupil and diagnostics.
+        PhaseRetrievalResult with retrieved pupil and diagnostics.
 
     Example:
-        >>> # Load measured PSF data
-        >>> psf_measured = load_psf_data()  # shape (nz, ny, nx)
-        >>> magnitudes = np.sqrt(psf_measured)
-        >>> z_planes = np.linspace(-2, 2, nz)
-        >>>
-        >>> result = retrieve_phase(
-        ...     config, pupil_data, magnitudes, z_planes,
-        ...     method="HIO", max_iter=1000
-        ... )
+        >>> # Generate PSF from known pupil
+        >>> psf = pupil_to_psf(true_pupil, geom, z_planes)
+        >>> # Retrieve
+        >>> result = retrieve_phase(psf, z_planes, geom, max_iter=50)
         >>> retrieved_pupil = result.pupil
     """
     nz = len(z_planes)
     z_planes = np.asarray(z_planes).reshape(nz, 1, 1)
 
-    if observed_magnitudes.shape[0] != nz:
+    if measured_psf.shape[0] != nz:
         raise ValueError(
-            f"Number of z-planes in data ({observed_magnitudes.shape[0]}) "
-            f"must match z_planes array ({nz})"
+            f"PSF has {measured_psf.shape[0]} z-planes but z_planes has {nz}"
         )
 
-    # Total intensity for normalization
-    sum_intensity = np.sum(observed_magnitudes ** 2)
+    # Measured magnitudes (sqrt of intensity)
+    measured_mag = np.sqrt(np.maximum(0, measured_psf))
 
-    # Compute defocus propagation terms
-    defocus_phase = 1j * 2.0 * np.pi * z_planes * pupil_data.kz
+    # Total intensity for MSE normalization
+    total_intensity = np.sum(measured_psf)
 
-    # Add centering phase if data is centered
-    if center_xy:
-        sx = (config.nx * config.dx) / 2.0
-        sy = (config.ny * config.dy) / 2.0
-        shift_phase = -1j * 2.0 * np.pi * (sx * pupil_data.kx + sy * pupil_data.ky)
-        defocus_phase = defocus_phase + shift_phase
+    # Precompute defocus propagation operators
+    defocus_phase = 2j * np.pi * z_planes * geom.kz
+    propagate_forward = np.exp(defocus_phase)  # pupil -> PSF plane
+    propagate_backward = np.exp(-defocus_phase)  # PSF plane -> pupil
 
-    # Precompute propagation operators
-    propagate_forward = np.exp(defocus_phase)  # pupil -> PSF planes
-    propagate_backward = np.exp(-defocus_phase)  # PSF planes -> pupil
+    # Support mask
+    mask = geom.mask.astype(bool)
 
-    # Support masks
-    mask = pupil_data.mask
-    within_support = mask.astype(bool)
-    outside_support = ~within_support
-
-    # Initialize pupil with random phase
-    rng = np.random.default_rng()
-    init_phase = (rng.random(mask.shape) - 0.5) * np.pi / 2.0
-    pupil = pupil_data.pupil0 * np.exp(1j * init_phase)
+    # Initialize pupil with random phase inside support
+    rng = np.random.default_rng(42)  # Reproducible
+    init_phase = (rng.random(mask.shape) - 0.5) * np.pi
+    pupil = mask.astype(np.complex128) * np.exp(1j * init_phase)
 
     # Tracking
     mse_history = []
     support_error_history = []
     converged = False
+    eps = np.finfo(np.float64).eps
 
     for iteration in range(1, max_iter + 1):
-        # Forward propagation: pupil -> amplitude PSF at each z-plane
-        g = pupil[np.newaxis, :, :] * propagate_forward
-        psf_amplitude = np.fft.ifft2(g)
+        # Forward: pupil -> PSF amplitude at all z-planes
+        psf_amplitude = np.fft.ifft2(pupil * propagate_forward, axes=(-2, -1))
 
-        # Compute intensity error
-        amplitude_measured = observed_magnitudes
-        amplitude_computed = np.abs(psf_amplitude)
-        error = np.abs(amplitude_computed - amplitude_measured)
-        mse = np.sum(error ** 2) / sum_intensity
+        # Replace magnitude with measured, keep phase
+        psf_corrected = measured_mag * psf_amplitude / np.maximum(np.abs(psf_amplitude), eps)
+
+        # Backward: corrected PSF -> pupil estimates, then average
+        pupil_avg = (np.fft.fft2(psf_corrected, axes=(-2, -1)) * propagate_backward).mean(axis=0)
+
+        # Compute MSE across all z-planes
+        mse = np.sum((np.abs(psf_amplitude) ** 2 - measured_psf) ** 2) / (total_intensity + eps)
         mse_history.append(float(mse))
 
-        # Replace amplitude with measured, keep phase
-        # Project onto constraint: |f| = measured
-        unit_phase = psf_amplitude / np.maximum(amplitude_computed, np.finfo(float).eps)
-        psf_corrected = amplitude_measured * unit_phase
-
-        # Backward propagation: corrected PSF -> pupil
-        g_prime = np.fft.fft2(psf_corrected)
-        g_prime = g_prime * propagate_backward
-
-        # Average over z-planes
-        g_prime_avg = g_prime.mean(axis=0)
-
         # Compute support constraint violation
-        violation = g_prime_avg * outside_support
-        violation_energy = np.sum(np.abs(violation) ** 2)
-        total_energy = np.sum(np.abs(g_prime_avg) ** 2)
-        support_error = violation_energy / max(total_energy, np.finfo(float).eps)
+        support_error = np.sum(np.abs(pupil_avg[~mask]) ** 2) / (np.sum(np.abs(pupil_avg) ** 2) + eps)
         support_error_history.append(float(support_error))
 
-        # Call progress callback if provided
+        # Callback
         if callback is not None:
             callback(iteration, float(mse), float(support_error))
 
         # Check convergence
         if mse < tol:
             converged = True
-            pupil = g_prime_avg * within_support
+            pupil = pupil_avg * mask
             break
 
-        # Apply object-domain constraint (support projection)
-        if method == "ER":
-            # Error Reduction: zero outside support
-            pupil = g_prime_avg * within_support
+        # Apply support constraint based on method
+        if method in ("GS", "ER"):
+            # Zero outside support
+            pupil = pupil_avg * mask
         elif method == "HIO":
             # Hybrid Input-Output: feedback term outside support
-            feedback = pupil - beta * g_prime_avg
-            pupil = np.where(within_support, g_prime_avg, feedback)
+            pupil = np.where(mask, pupil_avg, pupil - beta * pupil_avg)
         else:
-            raise ValueError(f"Unknown method: {method}. Use 'ER' or 'HIO'.")
+            raise ValueError(f"Unknown method: {method}. Use 'GS', 'ER', or 'HIO'.")
 
     # Final support projection
-    pupil = pupil * within_support
+    pupil = pupil * mask
 
     return PhaseRetrievalResult(
         pupil=pupil,
