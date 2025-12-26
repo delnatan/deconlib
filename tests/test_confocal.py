@@ -470,3 +470,103 @@ class TestPhysicalProperties:
 
         # Confocal should have narrower lateral profile
         assert fwhm_confocal <= fwhm_widefield
+
+
+class TestAberratedConfocalPSF:
+    """Tests for confocal PSF with aberrations."""
+
+    def test_aberrations_parameter_accepted(self):
+        """Test that aberrations parameter is accepted."""
+        from deconlib import IndexMismatch
+
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            ns=1.365,
+            pinhole_radius_au=2.0,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        # Should not raise
+        psf = compute_confocal_psf(
+            optics, grid, z, aberrations=[IndexMismatch(depth=4.0)]
+        )
+        assert psf.shape == (1, 64, 64)
+        assert np.all(psf >= 0)
+
+    def test_index_mismatch_changes_psf(self):
+        """Test that index mismatch aberration changes the PSF."""
+        from deconlib import IndexMismatch
+
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            ns=1.365,  # Different from ni
+            pinhole_radius_au=2.0,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.linspace(-2, 2, 21)
+
+        # Unaberrated PSF
+        psf_unaberrated = compute_confocal_psf(optics, grid, z)
+
+        # Aberrated PSF (4 μm deep)
+        psf_aberrated = compute_confocal_psf(
+            optics, grid, z, aberrations=[IndexMismatch(depth=4.0)]
+        )
+
+        # PSFs should be different
+        assert not np.allclose(psf_unaberrated, psf_aberrated)
+
+        # Aberrated PSF should have lower peak (spread out due to aberration)
+        assert psf_aberrated.max() < psf_unaberrated.max()
+
+    def test_spinning_disk_with_aberrations(self):
+        """Test spinning disk PSF with aberrations."""
+        from deconlib import IndexMismatch
+
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        psf = compute_spinning_disk_psf(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            ns=1.365,
+            magnification=60.0,
+            grid=grid,
+            z=z,
+            aberrations=[IndexMismatch(depth=4.0)],
+        )
+        assert psf.shape == (1, 64, 64)
+        assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
+
+    def test_deeper_aberration_more_degraded(self):
+        """Test that deeper imaging causes more aberration."""
+        from deconlib import IndexMismatch
+
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            ns=1.365,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        psf_shallow = compute_confocal_psf(
+            optics, grid, z, aberrations=[IndexMismatch(depth=2.0)]
+        )
+        psf_deep = compute_confocal_psf(
+            optics, grid, z, aberrations=[IndexMismatch(depth=10.0)]
+        )
+
+        # Deeper imaging = more aberration = lower peak
+        assert psf_deep.max() < psf_shallow.max()

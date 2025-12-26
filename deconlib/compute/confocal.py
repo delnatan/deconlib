@@ -19,10 +19,11 @@ References:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
+from ..aberrations.base import Aberration, apply_aberrations
 from ..core.optics import Geometry, Grid, Optics, make_geometry
 from ..core.pupil import make_pupil
 from .psf import pupil_to_psf
@@ -231,6 +232,7 @@ def compute_confocal_psf(
     z: np.ndarray,
     normalize: bool = True,
     include_stokes_shift: bool = True,
+    aberrations: Optional[List[Aberration]] = None,
 ) -> np.ndarray:
     """Compute 3D confocal PSF.
 
@@ -248,12 +250,15 @@ def compute_confocal_psf(
         include_stokes_shift: If True, use different wavelengths for
             excitation and emission. If False, use emission wavelength
             for both (simpler, sometimes used for approximation).
+        aberrations: Optional list of Aberration objects to apply to both
+            excitation and emission pupils. Common aberrations include
+            IndexMismatch for spherical aberration from RI mismatch.
 
     Returns:
         3D intensity PSF, shape (nz, ny, nx). DC at corner.
 
     Example:
-        >>> from deconlib import Grid, fft_coords
+        >>> from deconlib import Grid, fft_coords, IndexMismatch
         >>> from deconlib.compute.confocal import ConfocalOptics, compute_confocal_psf
         >>>
         >>> optics = ConfocalOptics(
@@ -261,11 +266,15 @@ def compute_confocal_psf(
         ...     wavelength_em=0.525,
         ...     na=1.4,
         ...     ni=1.515,
-        ...     pinhole_au=1.0,
+        ...     ns=1.365,  # sample RI different from immersion
+        ...     pinhole_radius_au=2.0,
         ... )
         >>> grid = Grid(shape=(256, 256), spacing=(0.05, 0.05))
         >>> z = fft_coords(n=64, spacing=0.1)
-        >>> psf = compute_confocal_psf(optics, grid, z)
+        >>>
+        >>> # PSF with spherical aberration from 4μm depth
+        >>> psf = compute_confocal_psf(optics, grid, z,
+        ...                            aberrations=[IndexMismatch(depth=4.0)])
     """
     z = np.atleast_1d(z)
 
@@ -283,6 +292,11 @@ def compute_confocal_psf(
     # Create geometry for emission
     geom_em = make_geometry(grid, em_optics)
     pupil_em = make_pupil(geom_em)
+
+    # Apply aberrations if provided
+    if aberrations:
+        pupil_exc = apply_aberrations(pupil_exc, geom_exc, exc_optics, aberrations)
+        pupil_em = apply_aberrations(pupil_em, geom_em, em_optics, aberrations)
 
     # Compute excitation PSF (DC at corner)
     psf_exc = pupil_to_psf(pupil_exc, geom_exc, z, normalize=False)
@@ -322,6 +336,7 @@ def compute_confocal_psf_centered(
     z: np.ndarray,
     normalize: bool = True,
     include_stokes_shift: bool = True,
+    aberrations: Optional[List[Aberration]] = None,
 ) -> np.ndarray:
     """Compute 3D confocal PSF with peak centered in image.
 
@@ -334,12 +349,13 @@ def compute_confocal_psf_centered(
         z: Axial positions in μm.
         normalize: If True, normalize PSF to sum to 1.
         include_stokes_shift: If True, use different wavelengths.
+        aberrations: Optional list of Aberration objects.
 
     Returns:
         3D intensity PSF, shape (nz, ny, nx), with peak at center.
     """
     psf = compute_confocal_psf(
-        confocal_optics, grid, z, normalize, include_stokes_shift
+        confocal_optics, grid, z, normalize, include_stokes_shift, aberrations
     )
     return np.fft.fftshift(psf, axes=(-2, -1))
 
@@ -356,6 +372,7 @@ def compute_spinning_disk_psf(
     grid: Grid = None,
     z: np.ndarray = None,
     normalize: bool = True,
+    aberrations: Optional[List[Aberration]] = None,
 ) -> np.ndarray:
     """Compute PSF for spinning disk confocal microscope.
 
@@ -375,17 +392,23 @@ def compute_spinning_disk_psf(
         grid: Spatial sampling. Default: 256×256 at Nyquist spacing.
         z: Axial positions (μm). Default: ±2 μm range.
         normalize: If True, normalize PSF to sum to 1.
+        aberrations: Optional list of Aberration objects (e.g., IndexMismatch).
 
     Returns:
         3D intensity PSF, shape (nz, ny, nx). DC at corner.
 
     Example:
+        >>> from deconlib import IndexMismatch
         >>> # 60× oil objective, 488nm excitation, GFP emission
+        >>> # with spherical aberration from 4μm depth
         >>> psf = compute_spinning_disk_psf(
         ...     wavelength_exc=0.488,
         ...     wavelength_em=0.525,
         ...     na=1.4,
+        ...     ni=1.515,
+        ...     ns=1.365,
         ...     magnification=60.0,
+        ...     aberrations=[IndexMismatch(depth=4.0)],
         ... )
     """
     if ns is None:
@@ -421,7 +444,9 @@ def compute_spinning_disk_psf(
 
         z = fft_coords(n=64, spacing=0.1)
 
-    return compute_confocal_psf(confocal_optics, grid, z, normalize=normalize)
+    return compute_confocal_psf(
+        confocal_optics, grid, z, normalize=normalize, aberrations=aberrations
+    )
 
 
 def compute_spinning_disk_psf_centered(
@@ -436,6 +461,7 @@ def compute_spinning_disk_psf_centered(
     grid: Grid = None,
     z: np.ndarray = None,
     normalize: bool = True,
+    aberrations: Optional[List[Aberration]] = None,
 ) -> np.ndarray:
     """Compute spinning disk PSF with peak centered.
 
@@ -456,5 +482,6 @@ def compute_spinning_disk_psf_centered(
         grid=grid,
         z=z,
         normalize=normalize,
+        aberrations=aberrations,
     )
     return np.fft.fftshift(psf, axes=(-2, -1))
