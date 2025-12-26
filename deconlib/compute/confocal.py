@@ -45,27 +45,41 @@ class ConfocalOptics:
 
     All physical dimensions are in microns.
 
+    Pinhole can be specified in several ways (in order of priority):
+    1. pinhole_radius_au: Pinhole RADIUS in Airy units (as in Andor metadata)
+    2. pinhole_au: Pinhole DIAMETER in Airy units (traditional convention)
+    3. pinhole_radius: Back-projected pinhole radius in μm
+
     Attributes:
         wavelength_exc: Excitation wavelength (μm).
         wavelength_em: Emission wavelength (μm).
         na: Numerical aperture of the objective.
         ni: Refractive index of immersion medium.
         ns: Refractive index of sample medium. Defaults to ni.
-        pinhole_au: Pinhole diameter in Airy units (AU). 1 AU is optimal.
-            If specified, overrides pinhole_radius.
+        pinhole_radius_au: Pinhole RADIUS in Airy units. This matches the
+            format used by Andor Dragonfly metadata (SpinningDiskPinholeRadius).
+        pinhole_au: Pinhole DIAMETER in Airy units (AU). 1 AU is typical.
         pinhole_radius: Back-projected pinhole radius at sample plane (μm).
-            Used directly if pinhole_au is not specified.
         magnification: Total system magnification (objective × relay optics).
             Only needed if converting from physical pinhole size.
 
     Example:
-        >>> # Typical spinning disk (Yokogawa CSU)
+        >>> # Using Andor-style metadata (radius in AU)
         >>> optics = ConfocalOptics(
         ...     wavelength_exc=0.488,
         ...     wavelength_em=0.525,
         ...     na=1.4,
         ...     ni=1.515,
-        ...     pinhole_au=1.0,  # 1 Airy unit
+        ...     pinhole_radius_au=2.0,  # From SpinningDiskPinholeRadius
+        ... )
+        >>>
+        >>> # Traditional diameter specification
+        >>> optics = ConfocalOptics(
+        ...     wavelength_exc=0.488,
+        ...     wavelength_em=0.525,
+        ...     na=1.4,
+        ...     ni=1.515,
+        ...     pinhole_au=1.0,  # 1 Airy unit diameter
         ... )
     """
 
@@ -74,7 +88,8 @@ class ConfocalOptics:
     na: float
     ni: float
     ns: float = None
-    pinhole_au: float = None  # Pinhole in Airy units
+    pinhole_radius_au: float = None  # Pinhole RADIUS in Airy units (Andor style)
+    pinhole_au: float = None  # Pinhole DIAMETER in Airy units (traditional)
     pinhole_radius: float = None  # Back-projected radius in μm
     magnification: float = None
 
@@ -93,8 +108,10 @@ class ConfocalOptics:
                 f"Excitation wavelength ({self.wavelength_exc}) should be "
                 f"less than emission wavelength ({self.wavelength_em})"
             )
-        if self.pinhole_au is None and self.pinhole_radius is None:
-            # Default to 1 Airy unit
+        # Default to 1 Airy unit diameter if nothing specified
+        if (self.pinhole_radius_au is None and
+            self.pinhole_au is None and
+            self.pinhole_radius is None):
             object.__setattr__(self, "pinhole_au", 1.0)
 
     @property
@@ -120,17 +137,22 @@ class ConfocalOptics:
     def get_pinhole_radius(self) -> float:
         """Get back-projected pinhole radius in μm.
 
-        If pinhole_au is specified, converts to physical radius using
-        the emission wavelength and NA.
+        Converts from the specified pinhole format to physical radius.
+        Priority: pinhole_radius_au > pinhole_au > pinhole_radius
 
         Returns:
             Back-projected pinhole radius at sample plane (μm).
         """
-        if self.pinhole_au is not None:
-            # Airy disk radius = 0.61 * λ / NA
-            airy_radius = compute_airy_radius(self.wavelength_em, self.na)
-            return self.pinhole_au * airy_radius
-        return self.pinhole_radius
+        airy_radius = compute_airy_radius(self.wavelength_em, self.na)
+
+        if self.pinhole_radius_au is not None:
+            # Andor-style: radius in Airy units
+            return self.pinhole_radius_au * airy_radius
+        elif self.pinhole_au is not None:
+            # Traditional: diameter in Airy units → convert to radius
+            return (self.pinhole_au / 2.0) * airy_radius
+        else:
+            return self.pinhole_radius
 
 
 def compute_airy_radius(wavelength: float, na: float) -> float:

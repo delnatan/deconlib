@@ -43,7 +43,7 @@ class TestConfocalOptics:
         assert optics.pinhole_au == 1.0
 
     def test_explicit_pinhole_au(self):
-        """Test explicit pinhole in Airy units."""
+        """Test explicit pinhole diameter in Airy units."""
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
@@ -52,6 +52,20 @@ class TestConfocalOptics:
             pinhole_au=0.5,
         )
         assert optics.pinhole_au == 0.5
+
+    def test_pinhole_radius_au(self):
+        """Test pinhole radius in Airy units (Andor-style metadata)."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            pinhole_radius_au=2.0,  # From SpinningDiskPinholeRadius
+        )
+        assert optics.pinhole_radius_au == 2.0
+        # Radius should be 2 * Airy radius
+        airy_radius = compute_airy_radius(0.525, 1.4)
+        assert np.isclose(optics.get_pinhole_radius(), 2.0 * airy_radius)
 
     def test_exc_em_optics_properties(self):
         """Test excitation and emission Optics properties."""
@@ -71,17 +85,33 @@ class TestConfocalOptics:
         assert exc.ni == em.ni == 1.515
         assert exc.ns == em.ns == 1.334
 
-    def test_get_pinhole_radius(self):
-        """Test pinhole radius calculation."""
+    def test_get_pinhole_radius_from_diameter_au(self):
+        """Test pinhole radius calculation from diameter in AU."""
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=1.0,
+            pinhole_au=2.0,  # 2 AU diameter
         )
         radius = optics.get_pinhole_radius()
-        expected = compute_airy_radius(0.525, 1.4)
+        # Diameter of 2 AU → radius of 1 AU
+        airy_radius = compute_airy_radius(0.525, 1.4)
+        expected = 1.0 * airy_radius
+        assert np.isclose(radius, expected)
+
+    def test_get_pinhole_radius_from_radius_au(self):
+        """Test pinhole radius from radius in AU (Andor style)."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            pinhole_radius_au=1.5,  # 1.5 AU radius directly
+        )
+        radius = optics.get_pinhole_radius()
+        airy_radius = compute_airy_radius(0.525, 1.4)
+        expected = 1.5 * airy_radius
         assert np.isclose(radius, expected)
 
     def test_invalid_wavelength_order(self):
