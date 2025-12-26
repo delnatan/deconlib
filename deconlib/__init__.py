@@ -52,6 +52,17 @@ from .core import (
 # PSF/OTF computation
 from .compute import pupil_to_psf, pupil_to_psf_centered, compute_otf
 
+# Confocal/Spinning Disk PSF
+from .compute import (
+    ConfocalOptics,
+    compute_pinhole_function,
+    compute_airy_radius,
+    compute_confocal_psf,
+    compute_confocal_psf_centered,
+    compute_spinning_disk_psf,
+    compute_spinning_disk_psf_centered,
+)
+
 # Aberrations
 from .aberrations import (
     Aberration,
@@ -94,6 +105,14 @@ __all__ = [
     "pupil_to_psf",
     "pupil_to_psf_centered",
     "compute_otf",
+    # Confocal/Spinning Disk PSF
+    "ConfocalOptics",
+    "compute_pinhole_function",
+    "compute_airy_radius",
+    "compute_confocal_psf",
+    "compute_confocal_psf_centered",
+    "compute_spinning_disk_psf",
+    "compute_spinning_disk_psf_centered",
     # Aberrations
     "Aberration",
     "apply_aberrations",
