@@ -45,12 +45,20 @@ from .core import (
     make_pupil,
     apply_apodization,
     compute_amplitude_correction,
+    compute_fresnel_coefficients,
+    compute_vectorial_factors,
     # Legacy
     OpticalConfig,
 )
 
 # PSF/OTF computation
-from .compute import pupil_to_psf, pupil_to_psf_centered, compute_otf
+from .compute import (
+    pupil_to_psf,
+    pupil_to_psf_centered,
+    compute_otf,
+    pupil_to_vectorial_psf,
+    pupil_to_vectorial_psf_centered,
+)
 
 # Confocal/Spinning Disk PSF
 from .compute import (
@@ -100,11 +108,16 @@ __all__ = [
     "make_pupil",
     "apply_apodization",
     "compute_amplitude_correction",
+    "compute_fresnel_coefficients",
+    "compute_vectorial_factors",
     "OpticalConfig",  # Legacy
-    # PSF/OTF computation
+    # PSF/OTF computation (scalar)
     "pupil_to_psf",
     "pupil_to_psf_centered",
     "compute_otf",
+    # PSF computation (vectorial)
+    "pupil_to_vectorial_psf",
+    "pupil_to_vectorial_psf_centered",
     # Confocal/Spinning Disk PSF
     "ConfocalOptics",
     "compute_pinhole_function",
