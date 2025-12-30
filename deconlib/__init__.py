@@ -82,7 +82,7 @@ from .aberrations import (
 )
 
 # Phase retrieval
-from .algorithms import retrieve_phase, PhaseRetrievalResult
+from .algorithms import retrieve_phase, retrieve_phase_vectorial, PhaseRetrievalResult
 
 # Math utilities
 from .math import (
@@ -135,6 +135,7 @@ __all__ = [
     "ZernikeMode",
     # Phase retrieval
     "retrieve_phase",
+    "retrieve_phase_vectorial",
     "PhaseRetrievalResult",
     # Math utilities
     "fft_coords",

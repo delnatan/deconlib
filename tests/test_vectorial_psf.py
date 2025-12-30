@@ -10,6 +10,7 @@ from deconlib import (
     make_geometry,
     make_pupil,
     pupil_to_psf,
+    retrieve_phase_vectorial,
 )
 from deconlib.core.pupil import (
     compute_fresnel_coefficients,
@@ -300,3 +301,108 @@ class TestVectorialVsScalar:
         # Should be noticeably different
         diff = np.abs(psf_scalar - psf_vectorial).max()
         assert diff > 1e-6  # Non-trivial difference
+
+
+class TestVectorialPhaseRetrieval:
+    """Tests for vectorial phase retrieval."""
+
+    @pytest.fixture
+    def setup(self):
+        """Standard setup for phase retrieval tests."""
+        optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
+        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
+        geom = make_geometry(grid, optics)
+        pupil = make_pupil(geom)
+        z = fft_coords(n=16, spacing=0.2)
+        return pupil, geom, optics, z
+
+    def test_retrieval_from_ideal_psf(self, setup):
+        """Test retrieval from ideal (unaberrated) PSF converges."""
+        pupil, geom, optics, z = setup
+
+        # Generate PSF from ideal pupil
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        # Retrieve
+        result = retrieve_phase_vectorial(
+            psf, z, geom, optics, max_iter=50, method="GS"
+        )
+
+        # MSE should decrease
+        assert result.mse_history[-1] < result.mse_history[0]
+
+        # Retrieved pupil should be non-zero inside mask
+        assert np.sum(np.abs(result.pupil[geom.mask]) ** 2) > 0
+
+    def test_retrieval_methods(self, setup):
+        """Test that all methods (GS, ER, HIO) run without error."""
+        pupil, geom, optics, z = setup
+
+        # Generate PSF
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        for method in ["GS", "ER", "HIO"]:
+            result = retrieve_phase_vectorial(
+                psf, z, geom, optics, max_iter=10, method=method
+            )
+            assert len(result.mse_history) == 10
+            assert result.pupil.shape == geom.shape
+
+    def test_retrieval_result_structure(self, setup):
+        """Test that result has correct structure."""
+        pupil, geom, optics, z = setup
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        result = retrieve_phase_vectorial(
+            psf, z, geom, optics, max_iter=20
+        )
+
+        assert hasattr(result, "pupil")
+        assert hasattr(result, "mse_history")
+        assert hasattr(result, "support_error_history")
+        assert hasattr(result, "converged")
+        assert hasattr(result, "iterations")
+
+        assert result.pupil.shape == geom.shape
+        assert len(result.mse_history) == 20
+        assert len(result.support_error_history) == 20
+        assert result.iterations == 20
+
+    def test_callback_called(self, setup):
+        """Test that callback is called each iteration."""
+        pupil, geom, optics, z = setup
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        callback_count = [0]
+
+        def callback(iteration, mse, support_error):
+            callback_count[0] += 1
+
+        retrieve_phase_vectorial(
+            psf, z, geom, optics, max_iter=15, callback=callback
+        )
+
+        assert callback_count[0] == 15
+
+    def test_pupil_support_respected(self, setup):
+        """Test that retrieved pupil is zero outside NA support."""
+        pupil, geom, optics, z = setup
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        result = retrieve_phase_vectorial(
+            psf, z, geom, optics, max_iter=30
+        )
+
+        # Outside mask should be zero
+        assert np.allclose(result.pupil[~geom.mask], 0.0)
+
+    def test_z_planes_mismatch_error(self, setup):
+        """Test that mismatched z-planes raises error."""
+        pupil, geom, optics, z = setup
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
+
+        # Wrong number of z-planes
+        z_wrong = z[:5]
+
+        with pytest.raises(ValueError, match="z-planes"):
+            retrieve_phase_vectorial(psf, z_wrong, geom, optics)
