@@ -37,7 +37,6 @@ from .optics import (
     Grid,
     Geometry,
     make_geometry,
-    OpticalConfig,  # Legacy
 )
 
 # Pupil functions
@@ -87,7 +86,6 @@ __all__ = [
     "Grid",
     "Geometry",
     "make_geometry",
-    "OpticalConfig",
     # Pupil functions
     "make_pupil",
     "apply_apodization",

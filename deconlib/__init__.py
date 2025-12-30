@@ -51,7 +51,6 @@ from .psf import (
     Grid,
     Geometry,
     make_geometry,
-    OpticalConfig,  # Legacy
     # Pupil functions
     make_pupil,
     apply_apodization,
@@ -112,7 +111,6 @@ __all__ = [
     "make_pupil",
     "apply_apodization",
     "compute_amplitude_correction",
-    "OpticalConfig",  # Legacy
     # PSF/OTF computation
     "pupil_to_psf",
     "pupil_to_psf_centered",
