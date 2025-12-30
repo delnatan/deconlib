@@ -152,6 +152,7 @@ def pupil_to_vectorial_psf(
             - "isotropic": Incoherent average over x, y, z orientations (default)
             - "x", "y", "z": Single dipole along that axis
             - (theta, phi): Arbitrary orientation in radians (polar, azimuthal)
+              Uses coherent field summation for the fixed dipole.
         normalize: If True, normalize PSF to sum to 1. Default True.
 
     Returns:
@@ -161,14 +162,18 @@ def pupil_to_vectorial_psf(
         For each dipole orientation μ, the detected intensity is:
         I_μ = |Ex_μ|² + |Ey_μ|²
 
-        where Ex_μ = IFFT(Pupil * Apod * Defocus * M_μx)
-              Ey_μ = IFFT(Pupil * Apod * Defocus * M_μy)
+        For isotropic emitters (random orientations), intensities add incoherently:
+        I = (1/3) × (I_x + I_y + I_z)
 
-        M_μx, M_μy are the vectorial factors including Fresnel coefficients.
+        For fixed dipole at (θ, φ), fields add coherently:
+        Ex = μx·M_xx + μy·M_yx + μz·M_zx
+        Ey = μx·M_xy + μy·M_yy + μz·M_zy
+        I = |Ex|² + |Ey|²
 
     Example:
         >>> psf_iso = pupil_to_vectorial_psf(pupil, geom, optics, z)
         >>> psf_z = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="z")
+        >>> psf_tilted = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole=(np.pi/4, 0))
     """
     z = np.atleast_1d(z)
 
@@ -190,48 +195,49 @@ def pupil_to_vectorial_psf(
     # Defocused pupil: shape (nz, ny, nx)
     pupil_defocused = pupil_apod * defocus
 
-    # Determine which dipoles to use based on dipole parameter
-    if dipole == "isotropic":
-        # Use all three dipoles with equal weight
-        dipole_weights = np.array([1.0, 1.0, 1.0]) / 3.0
-        dipole_indices = [0, 1, 2]
-    elif dipole == "x":
-        dipole_weights = np.array([1.0])
-        dipole_indices = [0]
-    elif dipole == "y":
-        dipole_weights = np.array([1.0])
-        dipole_indices = [1]
-    elif dipole == "z":
-        dipole_weights = np.array([1.0])
-        dipole_indices = [2]
-    elif isinstance(dipole, tuple):
-        # Arbitrary orientation: (theta, phi) in radians
-        theta_d, phi_d = dipole
-        # Unit vector for dipole: μ = (sin θ cos φ, sin θ sin φ, cos θ)
-        mu_x = np.sin(theta_d) * np.cos(phi_d)
-        mu_y = np.sin(theta_d) * np.sin(phi_d)
-        mu_z = np.cos(theta_d)
-        # Weights for incoherent combination (intensity adds)
-        dipole_weights = np.array([mu_x**2, mu_y**2, mu_z**2])
-        dipole_indices = [0, 1, 2]
-    else:
-        raise ValueError(f"Unknown dipole type: {dipole}")
-
-    # Compute PSF by summing intensity contributions from each dipole
-    # Shape: (nz, ny, nx)
+    # Compute PSF based on dipole type
     psf = np.zeros((len(z),) + geom.shape, dtype=np.float64)
 
-    for idx, weight in zip(dipole_indices, dipole_weights):
-        # Get factors for this dipole: shape (2, ny, nx)
-        M_x = factors[idx, 0]  # dipole → Ex
-        M_y = factors[idx, 1]  # dipole → Ey
+    if dipole == "isotropic":
+        # Incoherent sum over x, y, z dipoles (random orientations)
+        for idx in range(3):
+            M_x = factors[idx, 0]
+            M_y = factors[idx, 1]
+            Ex = np.fft.ifft2(pupil_defocused * M_x, axes=(-2, -1))
+            Ey = np.fft.ifft2(pupil_defocused * M_y, axes=(-2, -1))
+            psf += (np.abs(Ex) ** 2 + np.abs(Ey) ** 2) / 3.0
 
-        # Apply factors and IFFT: pupil_defocused (nz, ny, nx) * M (ny, nx) → (nz, ny, nx)
+    elif dipole in ("x", "y", "z"):
+        # Single axis dipole
+        idx = {"x": 0, "y": 1, "z": 2}[dipole]
+        M_x = factors[idx, 0]
+        M_y = factors[idx, 1]
         Ex = np.fft.ifft2(pupil_defocused * M_x, axes=(-2, -1))
         Ey = np.fft.ifft2(pupil_defocused * M_y, axes=(-2, -1))
+        psf = np.abs(Ex) ** 2 + np.abs(Ey) ** 2
 
-        # Intensity from this dipole: |Ex|² + |Ey|²
-        psf += weight * (np.abs(Ex) ** 2 + np.abs(Ey) ** 2)
+    elif isinstance(dipole, tuple):
+        # Arbitrary fixed orientation: COHERENT field summation
+        theta_d, phi_d = dipole
+        # Dipole unit vector: μ = (sin θ cos φ, sin θ sin φ, cos θ)
+        mu = np.array([
+            np.sin(theta_d) * np.cos(phi_d),  # μx
+            np.sin(theta_d) * np.sin(phi_d),  # μy
+            np.cos(theta_d),                   # μz
+        ])
+
+        # Compute effective pupil for Ex and Ey by coherent sum over dipole components
+        # M_eff_x = μx·M_xx + μy·M_yx + μz·M_zx
+        # M_eff_y = μx·M_xy + μy·M_yy + μz·M_zy
+        M_eff_x = mu[0] * factors[0, 0] + mu[1] * factors[1, 0] + mu[2] * factors[2, 0]
+        M_eff_y = mu[0] * factors[0, 1] + mu[1] * factors[1, 1] + mu[2] * factors[2, 1]
+
+        Ex = np.fft.ifft2(pupil_defocused * M_eff_x, axes=(-2, -1))
+        Ey = np.fft.ifft2(pupil_defocused * M_eff_y, axes=(-2, -1))
+        psf = np.abs(Ex) ** 2 + np.abs(Ey) ** 2
+
+    else:
+        raise ValueError(f"Unknown dipole type: {dipole}")
 
     if normalize:
         total = psf.sum()

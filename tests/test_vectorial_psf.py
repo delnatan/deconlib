@@ -217,6 +217,36 @@ class TestVectorialPSF:
         assert psf.shape == (16, 64, 64)
         assert np.isclose(psf.sum(), 1.0, rtol=1e-6)
 
+    def test_tilted_dipole_asymmetry(self, setup):
+        """Tilted dipole should show clear asymmetry in xz plane."""
+        pupil, geom, optics, z = setup
+
+        # Dipole tilted 45° from z in xz plane
+        psf_tilted = pupil_to_vectorial_psf_centered(
+            pupil, geom, optics, z, dipole=(np.pi / 4, 0)
+        )
+
+        # For comparison: z-dipole (symmetric donut) and x-dipole
+        psf_z = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="z")
+        psf_x = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="x")
+
+        # At defocused planes, tilted dipole should be asymmetric in x
+        # (not symmetric like z-dipole or isotropic)
+        defocus_idx = len(z) // 4  # Above focus
+        center = 32
+
+        # Check asymmetry: values at +x and -x should differ
+        val_plus_x = psf_tilted[defocus_idx, center, center + 8]
+        val_minus_x = psf_tilted[defocus_idx, center, center - 8]
+
+        # Tilted dipole should show significant asymmetry (>10% difference)
+        asymmetry = np.abs(val_plus_x - val_minus_x) / (val_plus_x + val_minus_x + 1e-10)
+        assert asymmetry > 0.1, f"Expected asymmetry >10%, got {asymmetry:.1%}"
+
+        # Also verify tilted is different from both pure z and pure x
+        assert not np.allclose(psf_tilted, psf_z, rtol=0.1)
+        assert not np.allclose(psf_tilted, psf_x, rtol=0.1)
+
     def test_centered_vs_uncentered(self, setup):
         """Test that centered version is just fftshifted."""
         pupil, geom, optics, z = setup
