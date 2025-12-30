@@ -1,10 +1,10 @@
-"""Point Spread Function computation."""
+"""Widefield Point Spread Function computation."""
 
 import numpy as np
 
-from ..core.optics import Geometry, Optics
+from .optics import Geometry
 
-__all__ = ["pupil_to_psf", "pupil_to_psf_centered"]
+__all__ = ["pupil_to_psf", "pupil_to_psf_centered", "compute_otf"]
 
 
 def pupil_to_psf(
@@ -34,7 +34,7 @@ def pupil_to_psf(
         PSF(x,y,z) = |PSF_A|²
 
     Example:
-        >>> from deconlib import fft_coords
+        >>> from deconlib.utils import fft_coords
         >>> z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
         >>> psf = pupil_to_psf(pupil, geom, z)
     """

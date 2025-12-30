@@ -1,13 +1,19 @@
 """deconlib - Optical microscopy PSF computation and deconvolution library.
 
-A pure NumPy library for computing point spread functions (PSF),
-optical transfer functions (OTF), and performing phase retrieval
-for optical microscopy applications.
+A library for computing point spread functions (PSF), optical transfer
+functions (OTF), and performing image deconvolution for optical microscopy.
+
+The library is organized into three main modules:
+
+- **psf**: NumPy-based PSF/OTF computation for widefield and confocal microscopy
+- **deconvolution**: PyTorch-based image restoration algorithms
+- **utils**: Shared mathematical utilities (Fourier, Zernike, etc.)
 
 Example:
     >>> import numpy as np
-    >>> from deconlib import Optics, Grid, make_geometry, make_pupil
-    >>> from deconlib import pupil_to_psf, fft_coords
+    >>> from deconlib.psf import Optics, Grid, make_geometry, make_pupil
+    >>> from deconlib.psf import pupil_to_psf
+    >>> from deconlib.utils import fft_coords
     >>>
     >>> # Define optical system
     >>> optics = Optics(
@@ -34,26 +40,27 @@ Reference:
     fluorescence microscopy." Journal of Microscopy 216.1 (2004): 32-48.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
-# Core data structures (new API)
-from .core import (
+# =============================================================================
+# PSF Module - Core data structures and PSF computation
+# =============================================================================
+from .psf import (
+    # Core data structures
     Optics,
     Grid,
     Geometry,
     make_geometry,
+    OpticalConfig,  # Legacy
+    # Pupil functions
     make_pupil,
     apply_apodization,
     compute_amplitude_correction,
-    # Legacy
-    OpticalConfig,
-)
-
-# PSF/OTF computation
-from .compute import pupil_to_psf, pupil_to_psf_centered, compute_otf
-
-# Confocal/Spinning Disk PSF
-from .compute import (
+    # Widefield PSF/OTF
+    pupil_to_psf,
+    pupil_to_psf_centered,
+    compute_otf,
+    # Confocal/Spinning Disk PSF
     ConfocalOptics,
     compute_pinhole_function,
     compute_airy_radius,
@@ -61,23 +68,22 @@ from .compute import (
     compute_confocal_psf_centered,
     compute_spinning_disk_psf,
     compute_spinning_disk_psf_centered,
-)
-
-# Aberrations
-from .aberrations import (
+    # Aberrations
     Aberration,
     apply_aberrations,
     IndexMismatch,
     Defocus,
     ZernikeAberration,
     ZernikeMode,
+    # Phase retrieval
+    retrieve_phase,
+    PhaseRetrievalResult,
 )
 
-# Phase retrieval
-from .algorithms import retrieve_phase, PhaseRetrievalResult
-
-# Math utilities
-from .math import (
+# =============================================================================
+# Utils Module - Mathematical utilities
+# =============================================================================
+from .utils import (
     fft_coords,
     fourier_meshgrid,
     fftshift_1d,
@@ -89,10 +95,16 @@ from .math import (
     pad_to_shape,
 )
 
+# =============================================================================
+# Deconvolution Module - Import conditionally (requires PyTorch)
+# =============================================================================
+# Note: deconvolution module requires PyTorch, import explicitly:
+#   from deconlib.deconvolution import make_fft_convolver, solve_rl, solve_mem
+
 __all__ = [
     # Version
     "__version__",
-    # Core data structures
+    # Core data structures (psf module)
     "Optics",
     "Grid",
     "Geometry",
@@ -123,7 +135,7 @@ __all__ = [
     # Phase retrieval
     "retrieve_phase",
     "PhaseRetrievalResult",
-    # Math utilities
+    # Math utilities (utils module)
     "fft_coords",
     "fourier_meshgrid",
     "fftshift_1d",

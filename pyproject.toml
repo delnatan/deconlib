@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deconlib"
-version = "0.1.0"
+version = "0.3.0"
 description = "Optical microscopy PSF computation and deconvolution library"
 readme = "README.md"
 license = "MIT"
@@ -19,6 +19,7 @@ keywords = [
     "otf",
     "optics",
     "phase-retrieval",
+    "image-restoration",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -36,7 +37,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+deconv = [
+    "torch>=2.0",
+]
 dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+all = [
+    "torch>=2.0",
     "pytest>=7.0",
     "pytest-cov",
 ]

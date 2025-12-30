@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from ..core.optics import Geometry, Optics
+from ..optics import Geometry, Optics
 
 __all__ = ["Aberration", "apply_aberrations"]
 

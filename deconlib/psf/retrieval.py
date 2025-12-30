@@ -5,7 +5,7 @@ from typing import Callable, Literal
 
 import numpy as np
 
-from ..core.optics import Geometry
+from .optics import Geometry
 
 __all__ = ["retrieve_phase", "PhaseRetrievalResult"]
 

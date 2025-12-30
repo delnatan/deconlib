@@ -19,21 +19,23 @@ References:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
 
 import numpy as np
 
-from ..aberrations.base import Aberration, apply_aberrations
-from ..core.optics import Geometry, Grid, Optics, make_geometry
-from ..core.pupil import make_pupil
-from .psf import pupil_to_psf
+from .aberrations.base import Aberration, apply_aberrations
+from .optics import Geometry, Grid, Optics, make_geometry
+from .pupil import make_pupil
+from .widefield import pupil_to_psf
 
 __all__ = [
     "ConfocalOptics",
     "compute_pinhole_function",
     "compute_airy_radius",
     "compute_confocal_psf",
+    "compute_confocal_psf_centered",
     "compute_spinning_disk_psf",
+    "compute_spinning_disk_psf_centered",
 ]
 
 
@@ -258,8 +260,9 @@ def compute_confocal_psf(
         3D intensity PSF, shape (nz, ny, nx). DC at corner.
 
     Example:
-        >>> from deconlib import Grid, fft_coords, IndexMismatch
-        >>> from deconlib.compute.confocal import ConfocalOptics, compute_confocal_psf
+        >>> from deconlib.psf import Grid, ConfocalOptics, compute_confocal_psf
+        >>> from deconlib.psf.aberrations import IndexMismatch
+        >>> from deconlib.utils import fft_coords
         >>>
         >>> optics = ConfocalOptics(
         ...     wavelength_exc=0.488,
@@ -398,7 +401,7 @@ def compute_spinning_disk_psf(
         3D intensity PSF, shape (nz, ny, nx). DC at corner.
 
     Example:
-        >>> from deconlib import IndexMismatch
+        >>> from deconlib.psf.aberrations import IndexMismatch
         >>> # 60× oil objective, 488nm excitation, GFP emission
         >>> # with spherical aberration from 4μm depth
         >>> psf = compute_spinning_disk_psf(
@@ -440,7 +443,7 @@ def compute_spinning_disk_psf(
 
     # Default z range
     if z is None:
-        from ..math.fourier import fft_coords
+        from ..utils.fourier import fft_coords
 
         z = fft_coords(n=64, spacing=0.1)
 

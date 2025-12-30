@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from deconlib import Grid, fft_coords
-from deconlib.compute.confocal import (
+from deconlib.psf.confocal import (
     ConfocalOptics,
     compute_airy_radius,
     compute_confocal_psf,
