@@ -33,8 +33,10 @@ def pad_to_shape(
         ValueError: If output_shape is smaller than input in any dimension.
 
     Example:
-        >>> img = np.random.rand(64, 64)
-        >>> padded = pad_to_shape(img, (128, 128), mode="origin")
+        ```python
+        img = np.random.rand(64, 64)
+        padded = pad_to_shape(img, (128, 128), mode="origin")
+        ```
     """
     input_shape = img.shape
     ndim = len(input_shape)

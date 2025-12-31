@@ -40,9 +40,11 @@ def pupil_to_psf(
         PSF(x,y,z) = |PSF_A|²
 
     Example:
-        >>> from deconlib.utils import fft_coords
-        >>> z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
-        >>> psf = pupil_to_psf(pupil, geom, z)
+        ```python
+        from deconlib.utils import fft_coords
+        z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
+        psf = pupil_to_psf(pupil, geom, z)
+        ```
     """
     z = np.atleast_1d(z)
     nz = len(z)
@@ -145,9 +147,11 @@ def pupil_to_vectorial_psf(
         I = |Ex|² + |Ey|²
 
     Example:
-        >>> psf_iso = pupil_to_vectorial_psf(pupil, geom, optics, z)
-        >>> psf_z = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="z")
-        >>> psf_tilted = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole=(np.pi/4, 0))
+        ```python
+        psf_iso = pupil_to_vectorial_psf(pupil, geom, optics, z)
+        psf_z = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="z")
+        psf_tilted = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole=(np.pi/4, 0))
+        ```
     """
     # Import here to avoid circular import
     from .pupil import compute_vectorial_factors

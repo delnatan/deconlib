@@ -63,20 +63,22 @@ class ZernikeAberration(Aberration):
             - Array of coefficients (index j has coefficient coefficients[j])
 
     Example:
-        >>> # Add 0.5 rad of spherical aberration
-        >>> aberr = ZernikeAberration({ZernikeMode.SPHERICAL: 0.5})
-        >>>
-        >>> # Add multiple aberrations
-        >>> aberr = ZernikeAberration({
-        ...     ZernikeMode.DEFOCUS: 0.3,
-        ...     ZernikeMode.SPHERICAL: 0.5,
-        ...     ZernikeMode.COMA_X: -0.2,
-        ... })
-        >>>
-        >>> # Or use array form
-        >>> coeffs = np.zeros(15)
-        >>> coeffs[ZernikeMode.SPHERICAL] = 0.5
-        >>> aberr = ZernikeAberration(coeffs)
+        ```python
+        # Add 0.5 rad of spherical aberration
+        aberr = ZernikeAberration({ZernikeMode.SPHERICAL: 0.5})
+
+        # Add multiple aberrations
+        aberr = ZernikeAberration({
+            ZernikeMode.DEFOCUS: 0.3,
+            ZernikeMode.SPHERICAL: 0.5,
+            ZernikeMode.COMA_X: -0.2,
+        })
+
+        # Or use array form
+        coeffs = np.zeros(15)
+        coeffs[ZernikeMode.SPHERICAL] = 0.5
+        aberr = ZernikeAberration(coeffs)
+        ```
     """
 
     def __init__(self, coefficients: Union[Dict[Union[ZernikeMode, int], float], np.ndarray]):
