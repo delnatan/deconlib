@@ -4,8 +4,8 @@ MEM framework for image deconvolution with:
 - Poisson noise model (photon counting)
 - Exponential prior (sparsity, positivity)
 
-The algorithm solves a dual optimization problem using L-BFGS,
-then recovers the primal (image) solution.
+The algorithm solves a dual optimization problem using projected gradient
+descent, then recovers the primal (image) solution.
 
 Reference:
     Rioux et al. (2021). "The maximum entropy on the mean method for
@@ -19,7 +19,7 @@ import torch
 
 from .base import DeconvolutionResult
 
-__all__ = ["MEMProblem", "solve_mem", "dual_objective", "recover_primal"]
+__all__ = ["MEMProblem", "solve_mem", "dual_objective", "dual_gradient", "recover_primal"]
 
 
 @dataclass
@@ -46,7 +46,7 @@ class MEMProblem:
     beta: float
 
 
-def dual_objective(lam: torch.Tensor, prob: MEMProblem, eps: float = 1e-10) -> torch.Tensor:
+def dual_objective(lam: torch.Tensor, prob: MEMProblem) -> torch.Tensor:
     """Compute MEM dual objective D(λ).
 
     D(λ) = -Σ b_i log(1 - λ_i) - Σ log(β - (C^T λ)_i)
@@ -54,18 +54,44 @@ def dual_objective(lam: torch.Tensor, prob: MEMProblem, eps: float = 1e-10) -> t
     Args:
         lam: Dual variable, same shape as observed image.
         prob: MEMProblem specification.
-        eps: Small constant for numerical stability.
 
     Returns:
-        Scalar dual objective value.
+        Scalar dual objective value (or inf if constraints violated).
     """
     Ct_lam = prob.C_adj(lam)
 
-    # First term: -Σ b_i log(1 - λ_i)
-    term1 = -torch.sum(prob.b * torch.log(1 - lam + eps))
+    # Check constraints
+    term1_arg = 1.0 - lam
+    term2_arg = prob.beta - Ct_lam
 
-    # Second term: -Σ log(β - (C^T λ)_i)
-    term2 = -torch.sum(torch.log(prob.beta - Ct_lam + eps))
+    # Return inf if constraints violated
+    if torch.any(term1_arg <= 0) or torch.any(term2_arg <= 0):
+        return torch.tensor(float('inf'), device=lam.device, dtype=lam.dtype)
+
+    # Dual objective
+    term1 = -torch.sum(prob.b * torch.log(term1_arg))
+    term2 = -torch.sum(torch.log(term2_arg))
+
+    return term1 + term2
+
+
+def dual_gradient(lam: torch.Tensor, prob: MEMProblem) -> torch.Tensor:
+    """Compute gradient of the MEM dual objective.
+
+    ∇D(λ)_i = b_i / (1 - λ_i) + C [ 1 / (β - C^T λ) ]_i
+
+    Args:
+        lam: Dual variable.
+        prob: MEMProblem specification.
+
+    Returns:
+        Gradient tensor, same shape as lam.
+    """
+    Ct_lam = prob.C_adj(lam)
+
+    # Gradient terms
+    term1 = prob.b / (1.0 - lam)
+    term2 = prob.C(1.0 / (prob.beta - Ct_lam))
 
     return term1 + term2
 
@@ -86,26 +112,57 @@ def recover_primal(lam: torch.Tensor, prob: MEMProblem) -> torch.Tensor:
     return 1.0 / (prob.beta - Ct_lam)
 
 
+def _project_dual(lam: torch.Tensor, prob: MEMProblem, margin: float = 0.01) -> torch.Tensor:
+    """Project dual variable onto feasible region.
+
+    Constraints:
+        - λ_i < 1  →  clamp to 1 - margin
+        - (C^T λ)_i < β  →  scale down if needed
+
+    Args:
+        lam: Dual variable to project.
+        prob: MEMProblem specification.
+        margin: Safety margin from constraint boundaries.
+
+    Returns:
+        Projected dual variable.
+    """
+    # First constraint: λ < 1
+    lam = torch.clamp(lam, max=1.0 - margin)
+
+    # Second constraint: C^T λ < β
+    # This is harder to project exactly, so we use scaling
+    Ct_lam = prob.C_adj(lam)
+    max_Ct_lam = torch.max(Ct_lam)
+
+    if max_Ct_lam >= prob.beta - margin:
+        # Scale down λ to satisfy constraint
+        scale = (prob.beta - margin) / (max_Ct_lam + 1e-10)
+        lam = lam * scale * 0.9  # Extra safety factor
+
+    return lam
+
+
 def solve_mem(
     prob: MEMProblem,
     max_iter: int = 100,
-    lr: float = 1.0,
+    lr: float = 0.01,
     tol: float = 1e-6,
     verbose: bool = False,
     callback: Optional[Callable[[int, float, torch.Tensor], None]] = None,
 ) -> DeconvolutionResult:
-    """Solve MEM deconvolution using L-BFGS optimization.
+    """Solve MEM deconvolution using projected gradient descent.
 
-    Optimizes the dual problem, then recovers the primal solution.
+    Optimizes the dual problem with projection to maintain feasibility,
+    then recovers the primal solution.
 
     Args:
         prob: MEMProblem specification with observed data and operators.
-        max_iter: Maximum number of L-BFGS outer iterations. Each outer
-            iteration runs up to 20 L-BFGS inner iterations.
-        lr: Learning rate (step size) for L-BFGS. Default 1.0.
-        tol: Convergence tolerance for loss change. Default 1e-6.
+        max_iter: Maximum number of iterations.
+        lr: Learning rate (step size). Default 0.01.
+        tol: Convergence tolerance for relative loss change. Default 1e-6.
         verbose: If True, print progress. Default False.
-        callback: Optional function called each outer iteration with
+        callback: Optional function called each iteration with
             (iteration, loss, current_dual).
 
     Returns:
@@ -119,7 +176,7 @@ def solve_mem(
         >>>
         >>> # Set up problem
         >>> observed = torch.from_numpy(blurred).to("cuda")
-        >>> prob = MEMProblem(b=observed, C=C, C_adj=C_adj, beta=100.0)
+        >>> prob = MEMProblem(b=observed, C=C, C_adj=C_adj, beta=0.01)
         >>>
         >>> # Solve
         >>> result = solve_mem(prob, max_iter=200, verbose=True)
@@ -132,64 +189,68 @@ def solve_mem(
         - Too small: noise amplification
         - Too large: over-smoothing, loss of detail
     """
-    # Initialize dual variable: λ = 0 gives x = 1/β (prior mean)
-    lam = torch.zeros_like(prob.b, requires_grad=True)
+    device = prob.b.device
+    dtype = prob.b.dtype
 
-    optimizer = torch.optim.LBFGS(
-        [lam],
-        lr=lr,
-        max_iter=20,
-        history_size=10,
-        line_search_fn="strong_wolfe",
-    )
+    # Initialize dual variable: λ = 0 gives x = 1/β (prior mean)
+    lam = torch.zeros_like(prob.b)
 
     loss_history = []
     prev_loss = float("inf")
     converged = False
-    final_iteration = 0
 
-    def closure():
-        optimizer.zero_grad()
+    if verbose:
+        print(f"MEM: max_iter={max_iter}, lr={lr}, beta={prob.beta:.4g}")
+        print(f"     data range: [{prob.b.min():.2f}, {prob.b.max():.2f}], mean={prob.b.mean():.2f}")
+
+    for iteration in range(1, max_iter + 1):
+        # Compute gradient
+        grad = dual_gradient(lam, prob)
+
+        # Gradient descent step (minimize dual = maximize negative dual)
+        lam = lam - lr * grad
+
+        # Project onto feasible region
+        lam = _project_dual(lam, prob)
+
+        # Compute loss
         loss = dual_objective(lam, prob)
-        loss.backward()
-        return loss
-
-    # Outer iteration loop
-    num_outer_iter = max(1, max_iter // 20)
-
-    for i in range(num_outer_iter):
-        loss = optimizer.step(closure)
         loss_val = float(loss)
         loss_history.append(loss_val)
-        final_iteration = (i + 1) * 20
 
-        if verbose:
-            print(f"Iter {final_iteration}: loss = {loss_val:.6e}")
+        if verbose and (iteration <= 10 or iteration % 10 == 0):
+            print(f"  iter {iteration:4d}: loss = {loss_val:.6e}")
 
         if callback is not None:
-            callback(final_iteration, loss_val, lam.detach())
+            callback(iteration, loss_val, lam)
 
-        # Check convergence
-        if abs(prev_loss - loss_val) < tol:
-            converged = True
-            break
+        # Check convergence (relative change)
+        if prev_loss < float('inf'):
+            rel_change = abs(prev_loss - loss_val) / (abs(prev_loss) + 1e-10)
+            if rel_change < tol:
+                converged = True
+                if verbose:
+                    print(f"  Converged at iteration {iteration} (rel_change={rel_change:.2e})")
+                break
 
         prev_loss = loss_val
 
     # Recover primal solution
-    with torch.no_grad():
-        x = recover_primal(lam, prob)
-        # Ensure non-negative (should be by construction, but numerical safety)
-        x = torch.clamp(x, min=0.0)
+    x = recover_primal(lam, prob)
+    # Ensure non-negative
+    x = torch.clamp(x, min=0.0)
+
+    if verbose:
+        print(f"  Final: loss={loss_val:.6e}, x range=[{x.min():.2f}, {x.max():.2f}]")
 
     return DeconvolutionResult(
         restored=x,
-        iterations=final_iteration,
+        iterations=iteration,
         loss_history=loss_history,
         converged=converged,
         metadata={
             "algorithm": "MEM",
             "beta": prob.beta,
-            "final_dual": lam.detach(),
+            "final_dual": lam,
         },
     )
