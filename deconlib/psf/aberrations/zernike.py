@@ -5,8 +5,8 @@ from typing import Dict, Union
 
 import numpy as np
 
-from ..core.optics import Geometry, Optics
-from ..math.zernike import zernike_polynomial
+from ..optics import Geometry, Optics
+from ...utils.zernike import zernike_polynomial
 from .base import Aberration
 
 __all__ = ["ZernikeMode", "ZernikeAberration"]

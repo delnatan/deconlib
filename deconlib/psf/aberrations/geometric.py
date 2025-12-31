@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from ..core.optics import Geometry, Optics
+from ..optics import Geometry, Optics
 from .base import Aberration
 
 __all__ = ["IndexMismatch", "Defocus"]

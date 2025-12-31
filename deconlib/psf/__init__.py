@@ -1,13 +1,8 @@
-"""deconlib - Optical microscopy PSF computation and deconvolution library.
+"""PSF computation module for optical microscopy.
 
-A library for computing point spread functions (PSF), optical transfer
-functions (OTF), and performing image deconvolution for optical microscopy.
-
-The library is organized into three main modules:
-
-- **psf**: NumPy-based PSF/OTF computation for widefield and confocal microscopy
-- **deconvolution**: PyTorch-based image restoration algorithms
-- **utils**: Shared mathematical utilities (Fourier, Zernike, etc.)
+This module provides tools for computing point spread functions (PSF)
+and optical transfer functions (OTF) for widefield and confocal
+microscopy, including spinning disk systems.
 
 Example:
     >>> import numpy as np
@@ -34,36 +29,36 @@ Example:
     >>> pupil = make_pupil(geom)
     >>> z = fft_coords(n=64, spacing=0.1)  # FFT-compatible z
     >>> psf = pupil_to_psf(pupil, geom, z)
-
-Reference:
-    Hanser, B.M. et al. "Phase-retrieved pupil functions in wide-field
-    fluorescence microscopy." Journal of Microscopy 216.1 (2004): 32-48.
 """
 
-__version__ = "0.3.0"
-
-# =============================================================================
-# PSF Module - Core data structures and PSF computation
-# =============================================================================
-from .psf import (
-    # Core data structures
+# Core data structures
+from .optics import (
     Optics,
     Grid,
     Geometry,
     make_geometry,
-    # Pupil functions
+)
+
+# Pupil functions
+from .pupil import (
     make_pupil,
     apply_apodization,
     compute_amplitude_correction,
     compute_fresnel_coefficients,
     compute_vectorial_factors,
-    # Widefield PSF/OTF
+)
+
+# Widefield PSF/OTF computation
+from .widefield import (
     pupil_to_psf,
     pupil_to_psf_centered,
     compute_otf,
     pupil_to_vectorial_psf,
     pupil_to_vectorial_psf_centered,
-    # Confocal/Spinning Disk PSF
+)
+
+# Confocal/Spinning Disk PSF
+from .confocal import (
     ConfocalOptics,
     compute_pinhole_function,
     compute_airy_radius,
@@ -71,54 +66,38 @@ from .psf import (
     compute_confocal_psf_centered,
     compute_spinning_disk_psf,
     compute_spinning_disk_psf_centered,
-    # Aberrations
+)
+
+# Aberrations
+from .aberrations import (
     Aberration,
     apply_aberrations,
     IndexMismatch,
     Defocus,
     ZernikeAberration,
     ZernikeMode,
-    # Phase retrieval
+)
+
+# Phase retrieval
+from .retrieval import (
     retrieve_phase,
     retrieve_phase_vectorial,
     PhaseRetrievalResult,
 )
 
-# =============================================================================
-# Utils Module - Mathematical utilities
-# =============================================================================
-from .utils import (
-    fft_coords,
-    fourier_meshgrid,
-    fftshift_1d,
-    imshift,
-    zernike_polynomial,
-    zernike_polynomials,
-    ansi_to_nm,
-    noll_to_ansi,
-    pad_to_shape,
-)
-
-# =============================================================================
-# Deconvolution Module - Import conditionally (requires PyTorch)
-# =============================================================================
-# Note: deconvolution module requires PyTorch, import explicitly:
-#   from deconlib.deconvolution import make_fft_convolver, solve_rl, solve_mem
-
 __all__ = [
-    # Version
-    "__version__",
-    # Core data structures (psf module)
+    # Core data structures
     "Optics",
     "Grid",
     "Geometry",
     "make_geometry",
+    # Pupil functions
     "make_pupil",
     "apply_apodization",
     "compute_amplitude_correction",
     "compute_fresnel_coefficients",
     "compute_vectorial_factors",
-    # PSF/OTF computation
+    # Widefield PSF/OTF
     "pupil_to_psf",
     "pupil_to_psf_centered",
     "compute_otf",
@@ -143,14 +122,4 @@ __all__ = [
     "retrieve_phase",
     "retrieve_phase_vectorial",
     "PhaseRetrievalResult",
-    # Math utilities (utils module)
-    "fft_coords",
-    "fourier_meshgrid",
-    "fftshift_1d",
-    "imshift",
-    "zernike_polynomial",
-    "zernike_polynomials",
-    "ansi_to_nm",
-    "noll_to_ansi",
-    "pad_to_shape",
 ]

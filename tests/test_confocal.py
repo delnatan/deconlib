@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from deconlib import Grid, fft_coords
-from deconlib.compute.confocal import (
+from deconlib.psf.confocal import (
     ConfocalOptics,
     compute_airy_radius,
     compute_confocal_psf,
@@ -570,3 +570,139 @@ class TestAberratedConfocalPSF:
 
         # Deeper imaging = more aberration = lower peak
         assert psf_deep.max() < psf_shallow.max()
+
+
+class TestVectorialConfocalPSF:
+    """Tests for confocal PSF with vectorial model."""
+
+    def test_vectorial_parameter_accepted(self):
+        """Test that vectorial=True is accepted."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        # Should not raise
+        psf = compute_confocal_psf(optics, grid, z, vectorial=True)
+        assert psf.shape == (1, 64, 64)
+        assert np.all(psf >= 0)
+
+    def test_vectorial_psf_normalized(self):
+        """Test vectorial confocal PSF is normalized."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = fft_coords(n=16, spacing=0.2)
+
+        psf = compute_confocal_psf(optics, grid, z, vectorial=True, normalize=True)
+        assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
+
+    def test_vectorial_differs_from_scalar(self):
+        """Test that vectorial PSF differs from scalar at high NA."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,  # Index mismatch
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = fft_coords(n=8, spacing=0.2)
+
+        psf_scalar = compute_confocal_psf(optics, grid, z, vectorial=False)
+        psf_vectorial = compute_confocal_psf(optics, grid, z, vectorial=True)
+
+        # Should be different at high NA with index mismatch
+        assert not np.allclose(psf_scalar, psf_vectorial, rtol=0.01)
+
+    def test_vectorial_centered_peak_at_center(self):
+        """Test centered vectorial PSF has peak at center."""
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        psf = compute_confocal_psf_centered(optics, grid, z, vectorial=True)
+
+        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        center = (0, 32, 32)
+        assert peak_idx == center
+
+    def test_spinning_disk_vectorial(self):
+        """Test spinning disk PSF with vectorial model."""
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        psf = compute_spinning_disk_psf(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+            magnification=60.0,
+            grid=grid,
+            z=z,
+            vectorial=True,
+        )
+        assert psf.shape == (1, 64, 64)
+        assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
+
+    def test_spinning_disk_centered_vectorial(self):
+        """Test centered spinning disk PSF with vectorial model."""
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        psf = compute_spinning_disk_psf_centered(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+            grid=grid,
+            z=z,
+            vectorial=True,
+        )
+
+        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        center = (0, 32, 32)
+        assert peak_idx == center
+
+    def test_vectorial_with_aberrations(self):
+        """Test vectorial confocal PSF works with aberrations."""
+        from deconlib import IndexMismatch
+
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.42,
+            ni=1.515,
+            ns=1.33,
+        )
+        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        z = np.array([0.0])
+
+        # Should not raise
+        psf = compute_confocal_psf(
+            optics,
+            grid,
+            z,
+            vectorial=True,
+            aberrations=[IndexMismatch(depth=4.0)],
+        )
+        assert psf.shape == (1, 64, 64)
+        assert np.all(psf >= 0)
