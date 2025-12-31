@@ -55,10 +55,14 @@ from .psf import (
     make_pupil,
     apply_apodization,
     compute_amplitude_correction,
+    compute_fresnel_coefficients,
+    compute_vectorial_factors,
     # Widefield PSF/OTF
     pupil_to_psf,
     pupil_to_psf_centered,
     compute_otf,
+    pupil_to_vectorial_psf,
+    pupil_to_vectorial_psf_centered,
     # Confocal/Spinning Disk PSF
     ConfocalOptics,
     compute_pinhole_function,
@@ -76,6 +80,7 @@ from .psf import (
     ZernikeMode,
     # Phase retrieval
     retrieve_phase,
+    retrieve_phase_vectorial,
     PhaseRetrievalResult,
 )
 
@@ -111,10 +116,14 @@ __all__ = [
     "make_pupil",
     "apply_apodization",
     "compute_amplitude_correction",
+    "compute_fresnel_coefficients",
+    "compute_vectorial_factors",
     # PSF/OTF computation
     "pupil_to_psf",
     "pupil_to_psf_centered",
     "compute_otf",
+    "pupil_to_vectorial_psf",
+    "pupil_to_vectorial_psf_centered",
     # Confocal/Spinning Disk PSF
     "ConfocalOptics",
     "compute_pinhole_function",
@@ -132,6 +141,7 @@ __all__ = [
     "ZernikeMode",
     # Phase retrieval
     "retrieve_phase",
+    "retrieve_phase_vectorial",
     "PhaseRetrievalResult",
     # Math utilities (utils module)
     "fft_coords",
