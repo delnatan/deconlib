@@ -64,24 +64,30 @@ class ConfocalOptics:
         magnification: Total system magnification (objective × relay optics).
             Only needed if converting from physical pinhole size.
 
-    Example:
-        >>> # Using Andor-style metadata (radius in AU)
-        >>> optics = ConfocalOptics(
-        ...     wavelength_exc=0.488,
-        ...     wavelength_em=0.525,
-        ...     na=1.4,
-        ...     ni=1.515,
-        ...     pinhole_radius_au=2.0,  # From SpinningDiskPinholeRadius
-        ... )
-        >>>
-        >>> # Traditional diameter specification
-        >>> optics = ConfocalOptics(
-        ...     wavelength_exc=0.488,
-        ...     wavelength_em=0.525,
-        ...     na=1.4,
-        ...     ni=1.515,
-        ...     pinhole_au=1.0,  # 1 Airy unit diameter
-        ... )
+    Examples:
+        Using Andor-style metadata (radius in AU):
+
+        ```python
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            pinhole_radius_au=2.0,  # From SpinningDiskPinholeRadius
+        )
+        ```
+
+        Traditional diameter specification:
+
+        ```python
+        optics = ConfocalOptics(
+            wavelength_exc=0.488,
+            wavelength_em=0.525,
+            na=1.4,
+            ni=1.515,
+            pinhole_au=1.0,  # 1 Airy unit diameter
+        )
+        ```
     """
 
     wavelength_exc: float
