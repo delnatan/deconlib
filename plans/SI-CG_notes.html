@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SI-CG Algorithm for Image Deconvolution</title>
+    
+    <!-- MathJax for LaTeX rendering -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            },
+            svg: {
+                fontCache: 'global'
+            }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #333;
+            --primary-color: #2c3e50;
+            --accent-color: #3498db;
+            --code-bg: #f5f7f9;
+            --border-color: #e1e4e8;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        h1, h2, h3 {
+            color: var(--primary-color);
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 0.5rem;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.3rem;
+        }
+
+        h3 {
+            font-size: 1.2rem;
+        }
+
+        p {
+            margin-bottom: 1rem;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-size: 0.95rem;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: var(--code-bg);
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+
+        tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        /* Code Blocks */
+        pre {
+            background-color: var(--code-bg);
+            padding: 1.2rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+        }
+
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 0.9rem;
+            color: #d63384;
+        }
+
+        pre code {
+            color: #24292e;
+            background: none;
+            padding: 0;
+        }
+
+        /* Math Styling fixes */
+        .mjx-chtml {
+            font-size: 110% !important;
+        }
+
+        /* Lists */
+        ul, ol {
+            padding-left: 2rem;
+            margin-bottom: 1rem;
+        }
+        
+        li {
+            margin-bottom: 0.5rem;
+        }
+
+        /* Callout/Note boxes */
+        .note {
+            background-color: #e8f4fd;
+            border-left: 4px solid var(--accent-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.9rem;
+            color: #666;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+
+    <h1>Spatially Invariant Conjugate Gradient (SI-CG) for Image Deconvolution</h1>
+
+    <div class="note">
+        <strong>Programmer's Overview:</strong> This document analyzes the SI-CG algorithm used for deconvolution under Poisson noise. It is designed to be memory-efficient and computationally lightweight, making it ideal for large 3D microscopy datasets.<br><br>
+        The core philosophy is <strong>Square-Root Parametrization</strong>. Instead of solving for the image intensity $\textnormal{f}$ directly (and fighting with non-negativity constraints), we solve for a parameter $\textnormal{c}$ such that $\textnormal{f} = \textnormal{c}^2$.
+    </div>
+
+    <h2>1. The Mathematical Objects</h2>
+
+    <h3>Variables & Data</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Math Symbol</th>
+                <th>C++ Variable</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>$\textnormal{f} \in \mathbb{R}^N$</td>
+                <td><code>f_</code> / <code>img_</code></td>
+                <td><strong>Physical Intensity</strong>. The recovered image estimate. $\textnormal{f} = \textnormal{c} \odot \textnormal{c}$.</td>
+            </tr>
+            <tr>
+                <td>$\textnormal{c} \in \mathbb{R}^N$</td>
+                <td><code>s_</code> / <code>s</code></td>
+                <td><strong>Parameter Vector</strong>. The optimization variable (square root of intensity).</td>
+            </tr>
+            <tr>
+                <td>$\textnormal{g} \in \mathbb{R}^N$</td>
+                <td><code>img_</code> (raw)</td>
+                <td><strong>Observed Data</strong>. The noisy raw image input.</td>
+            </tr>
+            <tr>
+                <td>$\textnormal{b} \in \mathbb{R}^N$</td>
+                <td><code>b_</code></td>
+                <td><strong>Background</strong>. Constant or background image.</td>
+            </tr>
+            <tr>
+                <td>$\beta$</td>
+                <td><code>regularization_</code></td>
+                <td><strong>Regularization Weight</strong>. Controls smoothness vs fidelity.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>Operators</h3>
+    <ul>
+        <li><strong>$\mathbf{R}$</strong>: The Forward Operator (Point Spread Function convolution).
+            <br>Implemented via FFT: $\mathcal{F}^{-1}(\mathcal{F}(\text{kernel}) \odot \mathcal{F}(\text{image}))$.
+        </li>
+        <li><strong>$\mathbf{R}^T$</strong>: The Adjoint Operator (Transposed convolution).
+            <br>Implemented via FFT using the complex conjugate of the kernel's OTF.
+        </li>
+        <li><strong>$\mathbf{C}$</strong>: Diagonal matrix of $\textnormal{c}$. Used to denote element-wise multiplication by $\textnormal{c}$.</li>
+    </ul>
+
+    <h2>2. The Objective Function</h2>
+    <p>We minimize a cost function $E(\textnormal{c})$ consisting of a data fidelity term (Poisson likelihood) and a regularization term.</p>
+    
+    $$ E(\textnormal{c}) = J_{data}(\textnormal{c}) + \beta J_{reg}(\textnormal{c}) $$
+
+    <h3>A. Data Fidelity (Poisson Neg-Log-Likelihood)</h3>
+    <p>Derived from the Poisson probability $P(g | \bar{g})$, where the mean $\bar{g} = \mathbf{R}\textnormal{f} + \textnormal{b}$.</p>
+    $$ J_{data}(\textnormal{c}) = \sum_{i} \left[ (\mathbf{R}\textnormal{c}^2)_i + \textnormal{b}_i - \textnormal{g}_i \ln\left( (\mathbf{R}\textnormal{c}^2)_i + \textnormal{b}_i \right) \right] $$
+
+    <h3>B. Regularization (Intensity Penalty)</h3>
+    <p>A Tikhonov-like penalty constraining the estimate to stay close to the background-subtracted raw data.</p>
+    $$ J_{reg}(\textnormal{c}) = \sum_{i} \left( \textnormal{c}_i^2 - (\textnormal{g}_i - \textnormal{b}_i) \right)^2 $$
+
+    <h2>3. The Optimization Loop</h2>
+    <p>The algorithm employs <strong>Non-linear Conjugate Gradient (FR-CG)</strong> with a <strong>Newton-Raphson Line Search</strong>.</p>
+
+    <h3>Initialization</h3>
+    <ol>
+        <li><strong>Estimate</strong>: $\textnormal{c}^{(0)} = \sqrt{\max(\textnormal{g}, \epsilon)}$</li>
+        <li><strong>Direction</strong>: $\textnormal{d}^{(0)} = \mathbf{0}$</li>
+        <li><strong>Residual Norm</strong>: $\rho_{old} = 1.0$</li>
+    </ol>
+
+    <h3>Iteration Step ($k$)</h3>
+
+    <h4>Step 1: Gradient Computation</h4>
+    <p>Compute the gradient of the cost function w.r.t the parameter $\textnormal{c}$.</p>
+    <ul>
+        <li>Likelihood Gradient:
+            $$ \nabla_{\textnormal{c}} J_{data} = 2 \textnormal{c} \odot \left[ \mathbf{R}^T \left( \mathbf{1} - \frac{\textnormal{g}}{\mathbf{R}\textnormal{c}^2 + \textnormal{b}} \right) \right] $$
+        </li>
+        <li>Regularization Gradient:
+            $$ \nabla_{\textnormal{c}} J_{reg} = 4 \textnormal{c} \odot \left( \textnormal{c}^2 - (\textnormal{g} - \textnormal{b}) \right) $$
+        </li>
+        <li>Total Negative Gradient (Steepest Descent Direction):
+            $$ \textnormal{r}^{(k)} = - (\nabla_{\textnormal{c}} J_{data} + \beta \nabla_{\textnormal{c}} J_{reg}) $$
+        </li>
+    </ul>
+
+    <h4>Step 2: Conjugate Direction Update (Fletcher-Reeves)</h4>
+    <ol>
+        <li>Calculate current norm: $\rho_{new} = \| \textnormal{r}^{(k)} \|^2$.</li>
+        <li>Calculate $\gamma = \rho_{new} / \rho_{old}$.</li>
+        <li><strong>Restart Logic</strong>: If $k \pmod 5 == 0$, set $\gamma = 0$ (reset direction to pure gradient).</li>
+        <li>Update search direction:
+            $$ \textnormal{d}^{(k)} = \textnormal{r}^{(k)} + \gamma \textnormal{d}^{(k-1)} $$
+        </li>
+    </ol>
+
+    <h4>Step 3: Newton-Raphson Line Search</h4>
+    <ul>
+        <li><strong>Method</strong>: Newton-Raphson on the scalar function $E(\lambda)$.</li>
+        <li><strong>Stopping Criterion</strong>: Fixed at 3 iterations (per C++ source).</li>
+        <li>Update rule: $\lambda \leftarrow \lambda - \frac{E'(\lambda)}{E''(\lambda)}$</li>
+    </ul>
+
+    <h4>Step 4: Apply Update</h4>
+    $$ \textnormal{c}^{(k+1)} = \textnormal{c}^{(k)} + \lambda \textnormal{d}^{(k)} $$
+
+    <h2>4. Modern Implementation Strategy (GPU + Autodiff)</h2>
+    <p>Planning this in frameworks like PyTorch, JAX, or TensorFlow significantly simplifies the architecture.</p>
+
+    <div class="note">
+        <strong>Key Advantages:</strong><br>
+        1. <strong>Eliminate Manual Derivatives</strong>: Define <code>forward_pass</code> and use <code>grad()</code>.<br>
+        2. <strong>GPU Acceleration</strong>: Use <code>torch.fft</code> or <code>jax.numpy.fft</code>.<br>
+        3. <strong>Simplified Line Search</strong>: Use L-BFGS instead of manual Newton steps.
+    </div>
+
+    <pre><code>def solve_sicg(observed_g, psf, n_iters, beta):
+    # 1. Precompute OTF
+    otf = fftn(psf)
+    
+    # 2. Parametrization
+    # c is the trainable parameter (square root of image)
+    c = sqrt(observed_g).clone().requires_grad_(True)
+    
+    # 3. Define Loss
+    def loss_fn(current_c):
+        f = current_c ** 2
+        
+        # Forward Physics
+        # R(f) = ifft( fft(f) * otf )
+        g_est = ifft(fftn(f) * otf).real + background
+        
+        # Loss Terms
+        data_term = sum(g_est - observed_g * log(g_est + 1e-8))
+        reg_term  = sum((f - (observed_g - background))**2)
+        
+        return data_term + beta * reg_term
+
+    # 4. Optimization Loop
+    optimizer = torch.optim.LBFGS([c], history_size=5)
+    
+    for i in range(n_iters):
+        def closure():
+            optimizer.zero_grad()
+            l = loss_fn(c)
+            l.backward()
+            return l
+        
+        optimizer.step(closure)
+        
+    return c ** 2</code></pre>
+
+    <h2>5. Manual Implementation Reference (Non-Autodiff)</h2>
+    <p>For environments where automatic differentiation is unavailable (e.g., pure C/C++, CUDA kernels).</p>
+
+    <h3>A. The Gradient Step</h3>
+    <p><strong>Data Term Gradient</strong></p>
+    $$ \nabla_{\textnormal{c}} J_{data} = 2 \textnormal{c} \odot \mathbf{R}^T \left( \mathbf{1} - \frac{\textnormal{g}}{\mathbf{R}\textnormal{c}^2 + \textnormal{b}} \right) $$
+
+    <p><strong>Regularization Term Gradient</strong></p>
+    $$ \nabla_{\textnormal{c}} J_{reg} = 4 \textnormal{c} \odot \left( \textnormal{c}^2 - (\textnormal{g} - \textnormal{b}) \right) $$
+
+    <h3>B. The Efficient Line Search (The "3-Convolution" Trick)</h3>
+    <p>The SI-CG implementation exploits linearity to avoid re-running FFTs inside the line search loop.</p>
+
+    <p><strong>Expansion:</strong> Let $\textnormal{c}(\lambda) = \textnormal{c} + \lambda \textnormal{d}$. The convolved estimate $\mathbf{y}(\lambda)$ becomes:</p>
+    $$ \mathbf{y}(\lambda) = \underbrace{[\mathbf{R}(\textnormal{c}^2) + \textnormal{b}]}_{\mathbf{K}_{ss}} + 2\lambda \underbrace{[\mathbf{R}(\textnormal{c} \odot \textnormal{d})]}_{\mathbf{K}_{sd}} + \lambda^2 \underbrace{[\mathbf{R}(\textnormal{d}^2)]}_{\mathbf{K}_{dd}} $$
+
+    <p><strong>Procedure:</strong></p>
+    <ol>
+        <li><strong>Pre-computation</strong>: Compute $\mathbf{K}_{ss}, \mathbf{K}_{sd}, \mathbf{K}_{dd}$ using FFTs (Outside Newton Loop).</li>
+        <li><strong>Newton-Raphson Loop</strong>: Run for 3 iterations using scalar operations only.</li>
+    </ol>
+
+    <footer>
+        <p>Generated based on source analysis of <code>EstimateSICG</code></p>
+    </footer>
+
+</div>
+
+</body>
+</html>
