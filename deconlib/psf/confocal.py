@@ -91,7 +91,9 @@ class ConfocalOptics:
     na: float
     ni: float
     ns: float = None
-    pinhole_radius_au: float = None  # Pinhole RADIUS in Airy units (Andor style)
+    pinhole_radius_au: float = (
+        None  # Pinhole RADIUS in Airy units (Andor style)
+    )
     pinhole_au: float = None  # Pinhole DIAMETER in Airy units (traditional)
     pinhole_radius: float = None  # Back-projected radius in μm
     magnification: float = None
@@ -112,9 +114,11 @@ class ConfocalOptics:
                 f"less than emission wavelength ({self.wavelength_em})"
             )
         # Default to 1 Airy unit diameter if nothing specified
-        if (self.pinhole_radius_au is None and
-            self.pinhole_au is None and
-            self.pinhole_radius is None):
+        if (
+            self.pinhole_radius_au is None
+            and self.pinhole_au is None
+            and self.pinhole_radius is None
+        ):
             object.__setattr__(self, "pinhole_au", 1.0)
 
     @property
@@ -307,7 +311,9 @@ def compute_confocal_psf(
 
     # Apply aberrations if provided
     if aberrations:
-        pupil_exc = apply_aberrations(pupil_exc, geom_exc, exc_optics, aberrations)
+        pupil_exc = apply_aberrations(
+            pupil_exc, geom_exc, exc_optics, aberrations
+        )
         pupil_em = apply_aberrations(pupil_em, geom_em, em_optics, aberrations)
 
     # Compute excitation PSF (DC at corner)
@@ -318,9 +324,12 @@ def compute_confocal_psf(
     # Use vectorial model for emission if requested (important for high-NA)
     if vectorial:
         psf_em = pupil_to_vectorial_psf(
-            pupil_em, geom_em, em_optics, z,
+            pupil_em,
+            geom_em,
+            em_optics,
+            z,
             dipole="isotropic",  # Random dipole orientations (typical fluorophores)
-            normalize=False
+            normalize=False,
         )
     else:
         psf_em = pupil_to_psf(pupil_em, geom_em, z, normalize=False)
@@ -377,8 +386,13 @@ def compute_confocal_psf_centered(
         3D intensity PSF, shape (nz, ny, nx), with peak at center.
     """
     psf = compute_confocal_psf(
-        confocal_optics, grid, z, normalize, include_stokes_shift, aberrations,
-        vectorial=vectorial
+        confocal_optics,
+        grid,
+        z,
+        normalize,
+        include_stokes_shift,
+        aberrations,
+        vectorial=vectorial,
     )
     return np.fft.fftshift(psf, axes=(-2, -1))
 
@@ -474,7 +488,9 @@ def compute_spinning_disk_psf(
     # Default grid: Nyquist sampling
     if grid is None:
         nyquist_spacing = wavelength_em / (4 * na)
-        grid = Grid(shape=(256, 256), spacing=(nyquist_spacing, nyquist_spacing))
+        grid = Grid(
+            shape=(256, 256), spacing=(nyquist_spacing, nyquist_spacing)
+        )
 
     # Default z range
     if z is None:
@@ -483,8 +499,12 @@ def compute_spinning_disk_psf(
         z = fft_coords(n=64, spacing=0.1)
 
     return compute_confocal_psf(
-        confocal_optics, grid, z, normalize=normalize, aberrations=aberrations,
-        vectorial=vectorial
+        confocal_optics,
+        grid,
+        z,
+        normalize=normalize,
+        aberrations=aberrations,
+        vectorial=vectorial,
     )
 
 
