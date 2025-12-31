@@ -37,6 +37,11 @@ def _compute_objective(
 ) -> torch.Tensor:
     """Compute total objective E(c) = J_data + beta * J_reg.
 
+    Uses KL-divergence form for data fidelity:
+        J_data = sum[ D * log(D/F) + F - D ]
+
+    This form has the property that J_data = 0 when F = D (at minimum).
+
     Args:
         c: Current parameter estimate (sqrt of intensity).
         observed: Observed image (g).
@@ -50,13 +55,19 @@ def _compute_objective(
     """
     f = c * c  # f = c²
 
-    # Forward model prediction: R(f) + b
+    # Forward model prediction: F = R(f) + b
     g_pred = C(f) + background
     g_pred_safe = torch.clamp(g_pred, min=eps)
+    observed_safe = torch.clamp(observed, min=eps)
 
-    # Data fidelity (Poisson neg-log-likelihood, ignoring constant terms)
-    # J_data = sum[ g_pred - g * ln(g_pred) ]
-    j_data = torch.sum(g_pred - observed * torch.log(g_pred_safe))
+    # Data fidelity (KL-divergence form of Poisson NLL)
+    # J_data = sum[ D * log(D/F) + F - D ]
+    # This equals 0 when F = D (at minimum)
+    j_data = torch.sum(
+        observed_safe * torch.log(observed_safe / g_pred_safe)
+        + g_pred
+        - observed
+    )
 
     # Regularization: sum[ (f - (g - b))² ]
     target = observed - background
@@ -310,15 +321,19 @@ def solve_sicg(
     # Track optimization progress
     loss_history = []
 
+    # Compute initial objective for normalization
+    obj_initial = float(
+        _compute_objective(c, observed, C, background, beta, eps)
+    )
+
     if verbose:
         print("SI-CG Deconvolution")
         print(f"  Iterations: {num_iter}, Beta: {beta}, Background: {background}")
         print(f"  Restart interval: {restart_interval}, Line search iters: {line_search_iter}")
+        print(f"  Initial objective: {obj_initial:.4e}")
         print()
-        print(f"{'Iter':>5}  {'Objective':>12}  {'Rel.Change':>11}  {'Step':>10}  {'|E′|':>10}  {'E″':>10}")
-        print("-" * 68)
-
-    obj_prev = None
+        print(f"{'Iter':>5}  {'Objective':>12}  {'Normalized':>10}  {'Step':>10}  {'|E′|':>10}  {'E″':>10}")
+        print("-" * 70)
 
     for iteration in range(1, num_iter + 1):
         # Step 1: Compute negative gradient (steepest descent direction)
@@ -352,12 +367,8 @@ def solve_sicg(
         )
         loss_history.append(obj)
 
-        # Relative change
-        if obj_prev is not None:
-            rel_change = abs(obj - obj_prev) / (abs(obj_prev) + eps)
-        else:
-            rel_change = 1.0
-        obj_prev = obj
+        # Normalized objective (1.0 at start, approaches 0 at convergence)
+        obj_normalized = obj / (obj_initial + eps)
 
         # Verbose output
         if verbose:
@@ -367,7 +378,7 @@ def solve_sicg(
             e_double_prime = final_ls.get("E_double_prime", 0.0)
 
             print(
-                f"{iteration:>5}  {obj:>12.4e}  {rel_change:>11.4e}  "
+                f"{iteration:>5}  {obj:>12.4e}  {obj_normalized:>10.6f}  "
                 f"{step_size:>10.4e}  {e_prime:>10.3e}  {e_double_prime:>10.3e}"
             )
 
@@ -376,8 +387,9 @@ def solve_sicg(
             callback(iteration, c * c)
 
     if verbose:
-        print("-" * 68)
-        print(f"Completed {num_iter} iterations.")
+        final_normalized = loss_history[-1] / (obj_initial + eps) if loss_history else 1.0
+        print("-" * 70)
+        print(f"Completed {num_iter} iterations. Final normalized objective: {final_normalized:.6f}")
 
     # Return intensity (f = c²)
     restored = c * c
@@ -393,5 +405,6 @@ def solve_sicg(
             "background": background,
             "restart_interval": restart_interval,
             "line_search_iter": line_search_iter,
+            "initial_objective": obj_initial,
         },
     )
