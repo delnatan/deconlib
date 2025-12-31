@@ -21,8 +21,8 @@ def pupil_to_psf(
 ) -> np.ndarray:
     """Compute 3D intensity PSF from complex pupil function.
 
-    Uses ifft2 (DC at corner) convention. For centered PSF, use
-    pupil_to_psf_centered() instead.
+    Uses ifft2 (DC at corner) convention. For centered PSF, apply
+    np.fft.fftshift(psf, axes=(-2, -1)) to the result.
 
     Args:
         pupil: Complex pupil function, shape (ny, nx).
