@@ -50,7 +50,9 @@ from .rl import (
 from .mem import (
     MEMProblem,
     solve_mem,
+    solve_mem_dual,
     dual_objective,
+    dual_gradient,
     recover_primal,
 )
 
@@ -65,6 +67,8 @@ __all__ = [
     # MEM
     "MEMProblem",
     "solve_mem",
+    "solve_mem_dual",
     "dual_objective",
+    "dual_gradient",
     "recover_primal",
 ]
