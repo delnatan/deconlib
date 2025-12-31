@@ -1,23 +1,22 @@
 # Deconvolution
 
-Image restoration using Richardson-Lucy deconvolution.
+Image restoration using Richardson-Lucy and Maximum Entropy algorithms.
 
 !!! note "Requires PyTorch"
     This module requires PyTorch. Install with `pip install deconlib[deconv]`.
 
 ## Richardson-Lucy
 
-::: deconlib.deconvolution.rl.richardson_lucy
-
-## Result Class
-
-::: deconlib.deconvolution.base.DeconvolutionResult
-    options:
-      show_source: false
+::: deconlib.deconvolution.solve_rl
 
 ## Operators
 
-::: deconlib.deconvolution.operators
+::: deconlib.deconvolution.make_fft_convolver
+
+::: deconlib.deconvolution.make_fft_convolver_3d
+
+## Result Class
+
+::: deconlib.deconvolution.DeconvolutionResult
     options:
-      members:
-        - fft_convolve
+      show_source: false

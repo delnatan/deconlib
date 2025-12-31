@@ -12,20 +12,24 @@ Image deconvolution using Richardson-Lucy algorithm with PyTorch backend.
 
 ```python
 import torch
-from deconlib.deconvolution import richardson_lucy
+import numpy as np
+from deconlib.deconvolution import make_fft_convolver, solve_rl
 
 # Load your image and PSF (as numpy arrays)
-# image: (Z, Y, X) or (Y, X)
-# psf: same dimensions as image
+# observed: (H, W) or (D, H, W)
+# psf: same dimensions as observed
 
-result = richardson_lucy(
-    image,
-    psf,
-    iterations=50,
-    device="cuda",  # or "cpu"
-)
+# Create convolution operators from PSF
+C, C_adj = make_fft_convolver(psf, device="cuda")
 
-deconvolved = result.result  # numpy array
+# Convert observed image to tensor
+observed_tensor = torch.from_numpy(observed).to("cuda", dtype=torch.float32)
+
+# Run Richardson-Lucy deconvolution
+result = solve_rl(observed_tensor, C, C_adj, num_iter=50)
+
+# Get result as numpy array
+restored = result.restored.cpu().numpy()
 ```
 
 ## Result Object
@@ -34,24 +38,38 @@ The `DeconvolutionResult` contains:
 
 | Attribute | Description |
 |-----------|-------------|
-| `result` | Deconvolved image (numpy array) |
+| `restored` | Deconvolved image (torch.Tensor) |
 | `iterations` | Number of iterations performed |
-| `loss_history` | Loss at each iteration (if tracked) |
+| `loss_history` | Relative change at each iteration |
+| `converged` | Convergence status |
 
 ## GPU Acceleration
 
 For large images, use GPU acceleration:
 
 ```python
-# Check CUDA availability
 import torch
 print(f"CUDA available: {torch.cuda.is_available()}")
 
 # Use GPU
-result = richardson_lucy(image, psf, iterations=100, device="cuda")
+C, C_adj = make_fft_convolver(psf, device="cuda")
 
 # Use specific GPU
-result = richardson_lucy(image, psf, iterations=100, device="cuda:1")
+C, C_adj = make_fft_convolver(psf, device="cuda:1")
+```
+
+## 3D Deconvolution
+
+For 3D stacks, use the 3D convolver:
+
+```python
+from deconlib.deconvolution import make_fft_convolver_3d, solve_rl
+
+# psf_3d: shape (D, H, W)
+C, C_adj = make_fft_convolver_3d(psf_3d, device="cuda")
+
+observed_3d = torch.from_numpy(stack).to("cuda", dtype=torch.float32)
+result = solve_rl(observed_3d, C, C_adj, num_iter=50)
 ```
 
 ## Richardson-Lucy Algorithm
@@ -59,25 +77,25 @@ result = richardson_lucy(image, psf, iterations=100, device="cuda:1")
 The Richardson-Lucy algorithm iteratively refines an estimate:
 
 \[
-f^{(k+1)} = f^{(k)} \cdot \left( h^* \otimes \frac{g}{h \otimes f^{(k)}} \right)
+x_{k+1} = x_k \cdot C^T\left(\frac{b}{C(x_k)}\right)
 \]
 
 Where:
 
-- \(f\) is the estimated object
-- \(g\) is the observed image
-- \(h\) is the PSF
-- \(\otimes\) denotes convolution
+- \(x\) is the estimated object
+- \(b\) is the observed image
+- \(C\) is the forward convolution operator
+- \(C^T\) is the adjoint (correlation) operator
 
 ## Tips
 
 !!! tip "Iteration Count"
     - Start with 20-50 iterations
     - More iterations = sharper but noisier
-    - Use regularization for noisy data
+    - Monitor `loss_history` to check convergence
 
 !!! tip "PSF Normalization"
-    The PSF should be normalized (sum to 1). This is handled automatically.
+    The PSF is automatically normalized (sum to 1) by `make_fft_convolver`.
 
 !!! warning "Noise Amplification"
     Richardson-Lucy can amplify noise. For noisy images:
