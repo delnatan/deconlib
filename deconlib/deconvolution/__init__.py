@@ -41,6 +41,9 @@ from .operators import (
 from .rl import (
     solve_rl,
 )
+from .sicg import (
+    solve_sicg,
+)
 from .mem import (
     MEMProblem,
     solve_mem,
@@ -58,6 +61,8 @@ __all__ = [
     "make_fft_convolver_3d",
     # Richardson-Lucy
     "solve_rl",
+    # SI-CG
+    "solve_sicg",
     # MEM
     "MEMProblem",
     "solve_mem",
