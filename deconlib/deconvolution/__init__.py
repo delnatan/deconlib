@@ -15,24 +15,18 @@ where:
 Each algorithm takes a Problem specification and returns a Result.
 
 Example:
-    >>> import numpy as np
     >>> import torch
-    >>> from deconlib.psf import Optics, Grid, make_geometry, make_pupil, pupil_to_psf
-    >>> from deconlib.utils import fft_coords
+    >>> from deconlib import Optics, make_geometry, make_pupil, pupil_to_psf, fft_coords
     >>> from deconlib.deconvolution import make_fft_convolver, solve_rl
     >>>
-    >>> # Generate PSF using NumPy
+    >>> # Generate PSF
     >>> optics = Optics(wavelength=0.525, na=1.4, ni=1.515)
-    >>> grid = Grid(shape=(256, 256), spacing=(0.1, 0.1))
-    >>> geom = make_geometry(grid, optics)
+    >>> geom = make_geometry((256, 256), 0.1, optics)
     >>> pupil = make_pupil(geom)
-    >>> z = fft_coords(n=1, spacing=0.1)
-    >>> psf = pupil_to_psf(pupil, geom, z)[0]  # 2D PSF
+    >>> psf = pupil_to_psf(pupil, geom, z=[0.0])[0]  # 2D PSF
     >>>
-    >>> # Create PyTorch operators from NumPy PSF
+    >>> # Create convolution operators and deconvolve
     >>> C, C_adj = make_fft_convolver(psf, device="cuda")
-    >>>
-    >>> # Deconvolve
     >>> observed = torch.from_numpy(blurred_image).to("cuda")
     >>> restored = solve_rl(observed, C, C_adj, num_iter=50)
 """

@@ -3,15 +3,13 @@
 import numpy as np
 import pytest
 
-from deconlib import Grid, fft_coords
+from deconlib import fft_coords, make_geometry, make_pupil, pupil_to_psf
 from deconlib.psf.confocal import (
     ConfocalOptics,
     compute_airy_radius,
     compute_confocal_psf,
-    compute_confocal_psf_centered,
     compute_pinhole_function,
     compute_spinning_disk_psf,
-    compute_spinning_disk_psf_centered,
 )
 
 
@@ -158,38 +156,26 @@ class TestComputePinholeFunction:
 
     def test_pinhole_shape(self):
         """Test pinhole array has correct shape."""
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        pinhole = compute_pinhole_function(grid, radius=0.5)
+        pinhole = compute_pinhole_function((64, 64), 0.1, radius=0.5)
         assert pinhole.shape == (64, 64)
 
     def test_pinhole_is_binary(self):
         """Test pinhole is binary (0 or 1)."""
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        pinhole = compute_pinhole_function(grid, radius=0.5)
+        pinhole = compute_pinhole_function((64, 64), 0.1, radius=0.5)
         unique_vals = np.unique(pinhole)
         assert len(unique_vals) <= 2
         assert all(v in [0.0, 1.0] for v in unique_vals)
 
-    def test_pinhole_centered_option(self):
-        """Test centered=True puts max at center."""
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        pinhole = compute_pinhole_function(grid, radius=0.5, centered=True)
-        # Max should be at center
-        center = (32, 32)
-        assert pinhole[center] == 1.0
-
     def test_pinhole_dc_corner(self):
-        """Test centered=False puts max at corner (DC convention)."""
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        pinhole = compute_pinhole_function(grid, radius=0.5, centered=False)
+        """Test pinhole has max at corner (DC convention)."""
+        pinhole = compute_pinhole_function((64, 64), 0.1, radius=0.5)
         # Max should include corner (0, 0)
         assert pinhole[0, 0] == 1.0
 
     def test_pinhole_larger_radius_more_pixels(self):
         """Test larger radius includes more pixels."""
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        small = compute_pinhole_function(grid, radius=0.3)
-        large = compute_pinhole_function(grid, radius=1.0)
+        small = compute_pinhole_function((64, 64), 0.1, radius=0.3)
+        large = compute_pinhole_function((64, 64), 0.1, radius=1.0)
         assert small.sum() < large.sum()
 
 
@@ -208,48 +194,51 @@ class TestComputeConfocalPSF:
         )
 
     @pytest.fixture
-    def grid(self):
-        """Create typical grid."""
-        return Grid(shape=(64, 64), spacing=(0.05, 0.05))
+    def shape(self):
+        """Create typical shape."""
+        return (64, 64)
+
+    @pytest.fixture
+    def spacing(self):
+        """Create typical spacing."""
+        return 0.05
 
     @pytest.fixture
     def z(self):
         """Create z positions."""
         return fft_coords(n=32, spacing=0.2)
 
-    def test_psf_shape(self, confocal_optics, grid, z):
+    def test_psf_shape(self, confocal_optics, shape, spacing, z):
         """Test PSF has correct shape."""
-        psf = compute_confocal_psf(confocal_optics, grid, z)
+        psf = compute_confocal_psf(confocal_optics, shape, spacing, z)
         assert psf.shape == (32, 64, 64)
 
-    def test_psf_non_negative(self, confocal_optics, grid, z):
+    def test_psf_non_negative(self, confocal_optics, shape, spacing, z):
         """Test PSF is non-negative."""
-        psf = compute_confocal_psf(confocal_optics, grid, z)
+        psf = compute_confocal_psf(confocal_optics, shape, spacing, z)
         assert np.all(psf >= 0)
 
-    def test_psf_normalized(self, confocal_optics, grid, z):
+    def test_psf_normalized(self, confocal_optics, shape, spacing, z):
         """Test PSF sums to 1 when normalized."""
-        psf = compute_confocal_psf(confocal_optics, grid, z, normalize=True)
+        psf = compute_confocal_psf(confocal_optics, shape, spacing, z, normalize=True)
         assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
 
-    def test_psf_not_normalized(self, confocal_optics, grid, z):
+    def test_psf_not_normalized(self, confocal_optics, shape, spacing, z):
         """Test PSF does not sum to 1 when normalize=False."""
-        psf = compute_confocal_psf(confocal_optics, grid, z, normalize=False)
+        psf = compute_confocal_psf(confocal_optics, shape, spacing, z, normalize=False)
         # Should not be 1 (exact value depends on implementation)
         assert psf.sum() != 1.0
 
-    def test_confocal_narrower_than_widefield(self, confocal_optics, grid):
+    def test_confocal_narrower_than_widefield(self, confocal_optics, shape, spacing):
         """Test confocal PSF is narrower than widefield."""
-        from deconlib import make_geometry, make_pupil, pupil_to_psf
-
         z = np.array([0.0])  # At focus
 
         # Confocal PSF
-        psf_confocal = compute_confocal_psf(confocal_optics, grid, z)
+        psf_confocal = compute_confocal_psf(confocal_optics, shape, spacing, z)
 
         # Widefield PSF (using emission wavelength)
         em_optics = confocal_optics.em_optics
-        geom = make_geometry(grid, em_optics)
+        geom = make_geometry(shape, spacing, em_optics)
         pupil = make_pupil(geom)
         psf_widefield = pupil_to_psf(pupil, geom, z, normalize=True)
 
@@ -257,7 +246,7 @@ class TestComputeConfocalPSF:
         # Confocal should have higher peak (more concentrated)
         assert psf_confocal.max() > psf_widefield.max()
 
-    def test_small_pinhole_approaches_product(self, confocal_optics, grid):
+    def test_small_pinhole_approaches_product(self, confocal_optics, shape, spacing):
         """Test small pinhole gives PSF approaching exc × em product."""
         # Very small pinhole
         small_pinhole = ConfocalOptics(
@@ -269,33 +258,33 @@ class TestComputeConfocalPSF:
         )
 
         z = np.array([0.0])
-        psf_small = compute_confocal_psf(small_pinhole, grid, z, normalize=True)
+        psf_small = compute_confocal_psf(small_pinhole, shape, spacing, z, normalize=True)
 
         # Regular pinhole
-        psf_normal = compute_confocal_psf(confocal_optics, grid, z, normalize=True)
+        psf_normal = compute_confocal_psf(confocal_optics, shape, spacing, z, normalize=True)
 
         # Small pinhole should be even more concentrated
         assert psf_small.max() >= psf_normal.max()
 
 
 class TestComputeConfocalPSFCentered:
-    """Tests for centered confocal PSF."""
+    """Tests for centered confocal PSF (using fftshift)."""
 
     def test_peak_at_center(self):
-        """Test centered PSF has peak at array center."""
+        """Test fftshifted PSF has peak at array center."""
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
-        psf = compute_confocal_psf_centered(optics, grid, z)
+        psf = compute_confocal_psf(optics, (64, 64), 0.05, z)
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
         # Find peak location
-        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        peak_idx = np.unravel_index(psf_centered.argmax(), psf_centered.shape)
         center = (0, 32, 32)
 
         assert peak_idx == center
@@ -316,32 +305,32 @@ class TestComputeSpinningDiskPSF:
         assert psf.shape[1] == 256  # default ny
         assert psf.shape[2] == 256  # default nx
 
-    def test_custom_grid(self):
-        """Test with custom grid."""
-        grid = Grid(shape=(32, 32), spacing=(0.1, 0.1))
+    def test_custom_shape_and_spacing(self):
+        """Test with custom shape and spacing."""
         z = np.linspace(-1, 1, 10)
         psf = compute_spinning_disk_psf(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
-            grid=grid,
+            shape=(32, 32),
+            spacing=0.1,
             z=z,
         )
         assert psf.shape == (10, 32, 32)
 
     def test_pinhole_size_effect(self):
         """Test that larger pinhole gives broader PSF."""
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
-        # Small pinhole (50um on 100x objective)
+        # Small pinhole (25um on 100x objective)
         psf_small = compute_spinning_disk_psf(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             pinhole_um=25.0,  # Small
             magnification=100.0,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
         )
 
@@ -352,7 +341,8 @@ class TestComputeSpinningDiskPSF:
             na=1.4,
             pinhole_um=100.0,  # Large
             magnification=100.0,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
         )
 
@@ -368,24 +358,21 @@ class TestComputeSpinningDiskPSF:
         )
         assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
 
-
-class TestComputeSpinningDiskPSFCentered:
-    """Tests for centered spinning disk PSF."""
-
-    def test_peak_at_center(self):
-        """Test centered PSF has peak at array center."""
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+    def test_peak_at_center_with_fftshift(self):
+        """Test fftshifted PSF has peak at array center."""
         z = np.array([0.0])
 
-        psf = compute_spinning_disk_psf_centered(
+        psf = compute_spinning_disk_psf(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
         )
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
-        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        peak_idx = np.unravel_index(psf_centered.argmax(), psf_centered.shape)
         center = (0, 32, 32)
         assert peak_idx == center
 
@@ -395,8 +382,6 @@ class TestPhysicalProperties:
 
     def test_axial_resolution_improved(self):
         """Test confocal has better axial resolution than widefield."""
-        from deconlib import make_geometry, make_pupil, pupil_to_psf_centered
-
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
@@ -404,17 +389,20 @@ class TestPhysicalProperties:
             ni=1.515,
             pinhole_au=1.0,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+        shape = (64, 64)
+        spacing = 0.05
         z = np.linspace(-2, 2, 41)
 
-        # Confocal PSF
-        psf_confocal = compute_confocal_psf_centered(optics, grid, z)
+        # Confocal PSF (centered via fftshift)
+        psf_confocal = compute_confocal_psf(optics, shape, spacing, z)
+        psf_confocal = np.fft.fftshift(psf_confocal, axes=(-2, -1))
 
         # Widefield PSF
         em_optics = optics.em_optics
-        geom = make_geometry(grid, em_optics)
+        geom = make_geometry(shape, spacing, em_optics)
         pupil = make_pupil(geom)
-        psf_widefield = pupil_to_psf_centered(pupil, geom, z)
+        psf_widefield = pupil_to_psf(pupil, geom, z)
+        psf_widefield = np.fft.fftshift(psf_widefield, axes=(-2, -1))
 
         # Extract axial profile through center
         cx, cy = 32, 32
@@ -434,8 +422,6 @@ class TestPhysicalProperties:
 
     def test_lateral_resolution_improved(self):
         """Test confocal has better lateral resolution."""
-        from deconlib import make_geometry, make_pupil, pupil_to_psf_centered
-
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
@@ -443,17 +429,20 @@ class TestPhysicalProperties:
             ni=1.515,
             pinhole_au=1.0,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.02, 0.02))
+        shape = (64, 64)
+        spacing = 0.02
         z = np.array([0.0])
 
-        # Confocal PSF
-        psf_confocal = compute_confocal_psf_centered(optics, grid, z)[0]
+        # Confocal PSF (centered via fftshift)
+        psf_confocal = compute_confocal_psf(optics, shape, spacing, z)[0]
+        psf_confocal = np.fft.fftshift(psf_confocal)
 
         # Widefield PSF
         em_optics = optics.em_optics
-        geom = make_geometry(grid, em_optics)
+        geom = make_geometry(shape, spacing, em_optics)
         pupil = make_pupil(geom)
-        psf_widefield = pupil_to_psf_centered(pupil, geom, z)[0]
+        psf_widefield = pupil_to_psf(pupil, geom, z)[0]
+        psf_widefield = np.fft.fftshift(psf_widefield)
 
         # Extract lateral profile through center
         cx = 32
@@ -487,12 +476,11 @@ class TestAberratedConfocalPSF:
             ns=1.365,
             pinhole_radius_au=2.0,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         # Should not raise
         psf = compute_confocal_psf(
-            optics, grid, z, aberrations=[IndexMismatch(depth=4.0)]
+            optics, (64, 64), 0.05, z, aberrations=[IndexMismatch(depth=4.0)]
         )
         assert psf.shape == (1, 64, 64)
         assert np.all(psf >= 0)
@@ -509,15 +497,14 @@ class TestAberratedConfocalPSF:
             ns=1.365,  # Different from ni
             pinhole_radius_au=2.0,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.linspace(-2, 2, 21)
 
         # Unaberrated PSF
-        psf_unaberrated = compute_confocal_psf(optics, grid, z)
+        psf_unaberrated = compute_confocal_psf(optics, (64, 64), 0.05, z)
 
         # Aberrated PSF (4 μm deep)
         psf_aberrated = compute_confocal_psf(
-            optics, grid, z, aberrations=[IndexMismatch(depth=4.0)]
+            optics, (64, 64), 0.05, z, aberrations=[IndexMismatch(depth=4.0)]
         )
 
         # PSFs should be different
@@ -530,7 +517,6 @@ class TestAberratedConfocalPSF:
         """Test spinning disk PSF with aberrations."""
         from deconlib import IndexMismatch
 
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         psf = compute_spinning_disk_psf(
@@ -540,7 +526,8 @@ class TestAberratedConfocalPSF:
             ni=1.515,
             ns=1.365,
             magnification=60.0,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
             aberrations=[IndexMismatch(depth=4.0)],
         )
@@ -558,14 +545,13 @@ class TestAberratedConfocalPSF:
             ni=1.515,
             ns=1.365,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         psf_shallow = compute_confocal_psf(
-            optics, grid, z, aberrations=[IndexMismatch(depth=2.0)]
+            optics, (64, 64), 0.05, z, aberrations=[IndexMismatch(depth=2.0)]
         )
         psf_deep = compute_confocal_psf(
-            optics, grid, z, aberrations=[IndexMismatch(depth=10.0)]
+            optics, (64, 64), 0.05, z, aberrations=[IndexMismatch(depth=10.0)]
         )
 
         # Deeper imaging = more aberration = lower peak
@@ -584,11 +570,10 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         # Should not raise
-        psf = compute_confocal_psf(optics, grid, z, vectorial=True)
+        psf = compute_confocal_psf(optics, (64, 64), 0.05, z, vectorial=True)
         assert psf.shape == (1, 64, 64)
         assert np.all(psf >= 0)
 
@@ -601,10 +586,9 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = fft_coords(n=16, spacing=0.2)
 
-        psf = compute_confocal_psf(optics, grid, z, vectorial=True, normalize=True)
+        psf = compute_confocal_psf(optics, (64, 64), 0.05, z, vectorial=True, normalize=True)
         assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
 
     def test_vectorial_differs_from_scalar(self):
@@ -616,17 +600,16 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,  # Index mismatch
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = fft_coords(n=8, spacing=0.2)
 
-        psf_scalar = compute_confocal_psf(optics, grid, z, vectorial=False)
-        psf_vectorial = compute_confocal_psf(optics, grid, z, vectorial=True)
+        psf_scalar = compute_confocal_psf(optics, (64, 64), 0.05, z, vectorial=False)
+        psf_vectorial = compute_confocal_psf(optics, (64, 64), 0.05, z, vectorial=True)
 
         # Should be different at high NA with index mismatch
         assert not np.allclose(psf_scalar, psf_vectorial, rtol=0.01)
 
     def test_vectorial_centered_peak_at_center(self):
-        """Test centered vectorial PSF has peak at center."""
+        """Test fftshifted vectorial PSF has peak at center."""
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
@@ -634,18 +617,17 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
-        psf = compute_confocal_psf_centered(optics, grid, z, vectorial=True)
+        psf = compute_confocal_psf(optics, (64, 64), 0.05, z, vectorial=True)
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
-        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        peak_idx = np.unravel_index(psf_centered.argmax(), psf_centered.shape)
         center = (0, 32, 32)
         assert peak_idx == center
 
     def test_spinning_disk_vectorial(self):
         """Test spinning disk PSF with vectorial model."""
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         psf = compute_spinning_disk_psf(
@@ -655,30 +637,32 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,
             magnification=60.0,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
             vectorial=True,
         )
         assert psf.shape == (1, 64, 64)
         assert np.isclose(psf.sum(), 1.0, rtol=1e-5)
 
-    def test_spinning_disk_centered_vectorial(self):
-        """Test centered spinning disk PSF with vectorial model."""
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
+    def test_spinning_disk_vectorial_centered(self):
+        """Test fftshifted spinning disk PSF with vectorial model."""
         z = np.array([0.0])
 
-        psf = compute_spinning_disk_psf_centered(
+        psf = compute_spinning_disk_psf(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.42,
             ni=1.515,
             ns=1.33,
-            grid=grid,
+            shape=(64, 64),
+            spacing=0.05,
             z=z,
             vectorial=True,
         )
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
-        peak_idx = np.unravel_index(psf.argmax(), psf.shape)
+        peak_idx = np.unravel_index(psf_centered.argmax(), psf_centered.shape)
         center = (0, 32, 32)
         assert peak_idx == center
 
@@ -693,13 +677,13 @@ class TestVectorialConfocalPSF:
             ni=1.515,
             ns=1.33,
         )
-        grid = Grid(shape=(64, 64), spacing=(0.05, 0.05))
         z = np.array([0.0])
 
         # Should not raise
         psf = compute_confocal_psf(
             optics,
-            grid,
+            (64, 64),
+            0.05,
             z,
             vectorial=True,
             aberrations=[IndexMismatch(depth=4.0)],

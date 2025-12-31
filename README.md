@@ -11,9 +11,8 @@ pip install -e .
 ## Quick Start
 
 ```python
-import numpy as np
 from deconlib import (
-    Optics, Grid, make_geometry, make_pupil,
+    Optics, make_geometry, make_pupil,
     pupil_to_psf, fft_coords,
 )
 
@@ -25,14 +24,8 @@ optics = Optics(
     ns=1.334,            # sample index (water)
 )
 
-# Define spatial sampling
-grid = Grid(
-    shape=(256, 256),         # (ny, nx) pixels
-    spacing=(0.085, 0.085),   # (dy, dx) in μm
-)
-
 # Compute geometry (do once, reuse for all computations)
-geom = make_geometry(grid, optics)
+geom = make_geometry((256, 256), 0.085, optics)  # shape, spacing, optics
 
 # Create pupil and compute PSF
 pupil = make_pupil(geom)
@@ -45,7 +38,7 @@ print(f"PSF shape: {psf.shape}")  # (64, 256, 256)
 ### FFT Conventions
 
 - **DC at corner**: PSF output has DC (peak for in-focus) at index (0, 0). Use `fft_coords()` for compatible z-coordinates.
-- **For visualization**: Use `pupil_to_psf_centered()` to get PSF with peak at image center.
+- **For visualization**: Use `np.fft.fftshift(psf, axes=(-2, -1))` to center the PSF.
 
 ## Features
 
@@ -72,12 +65,6 @@ pupil_aberrated = apply_aberrations(pupil, geom, optics, [aberr1, aberr2])
 psf_aberrated = pupil_to_psf(pupil_aberrated, geom, z)
 ```
 
-Available Zernike modes (OSA/ANSI indexing):
-- `PISTON`, `TILT_X`, `TILT_Y`
-- `DEFOCUS`, `ASTIG_OBLIQUE`, `ASTIG_VERTICAL`
-- `COMA_X`, `COMA_Y`, `TREFOIL_X`, `TREFOIL_Y`
-- `SPHERICAL`, and higher-order terms
-
 ### Phase Retrieval
 
 Recover the pupil function from measured PSF data:
@@ -98,38 +85,33 @@ retrieved_pupil = result.pupil
 print(f"Converged: {result.converged}, MSE: {result.mse_history[-1]:.2e}")
 ```
 
-### OTF Computation
+### Confocal and Spinning Disk PSF
 
 ```python
-from deconlib import compute_otf
+from deconlib import ConfocalOptics, compute_confocal_psf
 
-otf = compute_otf(pupil, geom, z)
+optics = ConfocalOptics(
+    wavelength_exc=0.488,
+    wavelength_em=0.525,
+    na=1.4,
+    ni=1.515,
+    pinhole_au=1.0,  # 1 Airy unit diameter
+)
+
+psf = compute_confocal_psf(optics, (256, 256), 0.05, z)
 ```
 
-### Zernike Polynomials
+### Vectorial PSF (High-NA)
+
+For high-NA objectives with refractive index mismatch:
 
 ```python
-from deconlib import zernike_polynomial, zernike_polynomials, ZernikeMode
+from deconlib import pupil_to_vectorial_psf
 
-# Single polynomial
-Z_spherical = zernike_polynomial(ZernikeMode.SPHERICAL, geom.rho, geom.phi)
-
-# All polynomials up to radial order 4
-Z_all = zernike_polynomials(geom.rho, geom.phi, max_order=4)
-```
-
-### Apodization and Amplitude Corrections
-
-For accurate high-NA modeling:
-
-```python
-from deconlib import make_pupil, apply_apodization, compute_amplitude_correction
-
-# Apodized pupil (1/sqrt(cos θ) factor)
-pupil_apod = make_pupil(geom, apodize=True)
-
-# Fresnel amplitude correction for index mismatch
-amplitude = compute_amplitude_correction(geom, optics)
+psf = pupil_to_vectorial_psf(
+    pupil, geom, optics, z,
+    dipole="isotropic",  # or "x", "y", "z", or (theta, phi)
+)
 ```
 
 ## API Reference
@@ -139,20 +121,26 @@ amplitude = compute_amplitude_correction(geom, optics)
 | Class | Description |
 |-------|-------------|
 | `Optics` | Immutable optical parameters (wavelength, NA, refractive indices) |
-| `Grid` | Spatial sampling (shape, pixel spacing) |
 | `Geometry` | Precomputed frequency-space quantities (kx, ky, kz, mask, angles) |
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
-| `make_geometry(grid, optics)` | Create geometry from grid and optics |
+| `make_geometry(shape, spacing, optics)` | Create geometry from shape, pixel spacing, and optics |
 | `make_pupil(geom, apodize=False)` | Create uniform pupil function |
 | `pupil_to_psf(pupil, geom, z)` | Compute 3D PSF (DC at corner) |
-| `pupil_to_psf_centered(...)` | Compute 3D PSF (DC at center) |
+| `pupil_to_vectorial_psf(...)` | Compute vectorial PSF for high-NA |
 | `compute_otf(pupil, geom, z)` | Compute optical transfer function |
 | `retrieve_phase(psf, z, geom, ...)` | Phase retrieval from PSF |
 | `apply_aberrations(pupil, geom, optics, aberrations)` | Apply aberration list |
+
+### Confocal Functions
+
+| Function | Description |
+|----------|-------------|
+| `compute_confocal_psf(optics, shape, spacing, z)` | Compute confocal PSF |
+| `compute_spinning_disk_psf(...)` | Compute spinning disk PSF |
 
 ### Aberration Classes
 

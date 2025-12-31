@@ -19,12 +19,12 @@ References:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
 from .aberrations.base import Aberration, apply_aberrations
-from .optics import Geometry, Grid, Optics, make_geometry
+from .optics import Geometry, Optics, make_geometry
 from .pupil import make_pupil
 from .widefield import pupil_to_psf, pupil_to_vectorial_psf
 
@@ -33,9 +33,7 @@ __all__ = [
     "compute_pinhole_function",
     "compute_airy_radius",
     "compute_confocal_psf",
-    "compute_confocal_psf_centered",
     "compute_spinning_disk_psf",
-    "compute_spinning_disk_psf_centered",
 ]
 
 
@@ -179,44 +177,39 @@ def compute_airy_radius(wavelength: float, na: float) -> float:
 
 
 def compute_pinhole_function(
-    grid: Grid,
+    shape: Tuple[int, int],
+    spacing: Union[float, Tuple[float, float]],
     radius: float,
-    centered: bool = False,
 ) -> np.ndarray:
     """Compute 2D circular pinhole function.
 
     Creates a binary circular aperture representing the pinhole at the
-    sample plane (back-projected coordinates).
+    sample plane (back-projected coordinates). Uses DC-at-corner convention
+    for FFT compatibility.
 
     Args:
-        grid: Spatial sampling configuration.
+        shape: Array shape as (ny, nx).
+        spacing: Pixel size in μm. Scalar or tuple (dy, dx).
         radius: Pinhole radius in μm (at sample plane).
-        centered: If True, place pinhole at array center. If False,
-            use DC-at-corner convention for FFT compatibility.
 
     Returns:
         2D array with pinhole aperture (1 inside, 0 outside).
-        Shape is (ny, nx).
-
-    Note:
-        For convolution with PSF, use centered=False (FFT convention).
-        For visualization, use centered=True.
+        Shape is (ny, nx). DC at corner (0, 0).
     """
-    ny, nx = grid.shape
-    dy, dx = grid.spacing
+    ny, nx = shape
 
-    # Create spatial coordinates
-    if centered:
-        # Coordinates centered in array
-        x = (np.arange(nx) - nx // 2) * dx
-        y = (np.arange(ny) - ny // 2) * dy
+    # Handle scalar or tuple spacing
+    if isinstance(spacing, (int, float)):
+        dy = dx = float(spacing)
     else:
-        # FFT convention: DC at corner
-        x = np.fft.fftshift(np.fft.fftfreq(nx, 1 / (nx * dx)))
-        y = np.fft.fftshift(np.fft.fftfreq(ny, 1 / (ny * dy)))
-        # Shift back to DC-at-corner
-        x = np.fft.ifftshift(x)
-        y = np.fft.ifftshift(y)
+        dy, dx = spacing
+
+    # FFT convention: DC at corner
+    x = np.fft.fftshift(np.fft.fftfreq(nx, 1 / (nx * dx)))
+    y = np.fft.fftshift(np.fft.fftfreq(ny, 1 / (ny * dy)))
+    # Shift back to DC-at-corner
+    x = np.fft.ifftshift(x)
+    y = np.fft.ifftshift(y)
 
     xx, yy = np.meshgrid(x, y, indexing="xy")
     r = np.sqrt(xx**2 + yy**2)
@@ -234,7 +227,8 @@ def _normalize_pinhole(pinhole: np.ndarray) -> np.ndarray:
 
 def compute_confocal_psf(
     confocal_optics: ConfocalOptics,
-    grid: Grid,
+    shape: Tuple[int, int],
+    spacing: Union[float, Tuple[float, float]],
     z: np.ndarray,
     normalize: bool = True,
     include_stokes_shift: bool = True,
@@ -251,7 +245,8 @@ def compute_confocal_psf(
 
     Args:
         confocal_optics: Confocal optical parameters.
-        grid: Spatial sampling configuration.
+        shape: Array shape as (ny, nx).
+        spacing: Pixel size in μm. Scalar or tuple (dy, dx).
         z: Axial positions in μm, shape (nz,).
         normalize: If True, normalize PSF to sum to 1.
         include_stokes_shift: If True, use different wavelengths for
@@ -269,7 +264,7 @@ def compute_confocal_psf(
         3D intensity PSF, shape (nz, ny, nx). DC at corner.
 
     Example:
-        >>> from deconlib.psf import Grid, ConfocalOptics, compute_confocal_psf
+        >>> from deconlib.psf import ConfocalOptics, compute_confocal_psf
         >>> from deconlib.psf.aberrations import IndexMismatch
         >>> from deconlib.utils import fft_coords
         >>>
@@ -278,19 +273,12 @@ def compute_confocal_psf(
         ...     wavelength_em=0.525,
         ...     na=1.4,
         ...     ni=1.515,
-        ...     ns=1.365,  # sample RI different from immersion
+        ...     ns=1.365,
         ...     pinhole_radius_au=2.0,
         ... )
-        >>> grid = Grid(shape=(256, 256), spacing=(0.05, 0.05))
         >>> z = fft_coords(n=64, spacing=0.1)
-        >>>
-        >>> # PSF with spherical aberration from 4μm depth
-        >>> psf = compute_confocal_psf(optics, grid, z,
+        >>> psf = compute_confocal_psf(optics, (256, 256), 0.05, z,
         ...                            aberrations=[IndexMismatch(depth=4.0)])
-        >>>
-        >>> # Vectorial PSF for high-NA with index mismatch
-        >>> psf_vec = compute_confocal_psf(optics, grid, z, vectorial=True,
-        ...                                aberrations=[IndexMismatch(depth=4.0)])
     """
     z = np.atleast_1d(z)
 
@@ -302,11 +290,11 @@ def compute_confocal_psf(
     em_optics = confocal_optics.em_optics
 
     # Create geometry for excitation (smaller wavelength → tighter focus)
-    geom_exc = make_geometry(grid, exc_optics)
+    geom_exc = make_geometry(shape, spacing, exc_optics)
     pupil_exc = make_pupil(geom_exc)
 
     # Create geometry for emission
-    geom_em = make_geometry(grid, em_optics)
+    geom_em = make_geometry(shape, spacing, em_optics)
     pupil_em = make_pupil(geom_em)
 
     # Apply aberrations if provided
@@ -336,7 +324,7 @@ def compute_confocal_psf(
 
     # Get pinhole function
     pinhole_radius = confocal_optics.get_pinhole_radius()
-    pinhole = compute_pinhole_function(grid, pinhole_radius, centered=False)
+    pinhole = compute_pinhole_function(shape, spacing, pinhole_radius)
     pinhole = _normalize_pinhole(pinhole)
 
     # Convolve emission PSF with pinhole (in Fourier space for efficiency)
@@ -359,44 +347,6 @@ def compute_confocal_psf(
     return psf_confocal
 
 
-def compute_confocal_psf_centered(
-    confocal_optics: ConfocalOptics,
-    grid: Grid,
-    z: np.ndarray,
-    normalize: bool = True,
-    include_stokes_shift: bool = True,
-    aberrations: Optional[List[Aberration]] = None,
-    vectorial: bool = False,
-) -> np.ndarray:
-    """Compute 3D confocal PSF with peak centered in image.
-
-    Same as compute_confocal_psf() but shifts output so peak is at
-    array center. Useful for visualization.
-
-    Args:
-        confocal_optics: Confocal optical parameters.
-        grid: Spatial sampling configuration.
-        z: Axial positions in μm.
-        normalize: If True, normalize PSF to sum to 1.
-        include_stokes_shift: If True, use different wavelengths.
-        aberrations: Optional list of Aberration objects.
-        vectorial: If True, use vectorial diffraction model for emission.
-
-    Returns:
-        3D intensity PSF, shape (nz, ny, nx), with peak at center.
-    """
-    psf = compute_confocal_psf(
-        confocal_optics,
-        grid,
-        z,
-        normalize,
-        include_stokes_shift,
-        aberrations,
-        vectorial=vectorial,
-    )
-    return np.fft.fftshift(psf, axes=(-2, -1))
-
-
 def compute_spinning_disk_psf(
     wavelength_exc: float,
     wavelength_em: float,
@@ -406,7 +356,8 @@ def compute_spinning_disk_psf(
     pinhole_um: float = 50.0,
     magnification: float = 100.0,
     disk_magnification: float = 1.0,
-    grid: Grid = None,
+    shape: Tuple[int, int] = None,
+    spacing: Union[float, Tuple[float, float]] = None,
     z: np.ndarray = None,
     normalize: bool = True,
     aberrations: Optional[List[Aberration]] = None,
@@ -427,8 +378,9 @@ def compute_spinning_disk_psf(
         magnification: Objective magnification. Default 100×.
         disk_magnification: Additional magnification between disk and
             objective (relay optics). Default 1.0.
-        grid: Spatial sampling. Default: 256×256 at Nyquist spacing.
-        z: Axial positions (μm). Default: ±2 μm range.
+        shape: Array shape (ny, nx). Default: (256, 256).
+        spacing: Pixel size in μm. Default: Nyquist spacing.
+        z: Axial positions (μm). Default: ±3.2 μm range at 0.1 μm steps.
         normalize: If True, normalize PSF to sum to 1.
         aberrations: Optional list of Aberration objects (e.g., IndexMismatch).
         vectorial: If True, use vectorial diffraction model for the emission
@@ -439,8 +391,6 @@ def compute_spinning_disk_psf(
 
     Example:
         >>> from deconlib.psf.aberrations import IndexMismatch
-        >>> # 60× oil objective, 488nm excitation, GFP emission
-        >>> # with spherical aberration from 4μm depth
         >>> psf = compute_spinning_disk_psf(
         ...     wavelength_exc=0.488,
         ...     wavelength_em=0.525,
@@ -449,18 +399,6 @@ def compute_spinning_disk_psf(
         ...     ns=1.365,
         ...     magnification=60.0,
         ...     aberrations=[IndexMismatch(depth=4.0)],
-        ... )
-        >>>
-        >>> # Vectorial model for high-NA with index mismatch
-        >>> psf_vec = compute_spinning_disk_psf(
-        ...     wavelength_exc=0.561,
-        ...     wavelength_em=0.595,
-        ...     na=1.42,
-        ...     ni=1.515,
-        ...     ns=1.365,
-        ...     magnification=60.0,
-        ...     vectorial=True,
-        ...     aberrations=[IndexMismatch(depth=1.5)],
         ... )
     """
     if ns is None:
@@ -473,7 +411,7 @@ def compute_spinning_disk_psf(
 
     # Convert to Airy units for ConfocalOptics
     airy_radius = compute_airy_radius(wavelength_em, na)
-    pinhole_au = pinhole_radius_bp / airy_radius
+    pinhole_radius_au = pinhole_radius_bp / airy_radius
 
     confocal_optics = ConfocalOptics(
         wavelength_exc=wavelength_exc,
@@ -481,16 +419,17 @@ def compute_spinning_disk_psf(
         na=na,
         ni=ni,
         ns=ns,
-        pinhole_au=pinhole_au,
+        pinhole_radius_au=pinhole_radius_au,
         magnification=total_mag,
     )
 
-    # Default grid: Nyquist sampling
-    if grid is None:
-        nyquist_spacing = wavelength_em / (4 * na)
-        grid = Grid(
-            shape=(256, 256), spacing=(nyquist_spacing, nyquist_spacing)
-        )
+    # Default shape
+    if shape is None:
+        shape = (256, 256)
+
+    # Default spacing: Nyquist sampling
+    if spacing is None:
+        spacing = wavelength_em / (4 * na)
 
     # Default z range
     if z is None:
@@ -500,49 +439,10 @@ def compute_spinning_disk_psf(
 
     return compute_confocal_psf(
         confocal_optics,
-        grid,
+        shape,
+        spacing,
         z,
         normalize=normalize,
         aberrations=aberrations,
         vectorial=vectorial,
     )
-
-
-def compute_spinning_disk_psf_centered(
-    wavelength_exc: float,
-    wavelength_em: float,
-    na: float,
-    ni: float = 1.515,
-    ns: float = None,
-    pinhole_um: float = 50.0,
-    magnification: float = 100.0,
-    disk_magnification: float = 1.0,
-    grid: Grid = None,
-    z: np.ndarray = None,
-    normalize: bool = True,
-    aberrations: Optional[List[Aberration]] = None,
-    vectorial: bool = False,
-) -> np.ndarray:
-    """Compute spinning disk PSF with peak centered.
-
-    Same as compute_spinning_disk_psf() but with peak at array center.
-    Useful for visualization.
-
-    See compute_spinning_disk_psf() for parameter documentation.
-    """
-    psf = compute_spinning_disk_psf(
-        wavelength_exc=wavelength_exc,
-        wavelength_em=wavelength_em,
-        na=na,
-        ni=ni,
-        ns=ns,
-        pinhole_um=pinhole_um,
-        magnification=magnification,
-        disk_magnification=disk_magnification,
-        grid=grid,
-        z=z,
-        normalize=normalize,
-        aberrations=aberrations,
-        vectorial=vectorial,
-    )
-    return np.fft.fftshift(psf, axes=(-2, -1))

@@ -8,10 +8,8 @@ from .optics import Geometry, Optics
 
 __all__ = [
     "pupil_to_psf",
-    "pupil_to_psf_centered",
     "compute_otf",
     "pupil_to_vectorial_psf",
-    "pupil_to_vectorial_psf_centered",
 ]
 
 
@@ -69,30 +67,6 @@ def pupil_to_psf(
             psf = psf / total
 
     return psf
-
-
-def pupil_to_psf_centered(
-    pupil: np.ndarray,
-    geom: Geometry,
-    z: np.ndarray,
-    normalize: bool = True,
-) -> np.ndarray:
-    """Compute 3D PSF with peak centered in image.
-
-    Same as pupil_to_psf() but shifts output so DC (peak for in-focus
-    plane) is at array center. Useful for visualization.
-
-    Args:
-        pupil: Complex pupil function, shape (ny, nx).
-        geom: Precomputed geometry from make_geometry().
-        z: Axial positions in μm, shape (nz,).
-        normalize: If True, normalize PSF to sum to 1. Default True.
-
-    Returns:
-        Intensity PSF, shape (nz, ny, nx), with peak at center.
-    """
-    psf = pupil_to_psf(pupil, geom, z, normalize=normalize)
-    return np.fft.fftshift(psf, axes=(-2, -1))
 
 
 def compute_otf(
@@ -248,31 +222,3 @@ def pupil_to_vectorial_psf(
             psf = psf / total
 
     return psf
-
-
-def pupil_to_vectorial_psf_centered(
-    pupil: np.ndarray,
-    geom: Geometry,
-    optics: Optics,
-    z: np.ndarray,
-    dipole: Union[Literal["isotropic", "x", "y", "z"], tuple[float, float]] = "isotropic",
-    normalize: bool = True,
-) -> np.ndarray:
-    """Compute vectorial PSF with peak centered in image.
-
-    Same as pupil_to_vectorial_psf() but shifts output so DC (peak for
-    in-focus plane) is at array center. Useful for visualization.
-
-    Args:
-        pupil: Complex pupil function, shape (ny, nx).
-        geom: Precomputed geometry from make_geometry().
-        optics: Optical parameters.
-        z: Axial positions in μm, shape (nz,).
-        dipole: Dipole orientation (see pupil_to_vectorial_psf).
-        normalize: If True, normalize PSF to sum to 1. Default True.
-
-    Returns:
-        Intensity PSF, shape (nz, ny, nx), with peak at center.
-    """
-    psf = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole=dipole, normalize=normalize)
-    return np.fft.fftshift(psf, axes=(-2, -1))
