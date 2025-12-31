@@ -51,14 +51,6 @@ from .blind import (
     extract_psf_sicg,
     solve_blind_sicg,
 )
-from .mem import (
-    MEMProblem,
-    solve_mem,
-    solve_mem_dual,
-    dual_objective,
-    dual_gradient,
-    recover_primal,
-)
 
 __all__ = [
     # Base types
@@ -76,11 +68,4 @@ __all__ = [
     # Blind / PSF extraction
     "extract_psf_sicg",
     "solve_blind_sicg",
-    # MEM
-    "MEMProblem",
-    "solve_mem",
-    "solve_mem_dual",
-    "dual_objective",
-    "dual_gradient",
-    "recover_primal",
 ]
