@@ -4,28 +4,34 @@ Classes for modeling optical aberrations.
 
 ## Applying Aberrations
 
-::: deconlib.psf.aberrations.apply_aberrations
+::: deconlib.psf.apply_aberrations
+
+## Base Class
+
+::: deconlib.psf.Aberration
+    options:
+      show_source: false
 
 ## Aberration Classes
 
 ### Index Mismatch
 
-::: deconlib.psf.aberrations.IndexMismatch
+::: deconlib.psf.IndexMismatch
     options:
       show_source: false
 
 ### Defocus
 
-::: deconlib.psf.aberrations.Defocus
+::: deconlib.psf.Defocus
     options:
       show_source: false
 
 ### Zernike Aberrations
 
-::: deconlib.psf.aberrations.ZernikeAberration
+::: deconlib.psf.ZernikeAberration
     options:
       show_source: false
 
-::: deconlib.psf.aberrations.ZernikeMode
+::: deconlib.psf.ZernikeMode
     options:
       show_source: false

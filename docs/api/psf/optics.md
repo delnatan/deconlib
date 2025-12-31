@@ -4,14 +4,14 @@ Core data structures for optical system parameters and geometry.
 
 ## Classes
 
-::: deconlib.psf.optics.Optics
+::: deconlib.psf.Optics
     options:
       show_source: false
 
-::: deconlib.psf.optics.Geometry
+::: deconlib.psf.Geometry
     options:
       show_source: false
 
 ## Functions
 
-::: deconlib.psf.optics.make_geometry
+::: deconlib.psf.make_geometry

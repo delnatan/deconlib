@@ -2,12 +2,14 @@
 
 Algorithms for recovering pupil phase from PSF measurements.
 
-## Main Function
+## Functions
 
-::: deconlib.psf.retrieval.retrieve_phase
+::: deconlib.psf.retrieve_phase
+
+::: deconlib.psf.retrieve_phase_vectorial
 
 ## Result Class
 
-::: deconlib.psf.retrieval.PhaseRetrievalResult
+::: deconlib.psf.PhaseRetrievalResult
     options:
       show_source: false

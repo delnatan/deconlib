@@ -4,18 +4,24 @@ Mathematical utility functions.
 
 ## Fourier Utilities
 
-::: deconlib.utils.fourier.fft_coords
+::: deconlib.utils.fft_coords
 
-::: deconlib.utils.fourier.fftfreq_nd
+::: deconlib.utils.fourier_meshgrid
+
+::: deconlib.utils.fftshift_1d
+
+::: deconlib.utils.imshift
 
 ## Zernike Polynomials
 
-::: deconlib.utils.zernike.zernike_polynomial
+::: deconlib.utils.zernike_polynomial
 
-::: deconlib.utils.zernike.zernike_polynomials
+::: deconlib.utils.zernike_polynomials
+
+::: deconlib.utils.ansi_to_nm
+
+::: deconlib.utils.noll_to_ansi
 
 ## Padding
 
-::: deconlib.utils.padding.pad_to_shape
-
-::: deconlib.utils.padding.unpad_to_shape
+::: deconlib.utils.pad_to_shape
