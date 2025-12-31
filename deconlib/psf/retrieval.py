@@ -69,11 +69,13 @@ def retrieve_phase(
         PhaseRetrievalResult with retrieved pupil and diagnostics.
 
     Example:
-        >>> # Generate PSF from known pupil
-        >>> psf = pupil_to_psf(true_pupil, geom, z_planes)
-        >>> # Retrieve
-        >>> result = retrieve_phase(psf, z_planes, geom, max_iter=50)
-        >>> retrieved_pupil = result.pupil
+        ```python
+        # Generate PSF from known pupil
+        psf = pupil_to_psf(true_pupil, geom, z_planes)
+        # Retrieve
+        result = retrieve_phase(psf, z_planes, geom, max_iter=50)
+        retrieved_pupil = result.pupil
+        ```
     """
     nz = len(z_planes)
     z_planes = np.asarray(z_planes).reshape(nz, 1, 1)
@@ -202,11 +204,13 @@ def retrieve_phase_vectorial(
         PhaseRetrievalResult with retrieved pupil and diagnostics.
 
     Example:
-        >>> # Generate PSF from known pupil using vectorial model
-        >>> psf = pupil_to_vectorial_psf(true_pupil, geom, optics, z_planes)
-        >>> # Retrieve using vectorial forward model
-        >>> result = retrieve_phase_vectorial(psf, z_planes, geom, optics, max_iter=50)
-        >>> retrieved_pupil = result.pupil
+        ```python
+        # Generate PSF from known pupil using vectorial model
+        psf = pupil_to_vectorial_psf(true_pupil, geom, optics, z_planes)
+        # Retrieve using vectorial forward model
+        result = retrieve_phase_vectorial(psf, z_planes, geom, optics, max_iter=50)
+        retrieved_pupil = result.pupil
+        ```
     """
     nz = len(z_planes)
     z_planes = np.asarray(z_planes).reshape(nz, 1, 1)

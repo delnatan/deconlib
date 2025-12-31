@@ -16,8 +16,10 @@ class Aberration(ABC):
     Subclasses implement __call__ to return a complex phase factor.
 
     Example:
-        >>> aberr = IndexMismatch(depth=10.0)
-        >>> pupil_aberrated = pupil * aberr(geom, optics)
+        ```python
+        aberr = IndexMismatch(depth=10.0)
+        pupil_aberrated = pupil * aberr(geom, optics)
+        ```
     """
 
     @abstractmethod
@@ -55,11 +57,13 @@ def apply_aberrations(
         Aberrated pupil array.
 
     Example:
-        >>> aberrations = [
-        ...     IndexMismatch(depth=10.0),
-        ...     ZernikeAberration({ZernikeMode.SPHERICAL: 0.5}),
-        ... ]
-        >>> pupil_aberrated = apply_aberrations(pupil, geom, optics, aberrations)
+        ```python
+        aberrations = [
+            IndexMismatch(depth=10.0),
+            ZernikeAberration({ZernikeMode.SPHERICAL: 0.5}),
+        ]
+        pupil_aberrated = apply_aberrations(pupil, geom, optics, aberrations)
+        ```
     """
     result = pupil.copy()
     for aberr in aberrations:

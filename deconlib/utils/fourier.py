@@ -24,13 +24,14 @@ def fft_coords(n: int, spacing: float = 1.0) -> np.ndarray:
         or [0, d, 2d, ..., -(n//2)*d, ..., -d] for odd n.
 
     Example:
-        >>> z = fft_coords(8, spacing=0.5)
-        >>> z
-        array([ 0. ,  0.5,  1. ,  1.5, -2. , -1.5, -1. , -0.5])
+        ```python
+        z = fft_coords(8, spacing=0.5)
+        # Returns: [ 0. ,  0.5,  1. ,  1.5, -2. , -1.5, -1. , -0.5]
 
-        >>> # Typical usage for PSF computation:
-        >>> z_planes = fft_coords(nz, dz)
-        >>> psf = compute_psf(config, pupil_data, z_planes)
+        # Typical usage for PSF computation:
+        z_planes = fft_coords(nz, dz)
+        psf = compute_psf(config, pupil_data, z_planes)
+        ```
     """
     return fftfreq(n) * n * spacing
 
@@ -56,8 +57,10 @@ def fourier_meshgrid(
         Tuple of N-dimensional frequency coordinate arrays, one per dimension.
 
     Example:
-        >>> ky, kx = fourier_meshgrid(256, 256, spacing=(0.1, 0.1))
-        >>> kz, ky, kx = fourier_meshgrid(64, 256, 256, spacing=(0.5, 0.1, 0.1), real=True)
+        ```python
+        ky, kx = fourier_meshgrid(256, 256, spacing=(0.1, 0.1))
+        kz, ky, kx = fourier_meshgrid(64, 256, 256, spacing=(0.5, 0.1, 0.1), real=True)
+        ```
     """
     ndim = len(shape)
 
@@ -97,10 +100,11 @@ def fftshift_1d(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         can be used to apply the same shift to other arrays.
 
     Example:
-        >>> x = np.array([-2, -1, 0, 1, 2])
-        >>> shifted, indices = fftshift_1d(x)
-        >>> shifted
-        array([0, 1, 2, -2, -1])
+        ```python
+        x = np.array([-2, -1, 0, 1, 2])
+        shifted, indices = fftshift_1d(x)
+        # shifted = [0, 1, 2, -2, -1]
+        ```
     """
     n = len(x)
     is_even = n % 2 == 0
@@ -126,8 +130,10 @@ def imshift(img: np.ndarray, *shifts: float) -> np.ndarray:
         Shifted image (same shape as input).
 
     Example:
-        >>> img = np.random.rand(256, 256)
-        >>> shifted = imshift(img, 10.5, -5.3)  # shift by (y=10.5, x=-5.3) pixels
+        ```python
+        img = np.random.rand(256, 256)
+        shifted = imshift(img, 10.5, -5.3)  # shift by (y=10.5, x=-5.3) pixels
+        ```
     """
     ndim = img.ndim
     if len(shifts) != ndim:

@@ -19,9 +19,10 @@ class Optics:
         ns: Refractive index of sample medium. Defaults to ni if not specified.
 
     Example:
-        >>> optics = Optics(wavelength=0.525, na=1.4, ni=1.515, ns=1.334)
-        >>> optics.k_cutoff  # NA / wavelength
-        2.6666...
+        ```python
+        optics = Optics(wavelength=0.525, na=1.4, ni=1.515, ns=1.334)
+        print(optics.k_cutoff)  # NA / wavelength -> ~2.67
+        ```
     """
 
     wavelength: float
@@ -104,8 +105,10 @@ def make_geometry(
         Geometry dataclass with all precomputed quantities.
 
     Example:
-        >>> optics = Optics(wavelength=0.525, na=1.4, ni=1.515)
-        >>> geom = make_geometry((256, 256), 0.085, optics)
+        ```python
+        optics = Optics(wavelength=0.525, na=1.4, ni=1.515)
+        geom = make_geometry((256, 256), 0.085, optics)
+        ```
     """
     ny, nx = shape
 

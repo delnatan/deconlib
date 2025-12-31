@@ -1,0 +1,104 @@
+site_name: deconlib
+site_description: Optical microscopy PSF computation and deconvolution library
+site_url: https://delnatan.github.io/deconlib/
+repo_url: https://github.com/delnatan/deconlib
+repo_name: delnatan/deconlib
+
+theme:
+  name: material
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            # Display options
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            # Member options
+            members_order: source
+            group_by_category: true
+            show_submodules: false
+            # Docstring options
+            docstring_style: google
+            docstring_section_style: spacy
+            merge_init_into_class: true
+            # Signature options
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.arithmatex:
+      generic: true
+  - tables
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+  - User Guide:
+      - PSF Computation: guide/psf.md
+      - Aberrations: guide/aberrations.md
+      - Phase Retrieval: guide/phase-retrieval.md
+      - Confocal PSF: guide/confocal.md
+      - Deconvolution: guide/deconvolution.md
+  - API Reference:
+      - Overview: api/index.md
+      - PSF Module:
+          - Optics: api/psf/optics.md
+          - Widefield: api/psf/widefield.md
+          - Confocal: api/psf/confocal.md
+          - Aberrations: api/psf/aberrations.md
+          - Phase Retrieval: api/psf/retrieval.md
+      - Deconvolution: api/deconvolution.md
+      - Utilities: api/utils.md

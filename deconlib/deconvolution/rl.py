@@ -56,11 +56,13 @@ def solve_rl(
         DeconvolutionResult with restored image and diagnostics.
 
     Example:
-        >>> from deconlib.deconvolution import make_fft_convolver, solve_rl
-        >>> C, C_adj = make_fft_convolver(psf, device="cuda")
-        >>> observed = torch.from_numpy(blurred).to("cuda")
-        >>> result = solve_rl(observed, C, C_adj, num_iter=100)
-        >>> restored = result.restored.cpu().numpy()
+        ```python
+        from deconlib.deconvolution import make_fft_convolver, solve_rl
+        C, C_adj = make_fft_convolver(psf, device="cuda")
+        observed = torch.from_numpy(blurred).to("cuda")
+        result = solve_rl(observed, C, C_adj, num_iter=100)
+        restored = result.restored.cpu().numpy()
+        ```
 
     Note:
         - The observed image should be non-negative (photon counts).

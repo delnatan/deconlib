@@ -40,15 +40,17 @@ def make_fft_convolver(
             - C_adj(y): Adjoint operator, computes PSF* ⊛ y (correlation)
 
     Example:
-        >>> from deconlib.psf import pupil_to_psf
-        >>> psf = pupil_to_psf(pupil, geom, z)[0]  # 2D PSF
-        >>> C, C_adj = make_fft_convolver(psf, device="cuda")
-        >>>
-        >>> # Forward: blur an image
-        >>> blurred = C(image)
-        >>>
-        >>> # Adjoint: correlate with PSF
-        >>> correlated = C_adj(blurred)
+        ```python
+        from deconlib.psf import pupil_to_psf
+        psf = pupil_to_psf(pupil, geom, z)[0]  # 2D PSF
+        C, C_adj = make_fft_convolver(psf, device="cuda")
+
+        # Forward: blur an image
+        blurred = C(image)
+
+        # Adjoint: correlate with PSF
+        correlated = C_adj(blurred)
+        ```
 
     Note:
         The adjoint of convolution with PSF is correlation with PSF,
@@ -104,8 +106,10 @@ def make_fft_convolver_3d(
         Tuple (C, C_adj) of forward and adjoint operators.
 
     Example:
-        >>> psf_3d = pupil_to_psf(pupil, geom, z)  # 3D PSF
-        >>> C, C_adj = make_fft_convolver_3d(psf_3d, device="cuda")
+        ```python
+        psf_3d = pupil_to_psf(pupil, geom, z)  # 3D PSF
+        C, C_adj = make_fft_convolver_3d(psf_3d, device="cuda")
+        ```
     """
     shape = psf.shape  # (D, H, W)
 

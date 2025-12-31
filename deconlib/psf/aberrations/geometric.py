@@ -25,9 +25,11 @@ class IndexMismatch(Aberration):
         depth: Distance into sample medium (μm), positive into sample.
 
     Example:
-        >>> # Imaging 10 μm into aqueous sample with oil objective
-        >>> aberr = IndexMismatch(depth=10.0)
-        >>> pupil_aberrated = pupil * aberr(geom, optics)
+        ```python
+        # Imaging 10 μm into aqueous sample with oil objective
+        aberr = IndexMismatch(depth=10.0)
+        pupil_aberrated = pupil * aberr(geom, optics)
+        ```
     """
 
     def __init__(self, depth: float):
@@ -73,8 +75,10 @@ class Defocus(Aberration):
         z: Defocus distance (μm), positive moves focus into sample.
 
     Example:
-        >>> aberr = Defocus(z=1.0)  # 1 μm defocus
-        >>> pupil_defocused = pupil * aberr(geom, optics)
+        ```python
+        aberr = Defocus(z=1.0)  # 1 μm defocus
+        pupil_defocused = pupil * aberr(geom, optics)
+        ```
     """
 
     def __init__(self, z: float):

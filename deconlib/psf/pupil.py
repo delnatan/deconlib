@@ -26,8 +26,10 @@ def make_pupil(geom: Geometry, apodize: bool = False) -> np.ndarray:
         Complex pupil array of shape (ny, nx), unity inside NA, zero outside.
 
     Example:
-        >>> pupil = make_pupil(geom)
-        >>> pupil_apodized = make_pupil(geom, apodize=True)
+        ```python
+        pupil = make_pupil(geom)
+        pupil_apodized = make_pupil(geom, apodize=True)
+        ```
     """
     pupil = geom.mask.astype(np.complex128)
 

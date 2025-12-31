@@ -28,10 +28,10 @@ def ansi_to_nm(j: int) -> tuple[int, int]:
         Tuple (n, m) where n is radial order, m is azimuthal frequency.
 
     Example:
-        >>> ansi_to_nm(4)  # Defocus
-        (2, 0)
-        >>> ansi_to_nm(12)  # Spherical
-        (4, 0)
+        ```python
+        ansi_to_nm(4)   # Defocus -> (2, 0)
+        ansi_to_nm(12)  # Spherical -> (4, 0)
+        ```
     """
     # Find n such that n*(n+1)/2 <= j < (n+1)*(n+2)/2
     n = int(np.ceil((-3 + np.sqrt(9 + 8 * j)) / 2))
@@ -98,8 +98,10 @@ def zernike_polynomial(j: int, rho: np.ndarray, phi: np.ndarray) -> np.ndarray:
         Z_j evaluated at each (rho, phi) point.
 
     Example:
-        >>> # Evaluate defocus (j=4)
-        >>> Z4 = zernike_polynomial(4, rho, phi)
+        ```python
+        # Evaluate defocus (j=4)
+        Z4 = zernike_polynomial(4, rho, phi)
+        ```
     """
     n, m = ansi_to_nm(j)
 
@@ -135,8 +137,10 @@ def zernike_polynomials(
         Zernike polynomials Z_j for j = 0 to num_polynomials-1.
 
     Example:
-        >>> Z = zernike_polynomials(rho, phi, max_order=4)
-        >>> Z[4]  # Defocus term (n=2, m=0)
+        ```python
+        Z = zernike_polynomials(rho, phi, max_order=4)
+        Z[4]  # Defocus term (n=2, m=0)
+        ```
     """
     num_terms = _triangular_number(max_order + 1)
     result = np.zeros((num_terms,) + rho.shape, dtype=np.float64)
