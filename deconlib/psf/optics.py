@@ -1,7 +1,7 @@
 """Optical system configuration data structures."""
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Union
 
 import numpy as np
 
@@ -52,53 +52,6 @@ class Optics:
 
 
 @dataclass(frozen=True)
-class Grid:
-    """Spatial sampling configuration.
-
-    Attributes:
-        shape: Array shape as (ny, nx) - row-major, y first.
-        spacing: Pixel size as (dy, dx) in microns.
-
-    Example:
-        >>> grid = Grid(shape=(256, 256), spacing=(0.085, 0.085))
-        >>> grid.ny, grid.nx
-        (256, 256)
-    """
-
-    shape: Tuple[int, int]
-    spacing: Tuple[float, float]
-
-    def __post_init__(self) -> None:
-        """Validate parameters."""
-        if len(self.shape) != 2:
-            raise ValueError(f"Shape must be (ny, nx), got {self.shape}")
-        if len(self.spacing) != 2:
-            raise ValueError(f"Spacing must be (dy, dx), got {self.spacing}")
-        if self.spacing[0] <= 0 or self.spacing[1] <= 0:
-            raise ValueError(f"Spacing must be positive, got {self.spacing}")
-
-    @property
-    def ny(self) -> int:
-        """Number of pixels in y (rows)."""
-        return self.shape[0]
-
-    @property
-    def nx(self) -> int:
-        """Number of pixels in x (columns)."""
-        return self.shape[1]
-
-    @property
-    def dy(self) -> float:
-        """Pixel size in y (μm)."""
-        return self.spacing[0]
-
-    @property
-    def dx(self) -> float:
-        """Pixel size in x (μm)."""
-        return self.spacing[1]
-
-
-@dataclass(frozen=True)
 class Geometry:
     """Precomputed frequency-space geometry for pupil computations.
 
@@ -130,23 +83,40 @@ class Geometry:
         return self.mask.shape
 
 
-def make_geometry(grid: Grid, optics: Optics) -> Geometry:
+def make_geometry(
+    shape: Tuple[int, int],
+    spacing: Union[float, Tuple[float, float]],
+    optics: Optics,
+) -> Geometry:
     """Compute frequency-space geometry. Call once, reuse.
 
+    This is the main entry point for PSF computation. Creates all the
+    precomputed frequency-space quantities needed for pupil manipulation
+    and PSF/OTF calculation.
+
     Args:
-        grid: Spatial sampling configuration.
+        shape: Array shape as (ny, nx).
+        spacing: Pixel size in μm. Either a scalar for isotropic pixels,
+            or a tuple (dy, dx) for anisotropic pixels.
         optics: Optical system parameters.
 
     Returns:
         Geometry dataclass with all precomputed quantities.
 
     Example:
-        >>> grid = Grid(shape=(256, 256), spacing=(0.085, 0.085))
         >>> optics = Optics(wavelength=0.525, na=1.4, ni=1.515)
-        >>> geom = make_geometry(grid, optics)
+        >>> geom = make_geometry((256, 256), 0.085, optics)
     """
-    ny, nx = grid.shape
-    dy, dx = grid.spacing
+    ny, nx = shape
+
+    # Handle scalar or tuple spacing
+    if isinstance(spacing, (int, float)):
+        dy = dx = float(spacing)
+    else:
+        dy, dx = spacing
+
+    if dy <= 0 or dx <= 0:
+        raise ValueError(f"Spacing must be positive, got ({dy}, {dx})")
 
     # Frequency coordinates (cycles/μm), DC at corner
     kx_1d = np.fft.fftfreq(nx, dx)

@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from deconlib import (
-    Grid,
     Optics,
     fft_coords,
     make_geometry,
@@ -18,7 +17,6 @@ from deconlib.psf.pupil import (
 )
 from deconlib.psf.widefield import (
     pupil_to_vectorial_psf,
-    pupil_to_vectorial_psf_centered,
 )
 
 
@@ -29,16 +27,14 @@ class TestFresnelCoefficients:
     def matched_index_setup(self):
         """Setup with matched refractive indices."""
         optics = Optics(wavelength=0.525, na=1.4, ni=1.515, ns=1.515)
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.1, optics)
         return geom, optics
 
     @pytest.fixture
     def mismatched_index_setup(self):
         """Setup with oil/water mismatch (typical high-NA case)."""
         optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.1, optics)
         return geom, optics
 
     def test_matched_index_fresnel_unity(self, matched_index_setup):
@@ -86,8 +82,7 @@ class TestVectorialFactors:
     def setup(self):
         """Standard setup for vectorial factor tests."""
         optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.1, optics)
         return geom, optics
 
     def test_factors_shape(self, setup):
@@ -133,8 +128,7 @@ class TestVectorialPSF:
     def setup(self):
         """Standard setup for PSF tests."""
         optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.1, optics)
         pupil = make_pupil(geom)
         z = fft_coords(n=16, spacing=0.2)
         return pupil, geom, optics, z
@@ -163,7 +157,8 @@ class TestVectorialPSF:
     def test_isotropic_psf_rotationally_symmetric(self, setup):
         """Isotropic PSF should be approximately rotationally symmetric."""
         pupil, geom, optics, z = setup
-        psf = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="isotropic")
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="isotropic")
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
         # At in-focus plane, check symmetry
         center_z = len(z) // 2
@@ -171,8 +166,8 @@ class TestVectorialPSF:
         r = 5
 
         # Compare values at same radius, different angles
-        val_x = psf[center_z, center_xy, center_xy + r]
-        val_y = psf[center_z, center_xy + r, center_xy]
+        val_x = psf_centered[center_z, center_xy, center_xy + r]
+        val_y = psf_centered[center_z, center_xy + r, center_xy]
 
         # Should be similar (within 20% due to pixelation)
         assert np.isclose(val_x, val_y, rtol=0.2)
@@ -180,17 +175,18 @@ class TestVectorialPSF:
     def test_z_dipole_donut_shape(self, setup):
         """Z-dipole PSF should have donut shape at focus."""
         pupil, geom, optics, z = setup
-        psf = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="z")
+        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="z")
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
         # At in-focus plane
         center_z = len(z) // 2
         center_xy = 32
 
         # Center should be near zero (dark center of donut)
-        center_val = psf[center_z, center_xy, center_xy]
+        center_val = psf_centered[center_z, center_xy, center_xy]
 
         # Ring should be brighter
-        ring_val = psf[center_z, center_xy, center_xy + 5]
+        ring_val = psf_centered[center_z, center_xy, center_xy + 5]
 
         assert ring_val > center_val
 
@@ -222,13 +218,16 @@ class TestVectorialPSF:
         pupil, geom, optics, z = setup
 
         # Dipole tilted 45° from z in xz plane
-        psf_tilted = pupil_to_vectorial_psf_centered(
+        psf_tilted = pupil_to_vectorial_psf(
             pupil, geom, optics, z, dipole=(np.pi / 4, 0)
         )
+        psf_tilted = np.fft.fftshift(psf_tilted, axes=(-2, -1))
 
         # For comparison: z-dipole (symmetric donut) and x-dipole
-        psf_z = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="z")
-        psf_x = pupil_to_vectorial_psf_centered(pupil, geom, optics, z, dipole="x")
+        psf_z = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="z")
+        psf_z = np.fft.fftshift(psf_z, axes=(-2, -1))
+        psf_x = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="x")
+        psf_x = np.fft.fftshift(psf_x, axes=(-2, -1))
 
         # At defocused planes, tilted dipole should be asymmetric in x
         # (not symmetric like z-dipole or isotropic)
@@ -247,16 +246,19 @@ class TestVectorialPSF:
         assert not np.allclose(psf_tilted, psf_z, rtol=0.1)
         assert not np.allclose(psf_tilted, psf_x, rtol=0.1)
 
-    def test_centered_vs_uncentered(self, setup):
-        """Test that centered version is just fftshifted."""
+    def test_fftshift_centers_psf(self, setup):
+        """Test that fftshift correctly centers the PSF."""
         pupil, geom, optics, z = setup
 
         psf = pupil_to_vectorial_psf(pupil, geom, optics, z)
-        psf_centered = pupil_to_vectorial_psf_centered(pupil, geom, optics, z)
+        psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
-        # Centered should be fftshift of uncentered
-        psf_shifted = np.fft.fftshift(psf, axes=(-2, -1))
-        assert np.allclose(psf_centered, psf_shifted)
+        # Peak should be at center for in-focus plane
+        center_z = len(z) // 2
+        peak_idx = np.unravel_index(
+            psf_centered[center_z].argmax(), psf_centered[center_z].shape
+        )
+        assert peak_idx == (32, 32)
 
 
 class TestVectorialVsScalar:
@@ -266,8 +268,7 @@ class TestVectorialVsScalar:
         """At low NA, vectorial PSF should be similar to scalar PSF."""
         # Low NA setup
         optics = Optics(wavelength=0.525, na=0.4, ni=1.0, ns=1.0)
-        grid = Grid(shape=(64, 64), spacing=(0.5, 0.5))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.5, optics)
         pupil = make_pupil(geom)
         z = fft_coords(n=16, spacing=0.5)
 
@@ -286,8 +287,7 @@ class TestVectorialVsScalar:
         """At high NA with index mismatch, vectorial should differ from scalar."""
         # High NA setup with mismatch
         optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
-        grid = Grid(shape=(64, 64), spacing=(0.065, 0.065))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.065, optics)
         pupil = make_pupil(geom)
         z = fft_coords(n=16, spacing=0.1)
 
@@ -309,8 +309,7 @@ class TestVectorialPhaseRetrieval:
     def setup(self):
         """Standard setup for phase retrieval tests."""
         optics = Optics(wavelength=0.525, na=1.42, ni=1.515, ns=1.33)
-        grid = Grid(shape=(64, 64), spacing=(0.1, 0.1))
-        geom = make_geometry(grid, optics)
+        geom = make_geometry((64, 64), 0.1, optics)
         pupil = make_pupil(geom)
         z = fft_coords(n=16, spacing=0.2)
         return pupil, geom, optics, z
