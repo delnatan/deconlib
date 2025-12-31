@@ -37,12 +37,19 @@ from .base import (
 from .operators import (
     make_fft_convolver,
     make_fft_convolver_3d,
+    make_fft_convolver_from_tensor,
+    make_fft_convolver_3d_from_tensor,
 )
 from .rl import (
     solve_rl,
 )
 from .sicg import (
     solve_sicg,
+)
+from .blind import (
+    BlindDeconvolutionResult,
+    extract_psf_sicg,
+    solve_blind_sicg,
 )
 from .mem import (
     MEMProblem,
@@ -56,13 +63,19 @@ from .mem import (
 __all__ = [
     # Base types
     "DeconvolutionResult",
+    "BlindDeconvolutionResult",
     # Operators
     "make_fft_convolver",
     "make_fft_convolver_3d",
+    "make_fft_convolver_from_tensor",
+    "make_fft_convolver_3d_from_tensor",
     # Richardson-Lucy
     "solve_rl",
     # SI-CG
     "solve_sicg",
+    # Blind / PSF extraction
+    "extract_psf_sicg",
+    "solve_blind_sicg",
     # MEM
     "MEMProblem",
     "solve_mem",
