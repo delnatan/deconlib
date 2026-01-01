@@ -33,6 +33,52 @@ result = solve_rl(observed_tensor, C, C_adj, num_iter=50)
 restored = result.restored.cpu().numpy()
 ```
 
+## The Convolution Operator
+
+The `make_fft_convolver` function creates FFT-based forward and adjoint operators
+from a kernel. It handles both 2D and 3D data automatically, and accepts either
+NumPy arrays or PyTorch tensors.
+
+```python
+C, C_adj = make_fft_convolver(kernel, device="cuda", normalize=True)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `kernel` | NumPy array or PyTorch tensor (2D or 3D) |
+| `device` | PyTorch device for OTF and operations (only for NumPy input) |
+| `dtype` | PyTorch dtype for OTF (only for NumPy input) |
+| `normalize` | Normalize kernel to sum to 1 (default: True) |
+
+The operators implement:
+
+- **Forward** `C(x)`: Convolution with kernel → `kernel ⊛ x`
+- **Adjoint** `C_adj(y)`: Correlation with kernel → `kernel* ⊛ y`
+
+### Use Cases
+
+The same function serves two complementary use cases:
+
+**1. Standard deconvolution** (kernel = PSF, solve for image):
+```python
+# PSF from optical model or calibration
+C, C_adj = make_fft_convolver(psf, device="cuda")
+result = solve_rl(observed, C, C_adj, num_iter=50)
+restored_image = result.restored
+```
+
+**2. PSF extraction** (kernel = point sources, solve for PSF):
+```python
+# Point source map with known bead locations
+C, C_adj = make_fft_convolver(point_sources, device="cuda")
+result = solve_rl(observed, C, C_adj, num_iter=50)
+extracted_psf = result.restored
+```
+
+Both cases use the same mathematical formulation:
+`observed = kernel ⊛ unknown + noise`. The only difference is what you call
+"kernel" and what you solve for.
+
 ## Result Object
 
 The `DeconvolutionResult` contains:
@@ -61,13 +107,13 @@ C, C_adj = make_fft_convolver(psf, device="cuda:1")
 
 ## 3D Deconvolution
 
-For 3D stacks, use the 3D convolver:
+The same `make_fft_convolver` works for 3D data - it automatically detects dimensionality:
 
 ```python
-from deconlib.deconvolution import make_fft_convolver_3d, solve_rl
+from deconlib.deconvolution import make_fft_convolver, solve_rl
 
 # psf_3d: shape (D, H, W)
-C, C_adj = make_fft_convolver_3d(psf_3d, device="cuda")
+C, C_adj = make_fft_convolver(psf_3d, device="cuda")
 
 observed_3d = torch.from_numpy(stack).to("cuda", dtype=torch.float32)
 result = solve_rl(observed_3d, C, C_adj, num_iter=50)
