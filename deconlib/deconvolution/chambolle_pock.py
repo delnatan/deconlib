@@ -32,6 +32,54 @@ from .base import DeconvolutionResult
 __all__ = ["solve_chambolle_pock"]
 
 
+# =============================================================================
+# Finite Difference Operators with Exact Adjoints (Circular Boundary)
+# =============================================================================
+# Using torch.roll ensures the forward and adjoint operators are exact
+# algebraic transposes, which is required for PDHG convergence.
+
+
+def _forward_diff(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Forward difference: D[i] = x[i+1] - x[i] (circular boundary)."""
+    return torch.roll(x, -1, dims=dim) - x
+
+
+def _backward_diff(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Backward difference (adjoint of forward): D[i] = x[i] - x[i-1]."""
+    return x - torch.roll(x, 1, dims=dim)
+
+
+def _second_deriv_forward(x: torch.Tensor, dim: int, h: float) -> torch.Tensor:
+    """Second derivative: (x[i+1] - 2*x[i] + x[i-1]) / h^2 (circular)."""
+    return (torch.roll(x, -1, dims=dim) - 2 * x + torch.roll(x, 1, dims=dim)) / (h * h)
+
+
+def _second_deriv_adjoint(y: torch.Tensor, dim: int, h: float) -> torch.Tensor:
+    """Adjoint of second derivative (self-adjoint for circular boundary)."""
+    # The second derivative stencil [1, -2, 1]/h² is symmetric, hence self-adjoint
+    return (torch.roll(y, -1, dims=dim) - 2 * y + torch.roll(y, 1, dims=dim)) / (h * h)
+
+
+def _mixed_deriv_forward(
+    x: torch.Tensor, dim_i: int, dim_j: int, h_i: float, h_j: float
+) -> torch.Tensor:
+    """Mixed second derivative: ∂²f/∂i∂j (circular boundary)."""
+    # Apply forward diff in dim_i, then forward diff in dim_j
+    diff_i = _forward_diff(x, dim_i)
+    diff_ij = _forward_diff(diff_i, dim_j)
+    return diff_ij / (h_i * h_j)
+
+
+def _mixed_deriv_adjoint(
+    y: torch.Tensor, dim_i: int, dim_j: int, h_i: float, h_j: float
+) -> torch.Tensor:
+    """Adjoint of mixed second derivative (backward diffs in reverse order)."""
+    # Adjoint of (D_j ∘ D_i) = D_i^T ∘ D_j^T = backward_i ∘ backward_j
+    adj_j = _backward_diff(y, dim_j)
+    adj_ij = _backward_diff(adj_j, dim_i)
+    return adj_ij / (h_i * h_j)
+
+
 def _compute_all_second_derivatives(
     x: torch.Tensor,
     spacing: Tuple[float, ...],
@@ -42,7 +90,7 @@ def _compute_all_second_derivatives(
       - 2D: [∂²/∂y², ∂²/∂x², ∂²/∂y∂x] (3 terms)
       - 3D: [∂²/∂z², ∂²/∂y², ∂²/∂x², ∂²/∂z∂y, ∂²/∂z∂x, ∂²/∂y∂x] (6 terms)
 
-    Uses torch.gradient for finite differences with proper spacing.
+    Uses circular boundary conditions for exact adjoint correspondence.
 
     Args:
         x: Input tensor, shape (D, H, W) for 3D or (H, W) for 2D.
@@ -57,18 +105,12 @@ def _compute_all_second_derivatives(
 
     # Pure second derivatives: ∂²f/∂i²
     for dim in range(ndim):
-        first_deriv = torch.gradient(x, spacing=spacing[dim], dim=dim)[0]
-        second_deriv = torch.gradient(first_deriv, spacing=spacing[dim], dim=dim)[0]
-        second_derivs.append(second_deriv)
+        second_derivs.append(_second_deriv_forward(x, dim, spacing[dim]))
 
     # Mixed second derivatives: ∂²f/∂i∂j for i < j
     for i in range(ndim):
         for j in range(i + 1, ndim):
-            # ∂f/∂i
-            deriv_i = torch.gradient(x, spacing=spacing[i], dim=i)[0]
-            # ∂²f/∂j∂i
-            deriv_ij = torch.gradient(deriv_i, spacing=spacing[j], dim=j)[0]
-            second_derivs.append(deriv_ij)
+            second_derivs.append(_mixed_deriv_forward(x, i, j, spacing[i], spacing[j]))
 
     return second_derivs
 
@@ -80,12 +122,10 @@ def _compute_hessian_adjoint(
 ) -> torch.Tensor:
     """Compute adjoint of the weighted Hessian operator.
 
-    For L = [w_k * ∂²/∂...], the adjoint L^T applies the same differential
-    operators with the same weights (self-adjoint with symmetric boundaries).
+    For L = [w_k * D_k], the adjoint L^T applies:
+        L^T y = sum_k w_k * D_k^T(y_k)
 
-    L^T y = sum_k w_k * D_k(y_k)
-
-    where D_k is the k-th second derivative operator.
+    Uses exact algebraic adjoints (circular boundary).
 
     Args:
         y_components: List of dual variables, one per Hessian component.
@@ -102,36 +142,41 @@ def _compute_hessian_adjoint(
     # Pure second derivatives (first ndim components)
     for dim in range(ndim):
         y_d = y_components[dim]
-        first_deriv = torch.gradient(y_d, spacing=spacing[dim], dim=dim)[0]
-        second_deriv = torch.gradient(first_deriv, spacing=spacing[dim], dim=dim)[0]
-        result = result + weights[dim] * second_deriv
+        result = result + weights[dim] * _second_deriv_adjoint(y_d, dim, spacing[dim])
 
     # Mixed second derivatives (remaining components)
     idx = ndim
     for i in range(ndim):
         for j in range(i + 1, ndim):
             y_ij = y_components[idx]
-            # ∂/∂i
-            deriv_i = torch.gradient(y_ij, spacing=spacing[i], dim=i)[0]
-            # ∂²/∂j∂i
-            deriv_ij = torch.gradient(deriv_i, spacing=spacing[j], dim=j)[0]
-            result = result + weights[idx] * deriv_ij
+            result = result + weights[idx] * _mixed_deriv_adjoint(
+                y_ij, i, j, spacing[i], spacing[j]
+            )
             idx += 1
 
     return result
 
 
 def _compute_hessian_weights(spacing: Tuple[float, ...]) -> List[float]:
-    """Compute integration weights for each Hessian component.
+    """Compute relative weights for each Hessian component.
 
-    For proper discretization of the continuous L1 integral:
-        ∫ |∂²f/∂i²| di ≈ Σ |∂²f/∂i²| * h_i
+    For isotropic physical regularization, we normalize weights relative to
+    the finest resolution (smallest spacing). Coarser directions get LESS
+    weight because their discrete derivatives already smooth over larger
+    physical distances.
 
-    Each derivative term is weighted by the corresponding spacing to ensure
-    isotropic regularization in physical space.
+    Define h_min = min(spacing), then for each direction i:
+        R_i = h_min / h_i  (ratio, ≤ 1)
 
-    Pure derivatives ∂²f/∂i²: weight = h_i
-    Mixed derivatives ∂²f/∂i∂j: weight = sqrt(h_i * h_j)
+    Weights:
+        Pure derivatives ∂²f/∂i²: weight = R_i²
+        Mixed derivatives ∂²f/∂i∂j: weight = R_i * R_j
+
+    Example: spacing=(0.3, 0.1, 0.1) gives h_min=0.1, R=(0.33, 1.0, 1.0)
+        D_zz: 0.33² = 0.11  (axial curvature barely penalized)
+        D_yy, D_xx: 1.0     (lateral baseline)
+        D_zy, D_zx: 0.33    (intermediate)
+        D_yx: 1.0           (lateral cross-term)
 
     Args:
         spacing: Grid spacing for each dimension.
@@ -140,16 +185,21 @@ def _compute_hessian_weights(spacing: Tuple[float, ...]) -> List[float]:
         List of weights, one per Hessian component.
     """
     ndim = len(spacing)
+    h_min = min(spacing)
+
+    # Compute ratio for each dimension: R_i = h_min / h_i
+    ratios = [h_min / h for h in spacing]
+
     weights = []
 
-    # Pure second derivatives: weight = h_i
+    # Pure second derivatives: weight = R_i²
     for dim in range(ndim):
-        weights.append(spacing[dim])
+        weights.append(ratios[dim] ** 2)
 
-    # Mixed second derivatives: weight = sqrt(h_i * h_j)
+    # Mixed second derivatives: weight = R_i * R_j
     for i in range(ndim):
         for j in range(i + 1, ndim):
-            weights.append(math.sqrt(spacing[i] * spacing[j]))
+            weights.append(ratios[i] * ratios[j])
 
     return weights
 
@@ -209,13 +259,16 @@ def _prox_poisson_dual(
     sigma: float,
     b: torch.Tensor,
 ) -> torch.Tensor:
-    """Proximal operator for conjugate of Poisson NLL (shifted Poisson).
+    """Proximal operator for conjugate of Poisson NLL.
 
     For the Poisson data fidelity F(z) = sum(z - b*log(z)), the conjugate
-    proximal is:
-        prox_{σF*}(y) = (1/2) * (y - 1 + sqrt((y - 1)² + 4σb))
+    proximal is derived via Moreau identity:
+        prox_{σF*}(y) = y - σ * prox_{F/σ}(y/σ)
 
-    This is derived from Moreau decomposition and the Poisson proximal.
+    This yields the "shifted Poisson" formula:
+        prox_{σF*}(y) = (1/2) * (y + 1 - sqrt((y - 1)² + 4σb))
+
+    Note: The result is always < 1, which is the domain of F*.
 
     Args:
         y: Dual variable (after adding σ * forward_model).
@@ -225,8 +278,9 @@ def _prox_poisson_dual(
     Returns:
         Proximal operator result.
     """
-    shifted = y - 1.0
-    return 0.5 * (shifted + torch.sqrt(shifted * shifted + 4.0 * sigma * b))
+    # Correct formula: note the MINUS before sqrt (not plus)
+    term = (y - 1.0) ** 2 + 4.0 * sigma * b
+    return 0.5 * (y + 1.0 - torch.sqrt(term))
 
 
 def _prox_l1_dual(
@@ -274,9 +328,10 @@ def solve_chambolle_pock(
     subject to x >= 0, where L_k are Hessian components and w_k are spacing
     weights that ensure isotropic regularization in physical space.
 
-    For anisotropic spacing (e.g., dz=0.3, dy=dx=0.1), the z-derivative
-    terms receive 3x more weight than y/x terms, properly accounting for
-    the integration measure in the continuous formulation.
+    For anisotropic spacing (e.g., dz=0.3, dy=dx=0.1), z-derivative terms
+    receive LESS weight (R²=0.11 for D_zz) than lateral terms (1.0),
+    ensuring isotropic physical regularization. Coarser sampling = less
+    curvature penalty since the derivative already smooths over larger distance.
 
     The algorithm uses primal-dual updates:
         y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))          [Poisson dual]
@@ -297,8 +352,8 @@ def solve_chambolle_pock(
             Default "hessian".
         spacing: Grid spacing for each dimension, e.g., (dz, dy, dx) for 3D
             or (dy, dx) for 2D. Used to weight derivative terms: larger
-            spacing = more weight on that direction's derivatives.
-            If None, uses unit spacing.
+            spacing = LESS weight (coarser sampling already smooths).
+            If None, uses unit spacing (isotropic weights).
         background: Constant background in forward model. The model is
             forward = Ax + background. Default 0.0.
         init: Initial estimate. If None, uses max(observed - background, eps).
@@ -319,7 +374,7 @@ def solve_chambolle_pock(
         observed = torch.from_numpy(stack).to("cuda")
 
         # With smoothness regularization (full Hessian, spacing-weighted)
-        # z-derivatives get 3x weight since dz/dy = 3
+        # z-derivatives get 0.11x weight (R²) since dz is 3x coarser
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
