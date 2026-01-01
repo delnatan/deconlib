@@ -18,10 +18,20 @@ from typing import Callable, List, Optional, Union
 import torch
 
 from .base import DeconvolutionResult
-from .operators import make_fft_convolver_from_tensor
+from .operators import make_fft_convolver_from_tensor, make_fft_convolver_3d_from_tensor
 from .sicg import solve_sicg
 
 __all__ = ["BlindDeconvolutionResult", "extract_psf_sicg", "solve_blind_sicg"]
+
+
+def _make_convolver_from_tensor(kernel: "torch.Tensor", normalize: bool = True):
+    """Select 2D or 3D convolver based on kernel dimensionality."""
+    if kernel.ndim == 2:
+        return make_fft_convolver_from_tensor(kernel, normalize=normalize)
+    elif kernel.ndim == 3:
+        return make_fft_convolver_3d_from_tensor(kernel, normalize=normalize)
+    else:
+        raise ValueError(f"Kernel must be 2D or 3D, got {kernel.ndim}D")
 
 
 @dataclass
@@ -112,7 +122,7 @@ def extract_psf_sicg(
 
     # Create operators using point sources as kernel
     # This swaps the role: now we're solving for PSF instead of image
-    C, C_adj = make_fft_convolver_from_tensor(point_sources_norm, normalize=False)
+    C, C_adj = _make_convolver_from_tensor(point_sources_norm, normalize=False)
 
     # Run SI-CG to solve for PSF
     result = solve_sicg(
@@ -238,7 +248,7 @@ def solve_blind_sicg(
         # Step 1: Update image (fix PSF)
         if verbose:
             print("  Updating image...")
-        C_image, C_image_adj = make_fft_convolver_from_tensor(psf, normalize=False)
+        C_image, C_image_adj = _make_convolver_from_tensor(psf, normalize=False)
 
         result_image = solve_sicg(
             observed=observed,
@@ -264,7 +274,7 @@ def solve_blind_sicg(
         # Step 2: Update PSF (fix image)
         if verbose:
             print("  Updating PSF...")
-        C_psf, C_psf_adj = make_fft_convolver_from_tensor(image, normalize=True)
+        C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=True)
 
         result_psf = solve_sicg(
             observed=observed,
