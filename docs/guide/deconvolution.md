@@ -173,11 +173,9 @@ import torch
 # Load bead image
 observed = torch.from_numpy(bead_image).to("cuda", dtype=torch.float32)
 
-# Create point source map (mark bead locations)
-# The point source should be CENTERED (DC at center of array)
+# Create point source map with DC at corner (FFT convention)
 point_sources = torch.zeros_like(observed)
-cy, cx = observed.shape[0] // 2, observed.shape[1] // 2
-point_sources[cy, cx] = 1.0  # Single centered bead
+point_sources[0, 0] = 1.0  # Single point at corner
 
 # Extract PSF
 result = extract_psf_rl(
@@ -187,7 +185,7 @@ result = extract_psf_rl(
     background=100.0,  # Subtract background
     verbose=True
 )
-psf = result.restored.cpu().numpy()  # Centered, normalized PSF
+psf = result.restored.cpu().numpy()  # DC at corner, normalized
 ```
 
 ### SI-CG (regularized, better for noisy data)
@@ -244,8 +242,7 @@ the image and PSF simultaneously using alternating Richardson-Lucy updates.
 from deconlib.deconvolution import solve_blind_rl
 import torch
 
-# Start with an initial PSF guess (theoretical or approximate)
-# PSF should be CENTERED (DC at center of array)
+# Start with an initial PSF guess (DC at corner, same as make_fft_convolver)
 psf_init = torch.from_numpy(theoretical_psf).to("cuda", dtype=torch.float32)
 observed = torch.from_numpy(image).to("cuda", dtype=torch.float32)
 
@@ -259,7 +256,7 @@ result = solve_blind_rl(
 )
 
 restored = result.restored.cpu().numpy()
-refined_psf = result.psf.cpu().numpy()
+refined_psf = result.psf.cpu().numpy()  # DC at corner
 ```
 
 ### Algorithm
@@ -269,9 +266,9 @@ Richardson-Lucy updates for image and PSF:
 
 1. **Compute forward model**: \(F = \text{image} \ast \text{PSF}\)
 2. **Compute ratio**: \(R = \text{data} / F\)
-3. **Update PSF**: \(\text{PSF} \leftarrow \text{PSF} \cdot (R \ast \text{image}_\text{flip})\)
+3. **Update PSF**: \(\text{PSF} \leftarrow \text{PSF} \cdot \text{corr}(R, \text{image})\)
 4. **Normalize PSF**: Ensure PSF sums to 1
-5. **Update image**: \(\text{image} \leftarrow \text{image} \cdot (R \ast \text{PSF}_\text{flip})\)
+5. **Update image**: \(\text{image} \leftarrow \text{image} \cdot \text{corr}(R, \text{PSF})\)
 6. **Repeat**
 
 ### Result Object
@@ -281,7 +278,7 @@ Richardson-Lucy updates for image and PSF:
 | Attribute | Description |
 |-----------|-------------|
 | `restored` | Deconvolved image |
-| `psf` | Refined PSF estimate (centered) |
+| `psf` | Refined PSF estimate (DC at corner) |
 | `iterations` | Number of iterations completed |
 
 !!! warning "Ill-Posed Problem"
@@ -289,7 +286,6 @@ Richardson-Lucy updates for image and PSF:
 
     - Good initial PSF estimate (close to true PSF)
     - Sufficient image structure/contrast
-    - The PSF should be centered (DC at center of array)
 
 ## Algorithm Comparison
 

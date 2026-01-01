@@ -37,7 +37,7 @@ class BlindDeconvolutionResult:
 
     Attributes:
         restored: The restored image tensor.
-        psf: The estimated PSF tensor.
+        psf: The estimated PSF tensor (DC at corner).
         iterations: Number of iterations completed.
         converged: Whether the algorithm converged.
         metadata: Algorithm-specific metadata.
@@ -51,30 +51,18 @@ class BlindDeconvolutionResult:
 
 
 def _fft_convolve(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """FFT-based convolution with proper padding."""
-    # Kernel should be same size as image, centered at origin (corner)
+    """FFT-based convolution. Both arrays should have DC at corner."""
     kernel_fft = fft.fftn(kernel)
     image_fft = fft.fftn(image)
     return fft.ifftn(image_fft * kernel_fft).real
 
 
-def _flip_kernel(kernel: torch.Tensor) -> torch.Tensor:
-    """Flip kernel for correlation (adjoint of convolution)."""
-    # Flip all dimensions
-    dims = list(range(kernel.ndim))
-    return torch.flip(kernel, dims)
-
-
-def _center_to_corner(psf: torch.Tensor) -> torch.Tensor:
-    """Shift PSF from center to corner (DC at [0,0,...])."""
-    shifts = [-(s // 2) for s in psf.shape]
-    return torch.roll(psf, shifts=shifts, dims=list(range(psf.ndim)))
-
-
-def _corner_to_center(psf: torch.Tensor) -> torch.Tensor:
-    """Shift PSF from corner to center."""
-    shifts = [s // 2 for s in psf.shape]
-    return torch.roll(psf, shifts=shifts, dims=list(range(psf.ndim)))
+def _fft_correlate(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """FFT-based correlation (adjoint of convolution). DC at corner."""
+    kernel_fft = fft.fftn(kernel)
+    image_fft = fft.fftn(image)
+    # Correlation = convolution with conjugate of kernel
+    return fft.ifftn(image_fft * kernel_fft.conj()).real
 
 
 def solve_blind_rl(
@@ -94,7 +82,7 @@ def solve_blind_rl(
 
     Args:
         observed: Observed blurred image, shape (H, W) or (D, H, W).
-        psf_init: Initial PSF estimate, centered (DC at center).
+        psf_init: Initial PSF estimate with DC at corner (same as make_fft_convolver).
             Should be same shape as observed.
         num_iter: Number of iterations. Default 50.
         background: Background value to subtract. Default 0.0.
@@ -107,9 +95,7 @@ def solve_blind_rl(
 
     Example:
         ```python
-        # Start with theoretical PSF (centered)
-        psf_init = make_centered_psf(...)
-
+        # PSF with DC at corner (same convention as make_fft_convolver)
         result = solve_blind_rl(
             observed, psf_init,
             num_iter=50,
@@ -121,18 +107,18 @@ def solve_blind_rl(
         ```
 
     Note:
-        - PSF should be centered (DC at center of array)
+        - PSF should have DC at corner [0,0,...] (FFT convention)
         - Blind deconvolution is ill-posed; good PSF initialization helps
         - The PSF is normalized to sum to 1 after each update
     """
     # Work with background-subtracted data
     data = observed - background
-    data = torch.clamp(data, min=eps)  # Ensure positive
+    data = torch.clamp(data, min=eps)
 
-    # Initialize PSF (shift to corner for FFT convolution)
+    # Initialize PSF (already DC at corner)
     psf = psf_init.clone()
-    psf = psf / (psf.sum() + eps)  # Normalize
-    psf_corner = _center_to_corner(psf)
+    psf = torch.clamp(psf, min=0)
+    psf = psf / (psf.sum() + eps)
 
     # Initialize image estimate
     image = data.clone()
@@ -144,50 +130,41 @@ def solve_blind_rl(
         print()
 
     for iteration in range(1, num_iter + 1):
-        # Current forward model: image ⊛ psf
-        forward = _fft_convolve(image, psf_corner)
+        # Forward model: image ⊛ psf
+        forward = _fft_convolve(image, psf)
         forward = torch.clamp(forward, min=eps)
 
         # Ratio: data / forward
         ratio = data / forward
 
         # === Update PSF ===
-        # psf *= (ratio ⊛ image_flipped)
-        # In FFT terms: correlate ratio with image
-        image_flipped = _flip_kernel(image)
-        image_flipped_corner = _center_to_corner(image_flipped)
-        psf_update = _fft_convolve(ratio, image_flipped_corner)
-        psf_corner = psf_corner * psf_update
+        # psf *= correlate(ratio, image) / sum(image)
+        # The denominator ensures flux conservation
+        psf_update = _fft_correlate(ratio, image)
+        psf = psf * psf_update
 
-        # Normalize PSF
-        psf_corner = psf_corner / (psf_corner.sum() + eps)
-        psf_corner = torch.clamp(psf_corner, min=0)  # Ensure non-negative
+        # Normalize PSF and ensure non-negative
+        psf = torch.clamp(psf, min=0)
+        psf = psf / (psf.sum() + eps)
 
         # === Update Image ===
         # Recompute forward with updated PSF
-        forward = _fft_convolve(image, psf_corner)
+        forward = _fft_convolve(image, psf)
         forward = torch.clamp(forward, min=eps)
         ratio = data / forward
 
-        # image *= (ratio ⊛ psf_flipped)
-        psf_flipped = _flip_kernel(psf_corner)
-        image_update = _fft_convolve(ratio, psf_flipped)
+        # image *= correlate(ratio, psf)
+        image_update = _fft_correlate(ratio, psf)
         image = image * image_update
-        image = torch.clamp(image, min=0)  # Ensure non-negative
+        image = torch.clamp(image, min=0)
 
         if verbose and (iteration % 10 == 0 or iteration == 1):
-            # Compute residual for monitoring
-            forward = _fft_convolve(image, psf_corner)
+            forward = _fft_convolve(image, psf)
             residual = torch.mean((data - forward) ** 2).item()
             print(f"  Iteration {iteration:3d}: MSE = {residual:.6e}")
 
         if callback is not None:
-            # Return PSF in centered form for callback
-            psf_centered = _corner_to_center(psf_corner)
-            callback(iteration, image, psf_centered)
-
-    # Convert PSF back to centered form
-    psf_final = _corner_to_center(psf_corner)
+            callback(iteration, image, psf)
 
     # Add background back to restored image
     restored = image + background
@@ -197,7 +174,7 @@ def solve_blind_rl(
 
     return BlindDeconvolutionResult(
         restored=restored,
-        psf=psf_final,
+        psf=psf,
         iterations=num_iter,
         converged=True,
         metadata={
@@ -225,7 +202,7 @@ def extract_psf_rl(
 
     Args:
         observed: Observed bead image, shape (H, W) or (D, H, W).
-        point_sources: Known point source locations, centered (DC at center).
+        point_sources: Known point source locations with DC at corner.
             Should be sparse with peaks at bead centers. Same shape as observed.
         num_iter: Number of RL iterations. Default 50.
         background: Background value. Default 0.0.
@@ -235,13 +212,13 @@ def extract_psf_rl(
 
     Returns:
         DeconvolutionResult with:
-            - restored: The extracted PSF (centered, normalized to sum to 1)
+            - restored: The extracted PSF (DC at corner, normalized to sum to 1)
 
     Example:
         ```python
-        # Create point source map (centered, e.g., from bead detection)
+        # Create point source map with DC at corner
         point_sources = torch.zeros_like(observed)
-        point_sources[center_y, center_x] = 1.0  # Mark bead location
+        point_sources[0, 0] = 1.0  # DC at corner
 
         # Extract PSF
         result = extract_psf_rl(observed, point_sources, verbose=True)
@@ -249,24 +226,20 @@ def extract_psf_rl(
         ```
 
     Note:
-        - point_sources should be centered (DC at center of array)
-        - For best results, use isolated beads away from image edges
-        - The extracted PSF is returned centered and normalized
+        - point_sources should have DC at corner (FFT convention)
+        - The extracted PSF is returned with DC at corner, normalized
     """
     # Work with background-subtracted data
     data = observed - background
     data = torch.clamp(data, min=eps)
 
-    # Point sources as kernel (shift to corner for FFT)
+    # Normalize point sources (kernel)
     kernel = point_sources.clone()
     kernel = kernel / (kernel.sum() + eps)
-    kernel_corner = _center_to_corner(kernel)
-    kernel_flipped = _flip_kernel(kernel_corner)
 
-    # Initialize PSF estimate (start with data as rough estimate)
+    # Initialize PSF estimate
     psf = data.clone()
     psf = psf / (psf.sum() + eps)
-    psf_corner = _center_to_corner(psf)
 
     if verbose:
         print("PSF Extraction using Richardson-Lucy")
@@ -275,35 +248,31 @@ def extract_psf_rl(
 
     for iteration in range(1, num_iter + 1):
         # Forward: psf ⊛ kernel
-        forward = _fft_convolve(psf_corner, kernel_corner)
+        forward = _fft_convolve(psf, kernel)
         forward = torch.clamp(forward, min=eps)
 
         # Ratio
         ratio = data / forward
 
-        # RL update: psf *= (ratio ⊛ kernel_flipped)
-        update = _fft_convolve(ratio, kernel_flipped)
-        psf_corner = psf_corner * update
-        psf_corner = torch.clamp(psf_corner, min=0)
-        psf_corner = psf_corner / (psf_corner.sum() + eps)
+        # RL update: psf *= correlate(ratio, kernel)
+        update = _fft_correlate(ratio, kernel)
+        psf = psf * update
+        psf = torch.clamp(psf, min=0)
+        psf = psf / (psf.sum() + eps)
 
         if verbose and (iteration % 10 == 0 or iteration == 1):
-            forward = _fft_convolve(psf_corner, kernel_corner)
+            forward = _fft_convolve(psf, kernel)
             residual = torch.mean((data - forward) ** 2).item()
             print(f"  Iteration {iteration:3d}: MSE = {residual:.6e}")
 
         if callback is not None:
-            psf_centered = _corner_to_center(psf_corner)
-            callback(iteration, psf_centered)
-
-    # Convert to centered form
-    psf_final = _corner_to_center(psf_corner)
+            callback(iteration, psf)
 
     if verbose:
         print(f"\nCompleted {num_iter} iterations.")
 
     return DeconvolutionResult(
-        restored=psf_final,
+        restored=psf,
         iterations=num_iter,
         loss_history=[],
         converged=True,
@@ -349,8 +318,8 @@ def extract_psf_sicg(
 
     Args:
         observed: Observed bead image, shape (H, W) or (D, H, W).
-        point_sources: Known point source locations. Should be sparse
-            with peaks at bead centers. Same shape as observed.
+        point_sources: Known point source locations with DC at corner.
+            Should be sparse with peaks at bead centers. Same shape as observed.
         num_iter: Number of SI-CG iterations. Default 50.
         beta: Regularization weight. Default 0.001.
         background: Background value. Default 0.0.
@@ -366,14 +335,14 @@ def extract_psf_sicg(
 
     Returns:
         DeconvolutionResult with:
-            - restored: The extracted PSF (normalized to sum to 1)
+            - restored: The extracted PSF (DC at corner, normalized to sum to 1)
             - metadata includes "algorithm": "PSF-extraction-SI-CG"
 
     Example:
         ```python
-        # Create point source map (e.g., from bead detection)
+        # Create point source map with DC at corner
         point_sources = torch.zeros_like(observed)
-        point_sources[bead_y, bead_x] = 1.0  # Mark bead locations
+        point_sources[0, 0] = 1.0  # DC at corner
 
         # Extract PSF
         result = extract_psf_sicg(observed, point_sources, verbose=True)
@@ -381,9 +350,8 @@ def extract_psf_sicg(
         ```
 
     Note:
-        - point_sources should ideally sum to 1 (or will be normalized)
-        - For best results, use isolated beads away from image edges
-        - The extracted PSF will have DC at corner (0, 0)
+        - point_sources should have DC at corner (FFT convention)
+        - The extracted PSF is returned with DC at corner, normalized
     """
     # Normalize point sources
     point_sources_norm = point_sources / (point_sources.sum() + eps)
