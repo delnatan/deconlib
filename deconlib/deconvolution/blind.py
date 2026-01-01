@@ -64,6 +64,7 @@ def extract_psf_sicg(
     beta: float = 0.001,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
+    reg_target: Optional[torch.Tensor] = None,
     eps: float = 1e-12,
     restart_interval: int = 5,
     line_search_iter: int = 3,
@@ -89,7 +90,10 @@ def extract_psf_sicg(
         num_iter: Number of SI-CG iterations. Default 50.
         beta: Regularization weight. Default 0.001.
         background: Background value. Default 0.0.
-        init: Initial PSF estimate. If None, uses normalized observed.
+        init: Initial PSF estimate (sqrt of intensity). If None, uses sqrt(observed).
+        reg_target: Target for regularization. If None and init is provided,
+            uses init² (the intensity). For PSF extraction, should be a
+            reasonable PSF shape (e.g., theoretical PSF or Gaussian).
         eps: Numerical stability constant. Default 1e-12.
         restart_interval: CG restart interval. Default 5.
         line_search_iter: Newton-Raphson iterations. Default 3.
@@ -124,6 +128,11 @@ def extract_psf_sicg(
     # This swaps the role: now we're solving for PSF instead of image
     C, C_adj = _make_convolver_from_tensor(point_sources_norm, normalize=False)
 
+    # Set up regularization target for PSF extraction
+    # If reg_target not provided but init is, use init² as target
+    if reg_target is None and init is not None:
+        reg_target = init * init  # init is sqrt, so init² is the intensity
+
     # Run SI-CG to solve for PSF
     result = solve_sicg(
         observed=observed,
@@ -133,6 +142,7 @@ def extract_psf_sicg(
         beta=beta,
         background=background,
         init=init,
+        reg_target=reg_target,
         eps=eps,
         restart_interval=restart_interval,
         line_search_iter=line_search_iter,
@@ -276,6 +286,8 @@ def solve_blind_sicg(
             print("  Updating PSF...")
         C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=True)
 
+        # For PSF update, regularize toward current PSF estimate (not observed!)
+        # This keeps PSF close to its prior shape rather than the image
         result_psf = solve_sicg(
             observed=observed,
             C=C_psf,
@@ -284,6 +296,7 @@ def solve_blind_sicg(
             beta=beta_psf,
             background=background,
             init=torch.sqrt(torch.clamp(psf, min=eps)),  # sqrt for c init
+            reg_target=psf,  # Regularize toward current PSF, not observed image
             eps=eps,
             restart_interval=restart_interval,
             line_search_iter=line_search_iter,

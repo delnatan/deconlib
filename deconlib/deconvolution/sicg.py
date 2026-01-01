@@ -34,6 +34,7 @@ def _compute_objective(
     background: Union[float, torch.Tensor],
     beta: float,
     eps: float,
+    reg_target: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute total objective E(c) = J_data + beta * J_reg.
 
@@ -49,6 +50,8 @@ def _compute_objective(
         background: Background value or image (b).
         beta: Regularization weight.
         eps: Small constant for numerical stability.
+        reg_target: Target for regularization. If None, uses (observed - background).
+            For PSF estimation, should be set to the initial/current PSF estimate.
 
     Returns:
         Scalar objective value.
@@ -69,8 +72,13 @@ def _compute_objective(
         - observed
     )
 
-    # Regularization: sum[ (f - (g - b))² ]
-    target = observed - background
+    # Regularization: sum[ (f - target)² ]
+    # Default target is (observed - background) for image deconvolution
+    # For PSF estimation, use reg_target (e.g., initial PSF)
+    if reg_target is None:
+        target = observed - background
+    else:
+        target = reg_target
     j_reg = torch.sum((f - target) ** 2)
 
     return j_data + beta * j_reg
@@ -84,11 +92,12 @@ def _compute_gradient(
     background: Union[float, torch.Tensor],
     beta: float,
     eps: float,
+    reg_target: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute negative gradient (steepest descent direction).
 
     The gradient of E(c) with respect to c is:
-        ∇E = 2c ⊙ R^T(1 - g/(R(c²)+b)) + 4βc ⊙ (c² - (g-b))
+        ∇E = 2c ⊙ R^T(1 - g/(R(c²)+b)) + 4βc ⊙ (c² - target)
 
     We return the negative gradient for use as descent direction.
 
@@ -100,6 +109,7 @@ def _compute_gradient(
         background: Background value or image (b).
         beta: Regularization weight.
         eps: Small constant for numerical stability.
+        reg_target: Target for regularization. If None, uses (observed - background).
 
     Returns:
         Negative gradient tensor (same shape as c).
@@ -114,8 +124,11 @@ def _compute_gradient(
     ratio = 1.0 - observed / g_pred_safe
     grad_data = 2.0 * c * C_adj(ratio)
 
-    # Regularization gradient: 4βc ⊙ (c² - (g - b))
-    target = observed - background
+    # Regularization gradient: 4βc ⊙ (c² - target)
+    if reg_target is None:
+        target = observed - background
+    else:
+        target = reg_target
     grad_reg = 4.0 * beta * c * (f - target)
 
     # Return negative gradient (descent direction)
@@ -131,6 +144,7 @@ def _line_search_newton(
     beta: float,
     eps: float,
     num_iter: int = 3,
+    reg_target: Optional[torch.Tensor] = None,
 ) -> tuple[float, list[dict]]:
     """Newton-Raphson line search using the 3-convolution trick.
 
@@ -152,6 +166,7 @@ def _line_search_newton(
         beta: Regularization weight.
         eps: Numerical stability constant.
         num_iter: Number of Newton-Raphson iterations.
+        reg_target: Target for regularization. If None, uses (observed - background).
 
     Returns:
         Tuple of (optimal step size, list of iteration stats).
@@ -167,8 +182,10 @@ def _line_search_newton(
 
     # Also need terms for regularization
     # f(λ) = (c + λd)² = c² + 2λcd + λ²d²
-    # reg target: g - b
-    target = observed - background
+    if reg_target is None:
+        target = observed - background
+    else:
+        target = reg_target
 
     # Initialize step size
     lam = 0.0
@@ -252,6 +269,7 @@ def solve_sicg(
     beta: float = 0.001,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
+    reg_target: Optional[torch.Tensor] = None,
     eps: float = 1e-12,
     restart_interval: int = 5,
     line_search_iter: int = 3,
@@ -274,6 +292,9 @@ def solve_sicg(
         background: Background value to subtract. Default 0.0.
         init: Initial estimate for c (sqrt of intensity). If None,
             uses sqrt(max(observed, eps)).
+        reg_target: Target for regularization term. If None, uses
+            (observed - background). For PSF estimation, set this to
+            the initial PSF to regularize toward the prior.
         eps: Small constant for numerical stability. Default 1e-12.
         restart_interval: Reset conjugate direction every N iterations
             to prevent direction degradation. Default 5.
@@ -323,7 +344,7 @@ def solve_sicg(
 
     # Compute initial objective for normalization
     obj_initial = float(
-        _compute_objective(c, observed, C, background, beta, eps)
+        _compute_objective(c, observed, C, background, beta, eps, reg_target)
     )
 
     if verbose:
@@ -337,7 +358,7 @@ def solve_sicg(
 
     for iteration in range(1, num_iter + 1):
         # Step 1: Compute negative gradient (steepest descent direction)
-        r = _compute_gradient(c, observed, C, C_adj, background, beta, eps)
+        r = _compute_gradient(c, observed, C, C_adj, background, beta, eps, reg_target)
 
         # Step 2: Conjugate direction update (Fletcher-Reeves)
         rho_new = float(torch.sum(r * r))
@@ -355,7 +376,7 @@ def solve_sicg(
 
         # Step 3: Line search (Newton-Raphson with 3-convolution trick)
         step_size, ls_stats = _line_search_newton(
-            c, d, observed, C, background, beta, eps, line_search_iter
+            c, d, observed, C, background, beta, eps, line_search_iter, reg_target
         )
 
         # Step 4: Update parameter
@@ -363,7 +384,7 @@ def solve_sicg(
 
         # Compute objective for tracking
         obj = float(
-            _compute_objective(c, observed, C, background, beta, eps)
+            _compute_objective(c, observed, C, background, beta, eps, reg_target)
         )
         loss_history.append(obj)
 
