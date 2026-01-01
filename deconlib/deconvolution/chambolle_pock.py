@@ -13,12 +13,16 @@ where:
     - bg is a constant background
     - alpha controls regularization strength
 
+The L1 penalty is properly weighted by pixel spacing to ensure isotropic
+regularization in physical space.
+
 Reference:
     Chambolle, A. and Pock, T. (2011). "A First-Order Primal-Dual Algorithm
     for Convex Problems with Applications to Imaging". Journal of Mathematical
     Imaging and Vision 40(1): 120-145.
 """
 
+import math
 from typing import Callable, List, Literal, Optional, Tuple
 
 import torch
@@ -72,19 +76,22 @@ def _compute_all_second_derivatives(
 def _compute_hessian_adjoint(
     y_components: List[torch.Tensor],
     spacing: Tuple[float, ...],
+    weights: List[float],
 ) -> torch.Tensor:
-    """Compute adjoint of the Hessian operator (all second derivatives).
+    """Compute adjoint of the weighted Hessian operator.
 
-    For L = [∂²/∂i² for all i] + [∂²/∂i∂j for i<j], the adjoint L^T
-    applies the same differential operators (self-adjoint with symmetric
-    boundary conditions).
+    For L = [w_k * ∂²/∂...], the adjoint L^T applies the same differential
+    operators with the same weights (self-adjoint with symmetric boundaries).
 
-    L^T y = sum_i ∂²y_i/∂i² + sum_{i<j} ∂²y_{ij}/∂i∂j
+    L^T y = sum_k w_k * D_k(y_k)
+
+    where D_k is the k-th second derivative operator.
 
     Args:
         y_components: List of dual variables, one per Hessian component.
             Order: pure derivatives first, then mixed.
         spacing: Grid spacing for each dimension.
+        weights: Weight for each Hessian component (from spacing).
 
     Returns:
         Adjoint applied to y components.
@@ -97,7 +104,7 @@ def _compute_hessian_adjoint(
         y_d = y_components[dim]
         first_deriv = torch.gradient(y_d, spacing=spacing[dim], dim=dim)[0]
         second_deriv = torch.gradient(first_deriv, spacing=spacing[dim], dim=dim)[0]
-        result = result + second_deriv
+        result = result + weights[dim] * second_deriv
 
     # Mixed second derivatives (remaining components)
     idx = ndim
@@ -108,10 +115,43 @@ def _compute_hessian_adjoint(
             deriv_i = torch.gradient(y_ij, spacing=spacing[i], dim=i)[0]
             # ∂²/∂j∂i
             deriv_ij = torch.gradient(deriv_i, spacing=spacing[j], dim=j)[0]
-            result = result + deriv_ij
+            result = result + weights[idx] * deriv_ij
             idx += 1
 
     return result
+
+
+def _compute_hessian_weights(spacing: Tuple[float, ...]) -> List[float]:
+    """Compute integration weights for each Hessian component.
+
+    For proper discretization of the continuous L1 integral:
+        ∫ |∂²f/∂i²| di ≈ Σ |∂²f/∂i²| * h_i
+
+    Each derivative term is weighted by the corresponding spacing to ensure
+    isotropic regularization in physical space.
+
+    Pure derivatives ∂²f/∂i²: weight = h_i
+    Mixed derivatives ∂²f/∂i∂j: weight = sqrt(h_i * h_j)
+
+    Args:
+        spacing: Grid spacing for each dimension.
+
+    Returns:
+        List of weights, one per Hessian component.
+    """
+    ndim = len(spacing)
+    weights = []
+
+    # Pure second derivatives: weight = h_i
+    for dim in range(ndim):
+        weights.append(spacing[dim])
+
+    # Mixed second derivatives: weight = sqrt(h_i * h_j)
+    for i in range(ndim):
+        for j in range(i + 1, ndim):
+            weights.append(math.sqrt(spacing[i] * spacing[j]))
+
+    return weights
 
 
 def _count_hessian_components(ndim: int) -> int:
@@ -122,18 +162,19 @@ def _count_hessian_components(ndim: int) -> int:
 def _estimate_operator_norm_squared(
     spacing: Tuple[float, ...],
     regularization: str,
+    weights: Optional[List[float]] = None,
     blur_norm: float = 1.0,
 ) -> float:
-    """Estimate squared norm of the combined operator K = [A; L].
+    """Estimate squared norm of the combined operator K = [A; W*L].
 
     For convolution with normalized PSF: ||A|| ≈ 1.
     For identity L=I: ||I|| = 1.
-    For second derivative with spacing h: ||∂²/∂x²|| ≈ 4/h².
-    For mixed derivative: ||∂²/∂x∂y|| ≈ 4/(hx*hy).
+    For weighted second derivative: ||w * ∂²/∂x²|| ≈ w * 4/h².
 
     Args:
         spacing: Grid spacing for each dimension.
         regularization: Type of regularization ("identity" or "hessian").
+        weights: Weights for Hessian components (required if hessian).
         blur_norm: Estimated norm of blur operator. Default 1.0.
 
     Returns:
@@ -145,14 +186,20 @@ def _estimate_operator_norm_squared(
         norm_sq += 1.0
     else:
         ndim = len(spacing)
-        # Pure second derivatives: ||∂²/∂i²|| ≈ 4/h_i²
-        for h in spacing:
-            norm_sq += (4.0 / h**2) ** 2
+        idx = 0
 
-        # Mixed second derivatives: ||∂²/∂i∂j|| ≈ 4/(h_i * h_j)
+        # Pure second derivatives: ||w * ∂²/∂i²|| ≈ w * 4/h_i²
+        for dim in range(ndim):
+            w = weights[idx] if weights else 1.0
+            norm_sq += (w * 4.0 / spacing[dim] ** 2) ** 2
+            idx += 1
+
+        # Mixed second derivatives: ||w * ∂²/∂i∂j|| ≈ w * 4/(h_i * h_j)
         for i in range(ndim):
             for j in range(i + 1, ndim):
-                norm_sq += (4.0 / (spacing[i] * spacing[j])) ** 2
+                w = weights[idx] if weights else 1.0
+                norm_sq += (w * 4.0 / (spacing[i] * spacing[j])) ** 2
+                idx += 1
 
     return norm_sq
 
@@ -184,24 +231,24 @@ def _prox_poisson_dual(
 
 def _prox_l1_dual(
     y: torch.Tensor,
-    alpha: float,
+    bound: float,
 ) -> torch.Tensor:
     """Proximal operator for conjugate of weighted L1 norm.
 
-    For G(u) = alpha * |u|_1, the conjugate G* is the indicator of the
-    L-infinity ball of radius alpha. The proximal is projection:
-        prox_{σG*}(y) = clamp(y, -alpha, alpha)
+    For G(u) = bound * |u|_1, the conjugate G* is the indicator of the
+    L-infinity ball of radius 'bound'. The proximal is projection:
+        prox_{σG*}(y) = clamp(y, -bound, bound)
 
     Note: σ doesn't appear because G* is an indicator function.
 
     Args:
         y: Dual variable.
-        alpha: Regularization weight (box constraint radius).
+        bound: Projection bound (alpha * weight for weighted L1).
 
     Returns:
         Projected dual variable.
     """
-    return torch.clamp(y, min=-alpha, max=alpha)
+    return torch.clamp(y, min=-bound, max=bound)
 
 
 def solve_chambolle_pock(
@@ -222,16 +269,20 @@ def solve_chambolle_pock(
     """Solve Poisson deconvolution with L1 regularization using PDHG.
 
     Minimizes:
-        sum(Ax + bg - b*log(Ax + bg)) + alpha * |Lx|_1   subject to x >= 0
+        sum(Ax + bg - b*log(Ax + bg)) + alpha * Σ_k w_k |L_k x|_1
 
-    where L is either the identity (sparse prior) or the full Hessian operator
-    (all second-order partial derivatives for smoothness prior).
+    subject to x >= 0, where L_k are Hessian components and w_k are spacing
+    weights that ensure isotropic regularization in physical space.
+
+    For anisotropic spacing (e.g., dz=0.3, dy=dx=0.1), the z-derivative
+    terms receive 3x more weight than y/x terms, properly accounting for
+    the integration measure in the continuous formulation.
 
     The algorithm uses primal-dual updates:
-        y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))     [Poisson dual]
-        y2 <- prox_{σG*}(y2 + σLx̄)            [L1 dual: clip to [-α,α]]
-        x  <- max(0, x - τ(A^T y1 + L^T y2))  [primal with positivity]
-        x̄  <- x + θ(x - x_old)                [overrelaxation]
+        y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))          [Poisson dual]
+        y2_k <- clip(y2_k + σL_k x̄, ±α*w_k)        [weighted L1 dual]
+        x  <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))  [primal]
+        x̄  <- x + θ(x - x_old)                     [overrelaxation]
 
     Args:
         observed: Observed blurred image, shape (H, W) or (D, H, W).
@@ -240,15 +291,14 @@ def solve_chambolle_pock(
         num_iter: Number of iterations. Default 100.
         alpha: Regularization weight. Larger = smoother/sparser. Default 0.01.
         regularization: Type of L1 penalty:
-            - "hessian": All second derivatives (n(n+1)/2 terms for nD).
-              For 3D: |∂²x/∂z²|₁ + |∂²x/∂y²|₁ + |∂²x/∂x²|₁ +
-                      |∂²x/∂z∂y|₁ + |∂²x/∂z∂x|₁ + |∂²x/∂y∂x|₁
-              Promotes smoothness/continuity.
+            - "hessian": All second derivatives (n(n+1)/2 terms for nD),
+              weighted by spacing for isotropic physical regularization.
             - "identity": |x|_1 (sparsity)
             Default "hessian".
         spacing: Grid spacing for each dimension, e.g., (dz, dy, dx) for 3D
-            or (dy, dx) for 2D. Required for "hessian" to properly weight
-            derivatives. If None, uses unit spacing.
+            or (dy, dx) for 2D. Used to weight derivative terms: larger
+            spacing = more weight on that direction's derivatives.
+            If None, uses unit spacing.
         background: Constant background in forward model. The model is
             forward = Ax + background. Default 0.0.
         init: Initial estimate. If None, uses max(observed - background, eps).
@@ -268,7 +318,8 @@ def solve_chambolle_pock(
         C, C_adj = make_fft_convolver(psf, device="cuda")
         observed = torch.from_numpy(stack).to("cuda")
 
-        # With smoothness regularization (full Hessian)
+        # With smoothness regularization (full Hessian, spacing-weighted)
+        # z-derivatives get 3x weight since dz/dy = 3
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
@@ -305,6 +356,12 @@ def solve_chambolle_pock(
             )
         spacing = tuple(spacing)
 
+    # Compute spacing-based weights for Hessian regularization
+    if regularization == "hessian":
+        weights = _compute_hessian_weights(spacing)
+    else:
+        weights = None
+
     # Initialize primal variable
     if init is None:
         x = torch.clamp(observed - background, min=eps)
@@ -325,7 +382,7 @@ def solve_chambolle_pock(
     x_bar = x.clone()
 
     # Compute step sizes: τσ||K||² < 1
-    K_norm_sq = _estimate_operator_norm_squared(spacing, regularization)
+    K_norm_sq = _estimate_operator_norm_squared(spacing, regularization, weights)
     step = 0.99 / (K_norm_sq**0.5)
     tau = step  # primal step
     sigma = step  # dual step
@@ -339,6 +396,7 @@ def solve_chambolle_pock(
         if regularization == "hessian":
             num_hess = _count_hessian_components(ndim)
             print(f"  Spacing: {spacing}, Hessian components: {num_hess}")
+            print(f"  Weights: {[f'{w:.3f}' for w in weights]}")
         print(f"  Background: {background}")
         print(f"  Step sizes: tau=sigma={step:.4e}, ||K||≈{K_norm_sq**0.5:.4f}")
         print()
@@ -354,21 +412,21 @@ def solve_chambolle_pock(
         y1 = _prox_poisson_dual(y1 + sigma * Ax_bar, sigma, observed)
 
         # === Dual update for regularization ===
-        # y2 <- prox_{σG*}(y2 + σLx̄) = clip(y2 + σLx̄, -α, α)
+        # y2_k <- clip(y2_k + σL_k x̄, ±α*w_k)
         if regularization == "hessian":
             Lx_bar = _compute_all_second_derivatives(x_bar, spacing)
             y2 = [
-                _prox_l1_dual(y2[k] + sigma * Lx_bar[k], alpha)
+                _prox_l1_dual(y2[k] + sigma * Lx_bar[k], alpha * weights[k])
                 for k in range(len(y2))
             ]
         else:
             y2 = _prox_l1_dual(y2 + sigma * x_bar, alpha)
 
         # === Primal update ===
-        # x <- max(0, x - τ(A^T y1 + L^T y2))
+        # x <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))
         ATy1 = C_adj(y1)
         if regularization == "hessian":
-            LTy2 = _compute_hessian_adjoint(y2, spacing)
+            LTy2 = _compute_hessian_adjoint(y2, spacing, weights)
         else:
             LTy2 = y2  # L^T = I for identity
 
@@ -385,7 +443,10 @@ def solve_chambolle_pock(
 
             if regularization == "hessian":
                 Lx = _compute_all_second_derivatives(x, spacing)
-                l1_reg = alpha * sum(torch.sum(torch.abs(Lk)) for Lk in Lx)
+                # Weighted L1: sum_k w_k * |L_k x|_1
+                l1_reg = alpha * sum(
+                    weights[k] * torch.sum(torch.abs(Lx[k])) for k in range(len(Lx))
+                )
             else:
                 l1_reg = alpha * torch.sum(torch.abs(x))
 
@@ -413,6 +474,7 @@ def solve_chambolle_pock(
             "regularization": regularization,
             "alpha": alpha,
             "spacing": spacing,
+            "weights": weights,
             "background": background,
             "tau": tau,
             "sigma": sigma,
