@@ -284,7 +284,8 @@ def solve_blind_sicg(
         # Step 2: Update PSF (fix image)
         if verbose:
             print("  Updating PSF...")
-        C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=True)
+        # NOTE: normalize=False because image has actual intensities, not a kernel
+        C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=False)
 
         # For PSF update, regularize toward current PSF estimate (not observed!)
         # This keeps PSF close to its prior shape rather than the image
