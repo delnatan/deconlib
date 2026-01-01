@@ -24,19 +24,12 @@ In both cases, the mathematical formulation is identical:
 The only difference is what we call "kernel" and what we solve for.
 """
 
-import warnings
 from typing import Callable, Tuple, Union
 
 import numpy as np
 import torch
 
-__all__ = [
-    "make_fft_convolver",
-    # Deprecated aliases for backwards compatibility
-    "make_fft_convolver_3d",
-    "make_fft_convolver_from_tensor",
-    "make_fft_convolver_3d_from_tensor",
-]
+__all__ = ["make_fft_convolver"]
 
 
 def make_fft_convolver(
@@ -160,64 +153,3 @@ def make_fft_convolver(
         return torch.fft.irfftn(y_ft * otf_conj, s=shape)
 
     return forward, adjoint
-
-
-# =============================================================================
-# Deprecated aliases for backwards compatibility
-# =============================================================================
-
-
-def make_fft_convolver_3d(
-    psf: np.ndarray,
-    device: str = "cpu",
-    dtype: torch.dtype = torch.float32,
-    verbose: bool = False,
-) -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-    """Create 3D FFT-based operators.
-
-    .. deprecated::
-        Use `make_fft_convolver` instead, which handles both 2D and 3D automatically.
-    """
-    warnings.warn(
-        "make_fft_convolver_3d is deprecated. Use make_fft_convolver instead, "
-        "which handles both 2D and 3D automatically.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return make_fft_convolver(psf, device=device, dtype=dtype, normalize=True, verbose=verbose)
-
-
-def make_fft_convolver_from_tensor(
-    kernel: torch.Tensor,
-    normalize: bool = True,
-) -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-    """Create 2D FFT-based operators from a PyTorch tensor.
-
-    .. deprecated::
-        Use `make_fft_convolver` instead, which accepts both NumPy arrays and tensors.
-    """
-    warnings.warn(
-        "make_fft_convolver_from_tensor is deprecated. Use make_fft_convolver instead, "
-        "which accepts both NumPy arrays and PyTorch tensors.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return make_fft_convolver(kernel, normalize=normalize)
-
-
-def make_fft_convolver_3d_from_tensor(
-    kernel: torch.Tensor,
-    normalize: bool = True,
-) -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
-    """Create 3D FFT-based operators from a PyTorch tensor.
-
-    .. deprecated::
-        Use `make_fft_convolver` instead, which handles both 2D/3D and NumPy/Tensor inputs.
-    """
-    warnings.warn(
-        "make_fft_convolver_3d_from_tensor is deprecated. Use make_fft_convolver instead, "
-        "which handles both 2D/3D and NumPy/Tensor inputs.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return make_fft_convolver(kernel, normalize=normalize)

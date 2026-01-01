@@ -26,17 +26,7 @@ and blind deconvolution.
 
 ## Operators
 
-### NumPy-based (for static PSF)
-
 ::: deconlib.deconvolution.make_fft_convolver
-
-::: deconlib.deconvolution.make_fft_convolver_3d
-
-### Tensor-based (for dynamic kernels)
-
-::: deconlib.deconvolution.make_fft_convolver_from_tensor
-
-::: deconlib.deconvolution.make_fft_convolver_3d_from_tensor
 
 ## Result Classes
 

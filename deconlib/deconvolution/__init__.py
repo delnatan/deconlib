@@ -34,13 +34,7 @@ Example:
 from .base import (
     DeconvolutionResult,
 )
-from .operators import (
-    make_fft_convolver,
-    # Deprecated aliases (use make_fft_convolver instead)
-    make_fft_convolver_3d,
-    make_fft_convolver_from_tensor,
-    make_fft_convolver_3d_from_tensor,
-)
+from .operators import make_fft_convolver
 from .rl import (
     solve_rl,
 )
@@ -55,21 +49,17 @@ from .blind import (
 )
 
 __all__ = [
-    # Base types
+    # Result types
     "DeconvolutionResult",
     "BlindDeconvolutionResult",
     # Operators
     "make_fft_convolver",
-    # Deprecated (use make_fft_convolver instead)
-    "make_fft_convolver_3d",
-    "make_fft_convolver_from_tensor",
-    "make_fft_convolver_3d_from_tensor",
-    # Richardson-Lucy
+    # Algorithms
     "solve_rl",
-    # SI-CG
     "solve_sicg",
-    # Blind / PSF extraction
+    # PSF extraction
     "extract_psf_rl",
     "extract_psf_sicg",
+    # Blind deconvolution
     "solve_blind_rl",
 ]
