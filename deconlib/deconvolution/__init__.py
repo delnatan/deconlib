@@ -36,6 +36,7 @@ from .base import (
 )
 from .operators import (
     make_fft_convolver,
+    # Deprecated aliases (use make_fft_convolver instead)
     make_fft_convolver_3d,
     make_fft_convolver_from_tensor,
     make_fft_convolver_3d_from_tensor,
@@ -59,6 +60,7 @@ __all__ = [
     "BlindDeconvolutionResult",
     # Operators
     "make_fft_convolver",
+    # Deprecated (use make_fft_convolver instead)
     "make_fft_convolver_3d",
     "make_fft_convolver_from_tensor",
     "make_fft_convolver_3d_from_tensor",

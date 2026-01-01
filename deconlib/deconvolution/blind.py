@@ -20,7 +20,7 @@ import torch
 import torch.fft as fft
 
 from .base import DeconvolutionResult
-from .operators import make_fft_convolver_from_tensor, make_fft_convolver_3d_from_tensor
+from .operators import make_fft_convolver
 from .sicg import solve_sicg
 
 __all__ = [
@@ -280,16 +280,6 @@ def extract_psf_rl(
     )
 
 
-def _make_convolver_from_tensor(kernel: torch.Tensor, normalize: bool = True):
-    """Select 2D or 3D convolver based on kernel dimensionality."""
-    if kernel.ndim == 2:
-        return make_fft_convolver_from_tensor(kernel, normalize=normalize)
-    elif kernel.ndim == 3:
-        return make_fft_convolver_3d_from_tensor(kernel, normalize=normalize)
-    else:
-        raise ValueError(f"Kernel must be 2D or 3D, got {kernel.ndim}D")
-
-
 def extract_psf_sicg(
     observed: torch.Tensor,
     point_sources: torch.Tensor,
@@ -358,7 +348,7 @@ def extract_psf_sicg(
 
     # Create operators using point sources as kernel
     # This swaps the role: now we're solving for PSF instead of image
-    C, C_adj = _make_convolver_from_tensor(point_sources_norm, normalize=False)
+    C, C_adj = make_fft_convolver(point_sources_norm, normalize=False)
 
     # Set up regularization target for PSF extraction
     # If reg_target not provided but init is, use init² as target
