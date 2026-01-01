@@ -41,6 +41,9 @@ from .rl import (
 from .sicg import (
     solve_sicg,
 )
+from .chambolle_pock import (
+    solve_chambolle_pock,
+)
 from .blind import (
     BlindDeconvolutionResult,
     extract_psf_rl,
@@ -57,6 +60,7 @@ __all__ = [
     # Algorithms
     "solve_rl",
     "solve_sicg",
+    "solve_chambolle_pock",
     # PSF extraction
     "extract_psf_rl",
     "extract_psf_sicg",
