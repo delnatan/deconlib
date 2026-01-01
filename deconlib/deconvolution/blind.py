@@ -291,11 +291,13 @@ def solve_blind_sicg(
         C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=False)
 
         # For PSF update:
-        # - background=0.0: PSF has no background component
-        # - reg_target=psf_init_normalized: regularize toward initial PSF prior,
-        #   not current PSF (which would have no gradient if already at minimum)
+        # - Target is (observed - background): the PSF convolved with image
+        #   should match the background-subtracted observation
+        # - background=0.0 in solve_sicg: PSF has no background component
+        # - reg_target=psf_init_normalized: regularize toward initial PSF prior
+        psf_target = observed - background  # Subtract background from observation
         result_psf = solve_sicg(
-            observed=observed,
+            observed=psf_target,
             C=C_psf,
             C_adj=C_psf_adj,
             num_iter=num_psf_iter,
