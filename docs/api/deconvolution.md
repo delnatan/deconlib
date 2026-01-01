@@ -14,11 +14,15 @@ and blind deconvolution.
 
 ::: deconlib.deconvolution.solve_sicg
 
-## Blind Deconvolution & PSF Extraction
+## PSF Extraction
+
+::: deconlib.deconvolution.extract_psf_rl
 
 ::: deconlib.deconvolution.extract_psf_sicg
 
-::: deconlib.deconvolution.solve_blind_sicg
+## Blind Deconvolution
+
+::: deconlib.deconvolution.solve_blind_rl
 
 ## Operators
 

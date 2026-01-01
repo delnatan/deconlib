@@ -162,6 +162,36 @@ Extract the experimental PSF from images of sub-diffraction beads (point sources
 This is useful for calibrating the PSF from real data rather than using a
 theoretical model.
 
+Two methods are available:
+
+### Richardson-Lucy (simple, fast)
+
+```python
+from deconlib.deconvolution import extract_psf_rl
+import torch
+
+# Load bead image
+observed = torch.from_numpy(bead_image).to("cuda", dtype=torch.float32)
+
+# Create point source map (mark bead locations)
+# The point source should be CENTERED (DC at center of array)
+point_sources = torch.zeros_like(observed)
+cy, cx = observed.shape[0] // 2, observed.shape[1] // 2
+point_sources[cy, cx] = 1.0  # Single centered bead
+
+# Extract PSF
+result = extract_psf_rl(
+    observed,
+    point_sources,
+    num_iter=50,
+    background=100.0,  # Subtract background
+    verbose=True
+)
+psf = result.restored.cpu().numpy()  # Centered, normalized PSF
+```
+
+### SI-CG (regularized, better for noisy data)
+
 ```python
 from deconlib.deconvolution import extract_psf_sicg
 import torch
@@ -169,20 +199,17 @@ import torch
 # Load bead image
 observed = torch.from_numpy(bead_image).to("cuda", dtype=torch.float32)
 
-# Create point source map (mark bead locations)
-# This should be sparse with peaks at detected bead centers
+# Create point source map
 point_sources = torch.zeros_like(observed)
-point_sources[bead_y, bead_x] = 1.0  # Single bead
-# Or for multiple beads:
-# for y, x in bead_positions:
-#     point_sources[y, x] = 1.0
+point_sources[bead_y, bead_x] = 1.0  # Mark bead locations
 
-# Extract PSF
+# Extract PSF with regularization
 result = extract_psf_sicg(
     observed,
     point_sources,
     num_iter=100,
-    beta=0.001,
+    beta=0.001,        # Regularization weight
+    background=100.0,
     verbose=True
 )
 psf = result.restored.cpu().numpy()  # Normalized PSF
@@ -197,36 +224,37 @@ The forward model is:
 \]
 
 Since convolution is symmetric (\(A \ast B = B \ast A\)), we can swap roles:
-use the point source map as the "kernel" and solve for the PSF as if it
-were the image. The same SI-CG algorithm works for both problems.
+use the point source map as the "kernel" and solve for the PSF.
 
 !!! tip "Bead Selection"
     - Use isolated beads away from image edges
     - Multiple beads improve SNR (they average together)
     - Ensure beads are truly sub-diffraction (~100nm for visible light)
 
+!!! tip "Which Method?"
+    - Use `extract_psf_rl` for quick extraction with good SNR
+    - Use `extract_psf_sicg` when you need regularization (noisy data)
+
 ## Blind Deconvolution
 
 When the PSF is not precisely known, blind deconvolution estimates both
-the image and PSF simultaneously using alternating optimization.
+the image and PSF simultaneously using alternating Richardson-Lucy updates.
 
 ```python
-from deconlib.deconvolution import solve_blind_sicg
+from deconlib.deconvolution import solve_blind_rl
 import torch
 
 # Start with an initial PSF guess (theoretical or approximate)
+# PSF should be CENTERED (DC at center of array)
 psf_init = torch.from_numpy(theoretical_psf).to("cuda", dtype=torch.float32)
 observed = torch.from_numpy(image).to("cuda", dtype=torch.float32)
 
 # Run blind deconvolution
-result = solve_blind_sicg(
+result = solve_blind_rl(
     observed,
     psf_init,
-    num_outer_iter=10,     # Alternating iterations
-    num_image_iter=20,     # SI-CG iterations for image
-    num_psf_iter=10,       # SI-CG iterations for PSF
-    beta_image=0.001,      # Image regularization
-    beta_psf=0.01,         # PSF regularization (usually higher)
+    num_iter=50,           # Total iterations
+    background=100.0,      # Background to subtract
     verbose=True
 )
 
@@ -236,12 +264,15 @@ refined_psf = result.psf.cpu().numpy()
 
 ### Algorithm
 
-Blind deconvolution alternates between two updates:
+Blind deconvolution follows the Fish et al. (1995) algorithm, alternating
+Richardson-Lucy updates for image and PSF:
 
-1. **Fix PSF, update image**: Standard deconvolution
-2. **Fix image, update PSF**: Inverse deconvolution (same algorithm, swapped roles)
-3. **Normalize PSF**: Ensure PSF sums to 1
-4. **Repeat**
+1. **Compute forward model**: \(F = \text{image} \ast \text{PSF}\)
+2. **Compute ratio**: \(R = \text{data} / F\)
+3. **Update PSF**: \(\text{PSF} \leftarrow \text{PSF} \cdot (R \ast \text{image}_\text{flip})\)
+4. **Normalize PSF**: Ensure PSF sums to 1
+5. **Update image**: \(\text{image} \leftarrow \text{image} \cdot (R \ast \text{PSF}_\text{flip})\)
+6. **Repeat**
 
 ### Result Object
 
@@ -250,17 +281,15 @@ Blind deconvolution alternates between two updates:
 | Attribute | Description |
 |-----------|-------------|
 | `restored` | Deconvolved image |
-| `psf` | Refined PSF estimate |
-| `outer_iterations` | Number of alternating iterations |
-| `image_loss_history` | Loss history for each image update |
-| `psf_loss_history` | Loss history for each PSF update |
+| `psf` | Refined PSF estimate (centered) |
+| `iterations` | Number of iterations completed |
 
 !!! warning "Ill-Posed Problem"
     Blind deconvolution is mathematically ill-posed. Success depends on:
 
-    - Good initial PSF estimate
-    - Appropriate regularization (especially for PSF)
+    - Good initial PSF estimate (close to true PSF)
     - Sufficient image structure/contrast
+    - The PSF should be centered (DC at center of array)
 
 ## Algorithm Comparison
 
@@ -268,20 +297,6 @@ Blind deconvolution alternates between two updates:
 |-----------|----------|----------------|----------------|
 | `solve_rl` | Known PSF, low noise | None (implicit) | Yes (multiplicative) |
 | `solve_sicg` | Known PSF, noisy data | Explicit (β) | Yes (c² parametrization) |
-| `extract_psf_sicg` | PSF calibration from beads | Explicit (β) | Yes |
-| `solve_blind_sicg` | Unknown/approximate PSF | Explicit (β) | Yes |
-
-## Dynamic Operators
-
-For advanced use cases where you need to rebuild operators during iteration
-(e.g., custom blind deconvolution schemes), use tensor-based operators:
-
-```python
-from deconlib.deconvolution import make_fft_convolver_from_tensor
-
-# Create operators from a PyTorch tensor (not NumPy)
-# Useful when the kernel changes during optimization
-C, C_adj = make_fft_convolver_from_tensor(kernel_tensor, normalize=True)
-```
-
-This avoids NumPy conversion overhead and keeps everything on the same device.
+| `extract_psf_rl` | PSF calibration, fast | None (implicit) | Yes (multiplicative) |
+| `extract_psf_sicg` | PSF calibration, noisy | Explicit (β) | Yes (c² parametrization) |
+| `solve_blind_rl` | Unknown/approximate PSF | None (implicit) | Yes (multiplicative) |

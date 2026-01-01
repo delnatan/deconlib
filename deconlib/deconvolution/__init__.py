@@ -48,8 +48,9 @@ from .sicg import (
 )
 from .blind import (
     BlindDeconvolutionResult,
+    extract_psf_rl,
     extract_psf_sicg,
-    solve_blind_sicg,
+    solve_blind_rl,
 )
 
 __all__ = [
@@ -66,6 +67,7 @@ __all__ = [
     # SI-CG
     "solve_sicg",
     # Blind / PSF extraction
+    "extract_psf_rl",
     "extract_psf_sicg",
-    "solve_blind_sicg",
+    "solve_blind_rl",
 ]
