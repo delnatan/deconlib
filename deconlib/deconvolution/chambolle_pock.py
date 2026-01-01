@@ -4,16 +4,14 @@ The Primal-Dual Hybrid Gradient (PDHG) algorithm, also known as Chambolle-Pock,
 is well-suited for problems with non-smooth regularization terms.
 
 This implementation solves:
-    min_{x>=0}  KL(b || Ax) + alpha * |Lx|_1
+    min_{x>=0}  KL(b || Ax + bg) + alpha * |Lx|_1
 
 where:
     - KL is the Kullback-Leibler divergence (Poisson negative log-likelihood)
     - A is the blurring operator (convolution with PSF)
-    - L is the second-derivative operator (Laplacian components)
+    - L is the regularization operator (identity or second-derivative)
+    - bg is a constant background
     - alpha controls regularization strength
-
-The second-order regularization promotes continuity without the staircase
-artifacts typical of first-order (TV) regularization.
 
 Reference:
     Chambolle, A. and Pock, T. (2011). "A First-Order Primal-Dual Algorithm
@@ -21,7 +19,7 @@ Reference:
     Imaging and Vision 40(1): 120-145.
 """
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Literal, Optional, Tuple
 
 import torch
 
@@ -46,16 +44,13 @@ def _compute_second_derivatives(
     Returns:
         List of second derivative tensors, one per dimension.
     """
-    ndim = x.ndim
     second_derivs = []
-
-    for dim in range(ndim):
+    for dim in range(x.ndim):
         # First derivative along dimension
         first_deriv = torch.gradient(x, spacing=spacing[dim], dim=dim)[0]
         # Second derivative along same dimension
         second_deriv = torch.gradient(first_deriv, spacing=spacing[dim], dim=dim)[0]
         second_derivs.append(second_deriv)
-
     return second_derivs
 
 
@@ -76,41 +71,42 @@ def _compute_laplacian_adjoint(
         Adjoint applied to y components.
     """
     result = torch.zeros_like(y_components[0])
-
     for dim, y_d in enumerate(y_components):
-        # Apply second derivative (self-adjoint)
         first_deriv = torch.gradient(y_d, spacing=spacing[dim], dim=dim)[0]
         second_deriv = torch.gradient(first_deriv, spacing=spacing[dim], dim=dim)[0]
         result = result + second_deriv
-
     return result
 
 
-def _estimate_operator_norm(
+def _estimate_operator_norm_squared(
     spacing: Tuple[float, ...],
+    regularization: str,
     blur_norm: float = 1.0,
 ) -> float:
     """Estimate squared norm of the combined operator K = [A; L].
 
     For convolution with normalized PSF: ||A|| ≈ 1.
+    For identity L=I: ||I|| = 1.
     For second derivative with spacing h: ||d²/dx²|| ≈ 4/h².
-
-    The combined operator norm satisfies:
-        ||K||² <= ||A||² + sum_d ||d²/d(dim_d)²||²
 
     Args:
         spacing: Grid spacing for each dimension.
+        regularization: Type of regularization ("identity" or "laplacian").
         blur_norm: Estimated norm of blur operator. Default 1.0.
 
     Returns:
         Estimated squared operator norm.
     """
     # Blur operator contribution
-    norm_sq = blur_norm ** 2
+    norm_sq = blur_norm**2
 
-    # Second derivative contributions (using standard finite difference bound)
-    for h in spacing:
-        norm_sq += (4.0 / h) ** 2
+    if regularization == "identity":
+        # ||I||² = 1
+        norm_sq += 1.0
+    else:
+        # Second derivative: ||d²/dx²|| ≈ 4/h for each dimension
+        for h in spacing:
+            norm_sq += (4.0 / h) ** 2
 
     return norm_sq
 
@@ -120,17 +116,17 @@ def _prox_poisson_dual(
     sigma: float,
     b: torch.Tensor,
 ) -> torch.Tensor:
-    """Proximal operator for conjugate of KL divergence (shifted Poisson).
+    """Proximal operator for conjugate of Poisson NLL (shifted Poisson).
 
-    For the Poisson data fidelity term F(z) = sum(z - b*log(z)), the
-    conjugate proximal is:
-        prox_{sigma F*}(y) = (1/2) * (y - 1 + sqrt((y - 1)² + 4*sigma*b))
+    For the Poisson data fidelity F(z) = sum(z - b*log(z)), the conjugate
+    proximal is:
+        prox_{σF*}(y) = (1/2) * (y - 1 + sqrt((y - 1)² + 4σb))
 
-    This is the "shifted Poisson" formula used in imaging literature.
+    This is derived from Moreau decomposition and the Poisson proximal.
 
     Args:
-        y: Dual variable.
-        sigma: Step size.
+        y: Dual variable (after adding σ * forward_model).
+        sigma: Dual step size.
         b: Observed data (photon counts).
 
     Returns:
@@ -141,25 +137,25 @@ def _prox_poisson_dual(
 
 
 def _prox_l1_dual(
-    y_components: List[torch.Tensor],
+    y: torch.Tensor,
     alpha: float,
-) -> List[torch.Tensor]:
-    """Proximal operator for conjugate of L1 norm (projection to box).
+) -> torch.Tensor:
+    """Proximal operator for conjugate of weighted L1 norm.
 
-    For G(u) = alpha * |u|_1, the conjugate proximal is projection onto
-    the box [-alpha, alpha]:
-        prox_{sigma G*}(y) = clamp(y, -alpha, alpha)
+    For G(u) = alpha * |u|_1, the conjugate G* is the indicator of the
+    L-infinity ball of radius alpha. The proximal is projection:
+        prox_{σG*}(y) = clamp(y, -alpha, alpha)
 
-    Note: sigma doesn't appear because G* is an indicator function.
+    Note: σ doesn't appear because G* is an indicator function.
 
     Args:
-        y_components: List of dual variable components.
-        alpha: Regularization weight (defines box bounds).
+        y: Dual variable.
+        alpha: Regularization weight (box constraint radius).
 
     Returns:
-        List of projected components.
+        Projected dual variable.
     """
-    return [torch.clamp(y_d, min=-alpha, max=alpha) for y_d in y_components]
+    return torch.clamp(y, min=-alpha, max=alpha)
 
 
 def solve_chambolle_pock(
@@ -168,6 +164,7 @@ def solve_chambolle_pock(
     C_adj: Callable[[torch.Tensor], torch.Tensor],
     num_iter: int = 100,
     alpha: float = 0.01,
+    regularization: Literal["laplacian", "identity"] = "laplacian",
     spacing: Optional[Tuple[float, ...]] = None,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
@@ -176,28 +173,38 @@ def solve_chambolle_pock(
     verbose: bool = False,
     callback: Optional[Callable[[int, torch.Tensor], None]] = None,
 ) -> DeconvolutionResult:
-    """Solve Poisson deconvolution with L1-regularized second derivatives.
+    """Solve Poisson deconvolution with L1 regularization using PDHG.
 
     Minimizes:
-        KL(b || Ax) + alpha * sum_d |d²x/d(dim_d)²|_1
+        sum(Ax + bg - b*log(Ax + bg)) + alpha * |Lx|_1   subject to x >= 0
 
-    using the Chambolle-Pock primal-dual algorithm. The second-order
-    regularization promotes smooth solutions without TV staircase artifacts.
+    where L is either the identity (sparse prior) or second-derivative
+    operator (smoothness prior).
+
+    The algorithm uses primal-dual updates:
+        y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))     [Poisson dual]
+        y2 <- prox_{σG*}(y2 + σLx̄)            [L1 dual: clip to [-α,α]]
+        x  <- max(0, x - τ(A^T y1 + L^T y2))  [primal with positivity]
+        x̄  <- x + θ(x - x_old)                [overrelaxation]
 
     Args:
         observed: Observed blurred image, shape (H, W) or (D, H, W).
         C: Forward operator (convolution with PSF).
         C_adj: Adjoint operator (correlation with PSF).
         num_iter: Number of iterations. Default 100.
-        alpha: Regularization weight. Controls smoothness vs fidelity.
-            Larger values produce smoother results. Default 0.01.
+        alpha: Regularization weight. Larger = smoother/sparser. Default 0.01.
+        regularization: Type of L1 penalty:
+            - "laplacian": |d²x/dz² + d²x/dy² + d²x/dx²|_1 (smoothness)
+            - "identity": |x|_1 (sparsity)
+            Default "laplacian".
         spacing: Grid spacing for each dimension, e.g., (dz, dy, dx) for 3D
-            or (dy, dx) for 2D. If None, assumes isotropic unit spacing.
-            Important: z-spacing often differs from xy-spacing in microscopy.
-        background: Background value to add to forward model. Default 0.0.
-        init: Initial estimate. If None, uses observed image.
+            or (dy, dx) for 2D. Required for "laplacian" to properly weight
+            derivatives. If None, uses unit spacing.
+        background: Constant background in forward model. The model is
+            forward = Ax + background. Default 0.0.
+        init: Initial estimate. If None, uses max(observed - background, eps).
         eps: Small constant for numerical stability. Default 1e-12.
-        theta: Overrelaxation parameter in [0, 1]. Default 1.0 (standard).
+        theta: Overrelaxation parameter in [0, 1]. Default 1.0.
         verbose: Print iteration progress. Default False.
         callback: Optional function called each iteration with
             (iteration, current_estimate).
@@ -209,27 +216,34 @@ def solve_chambolle_pock(
         ```python
         from deconlib.deconvolution import make_fft_convolver, solve_chambolle_pock
 
-        # For 3D microscopy data with different z spacing
         C, C_adj = make_fft_convolver(psf, device="cuda")
         observed = torch.from_numpy(stack).to("cuda")
 
+        # With smoothness regularization (Laplacian)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
             alpha=0.001,
+            regularization="laplacian",
             spacing=(0.3, 0.1, 0.1),  # (dz, dy, dx) in microns
-            verbose=True
         )
-        restored = result.restored.cpu().numpy()
-        ```
 
-    Note:
-        - The algorithm enforces x >= 0 via projection.
-        - Step sizes are automatically computed from operator norms.
-        - Second-order regularization avoids TV staircase artifacts.
-        - Larger alpha = smoother but less sharp; smaller alpha = sharper but noisier.
+        # With sparsity regularization (identity)
+        result = solve_chambolle_pock(
+            observed, C, C_adj,
+            num_iter=200,
+            alpha=0.001,
+            regularization="identity",
+        )
+        ```
     """
     ndim = observed.ndim
+
+    # Validate regularization type
+    if regularization not in ("laplacian", "identity"):
+        raise ValueError(
+            f"regularization must be 'laplacian' or 'identity', got '{regularization}'"
+        )
 
     # Default to isotropic unit spacing
     if spacing is None:
@@ -237,7 +251,8 @@ def solve_chambolle_pock(
     else:
         if len(spacing) != ndim:
             raise ValueError(
-                f"spacing must have {ndim} elements for {ndim}D data, got {len(spacing)}"
+                f"spacing must have {ndim} elements for {ndim}D data, "
+                f"got {len(spacing)}"
             )
         spacing = tuple(spacing)
 
@@ -248,94 +263,91 @@ def solve_chambolle_pock(
         x = init.clone()
 
     # Initialize dual variables
-    # y1: dual for data fidelity (same shape as observed)
-    y1 = torch.zeros_like(observed)
-    # y2: dual for regularization (one component per dimension)
-    y2 = [torch.zeros_like(observed) for _ in range(ndim)]
+    y1 = torch.zeros_like(observed)  # dual for data fidelity
+    if regularization == "laplacian":
+        # One dual variable per dimension for second derivatives
+        y2 = [torch.zeros_like(observed) for _ in range(ndim)]
+    else:
+        # Single dual variable for identity
+        y2 = torch.zeros_like(observed)
 
     # Overrelaxed primal variable
     x_bar = x.clone()
 
-    # Compute step sizes using standard rule: tau * sigma * ||K||^2 < 1
-    K_norm_sq = _estimate_operator_norm(spacing)
-    # Use balanced step sizes: tau = sigma = 1 / ||K||
-    step = 0.99 / (K_norm_sq ** 0.5)
-    tau = step  # primal step size
-    sigma = step  # dual step size
+    # Compute step sizes: τσ||K||² < 1
+    K_norm_sq = _estimate_operator_norm_squared(spacing, regularization)
+    step = 0.99 / (K_norm_sq**0.5)
+    tau = step  # primal step
+    sigma = step  # dual step
 
-    # Observed data with background subtracted (for KL divergence)
-    b = torch.clamp(observed - background, min=eps)
-
-    # Track objective values
     loss_history = []
 
     if verbose:
         print("Chambolle-Pock (PDHG) Deconvolution")
-        print(f"  Shape: {tuple(observed.shape)}, Spacing: {spacing}")
-        print(f"  Iterations: {num_iter}, Alpha: {alpha}")
-        print(f"  Step sizes: tau={tau:.4e}, sigma={sigma:.4e}")
-        print(f"  Operator norm estimate: {K_norm_sq**0.5:.4f}")
+        print(f"  Shape: {tuple(observed.shape)}")
+        print(f"  Regularization: {regularization}, Alpha: {alpha}")
+        if regularization == "laplacian":
+            print(f"  Spacing: {spacing}")
+        print(f"  Background: {background}")
+        print(f"  Step sizes: tau=sigma={step:.4e}, ||K||≈{K_norm_sq**0.5:.4f}")
         print()
-        print(f"{'Iter':>5}  {'Objective':>12}  {'Primal':>10}  {'Dual':>10}")
-        print("-" * 50)
+        print(f"{'Iter':>5}  {'Objective':>12}  {'|Δx|':>10}")
+        print("-" * 35)
 
     for iteration in range(1, num_iter + 1):
-        # Store old primal for overrelaxation
         x_old = x.clone()
 
-        # === Dual updates ===
-
-        # Dual update for data fidelity: y1 = prox_{sigma F*}(y1 + sigma * A * x_bar)
+        # === Dual update for data fidelity ===
+        # y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))
+        # The background shifts the argument per conjugate composition rule
         Ax_bar = C(x_bar) + background
-        y1_tilde = y1 + sigma * Ax_bar
-        y1 = _prox_poisson_dual(y1_tilde, sigma, observed)
+        y1 = _prox_poisson_dual(y1 + sigma * Ax_bar, sigma, observed)
 
-        # Dual update for regularization: y2 = prox_{sigma G*}(y2 + sigma * L * x_bar)
-        Lx_bar = _compute_second_derivatives(x_bar, spacing)
-        y2_tilde = [y2[d] + sigma * Lx_bar[d] for d in range(ndim)]
-        y2 = _prox_l1_dual(y2_tilde, alpha)
+        # === Dual update for regularization ===
+        # y2 <- prox_{σG*}(y2 + σLx̄) = clip(y2 + σLx̄, -α, α)
+        if regularization == "laplacian":
+            Lx_bar = _compute_second_derivatives(x_bar, spacing)
+            y2 = [_prox_l1_dual(y2[d] + sigma * Lx_bar[d], alpha) for d in range(ndim)]
+        else:
+            y2 = _prox_l1_dual(y2 + sigma * x_bar, alpha)
 
         # === Primal update ===
-
-        # Compute adjoint terms
+        # x <- max(0, x - τ(A^T y1 + L^T y2))
         ATy1 = C_adj(y1)
-        LTy2 = _compute_laplacian_adjoint(y2, spacing)
+        if regularization == "laplacian":
+            LTy2 = _compute_laplacian_adjoint(y2, spacing)
+        else:
+            LTy2 = y2  # L^T = I for identity
 
-        # Primal update: x = prox_{tau}(x - tau * (A^T y1 + L^T y2))
-        x_tilde = x - tau * (ATy1 + LTy2)
-        # Proximal for non-negativity constraint: projection to x >= 0
-        x = torch.clamp(x_tilde, min=0.0)
+        x = torch.clamp(x - tau * (ATy1 + LTy2), min=0.0)
 
         # === Overrelaxation ===
         x_bar = x + theta * (x - x_old)
 
-        # === Compute objective for monitoring ===
+        # === Track objective ===
         if verbose or callback is not None or iteration == num_iter:
-            # Forward model
             Ax = C(x) + background
             Ax_safe = torch.clamp(Ax, min=eps)
-
-            # KL divergence: sum(Ax - b*log(Ax))
             kl_div = torch.sum(Ax - observed * torch.log(Ax_safe))
 
-            # L1 regularization on second derivatives
-            Lx = _compute_second_derivatives(x, spacing)
-            l1_reg = alpha * sum(torch.sum(torch.abs(Ld)) for Ld in Lx)
+            if regularization == "laplacian":
+                Lx = _compute_second_derivatives(x, spacing)
+                l1_reg = alpha * sum(torch.sum(torch.abs(Ld)) for Ld in Lx)
+            else:
+                l1_reg = alpha * torch.sum(torch.abs(x))
 
             objective = float(kl_div + l1_reg)
             loss_history.append(objective)
 
             if verbose:
-                primal_res = float(torch.norm(x - x_old))
-                dual_res = float(torch.norm(y1 - _prox_poisson_dual(y1 + sigma * Ax_bar, sigma, observed)))
-                print(f"{iteration:>5}  {objective:>12.4e}  {primal_res:>10.4e}  {dual_res:>10.4e}")
+                dx_norm = float(torch.norm(x - x_old))
+                print(f"{iteration:>5}  {objective:>12.4e}  {dx_norm:>10.4e}")
 
-        # Callback
         if callback is not None:
             callback(iteration, x)
 
     if verbose:
-        print("-" * 50)
+        print("-" * 35)
         print(f"Completed {num_iter} iterations.")
 
     return DeconvolutionResult(
@@ -345,6 +357,7 @@ def solve_chambolle_pock(
         converged=True,
         metadata={
             "algorithm": "Chambolle-Pock",
+            "regularization": regularization,
             "alpha": alpha,
             "spacing": spacing,
             "background": background,
