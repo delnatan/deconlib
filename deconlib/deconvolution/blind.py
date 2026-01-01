@@ -237,6 +237,9 @@ def solve_blind_sicg(
     psf = psf_init.clone()
     psf = psf / (psf.sum() + eps)  # Ensure normalized
 
+    # Save initial PSF for regularization target (provides prior constraint)
+    psf_init_normalized = psf.clone()
+
     # Initialize image with observed (or could use other initialization)
     image = observed.clone()
 
@@ -287,17 +290,19 @@ def solve_blind_sicg(
         # NOTE: normalize=False because image has actual intensities, not a kernel
         C_psf, C_psf_adj = _make_convolver_from_tensor(image, normalize=False)
 
-        # For PSF update, regularize toward current PSF estimate (not observed!)
-        # This keeps PSF close to its prior shape rather than the image
+        # For PSF update:
+        # - background=0.0: PSF has no background component
+        # - reg_target=psf_init_normalized: regularize toward initial PSF prior,
+        #   not current PSF (which would have no gradient if already at minimum)
         result_psf = solve_sicg(
             observed=observed,
             C=C_psf,
             C_adj=C_psf_adj,
             num_iter=num_psf_iter,
             beta=beta_psf,
-            background=background,
+            background=0.0,  # PSF has no background
             init=torch.sqrt(torch.clamp(psf, min=eps)),  # sqrt for c init
-            reg_target=psf,  # Regularize toward current PSF, not observed image
+            reg_target=psf_init_normalized,  # Regularize toward initial PSF prior
             eps=eps,
             restart_interval=restart_interval,
             line_search_iter=line_search_iter,
