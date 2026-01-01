@@ -57,10 +57,10 @@ def make_fft_convolver(
             - PyTorch tensor: device/dtype parameters are ignored; uses tensor's own
             The kernel should have DC at corner (index [0, 0, ...]) as produced
             by pupil_to_psf or as expected by FFT operations.
-        device: PyTorch device, used only when kernel is a NumPy array.
-            Ignored if kernel is already a tensor. Default "cpu".
-        dtype: PyTorch dtype, used only when kernel is a NumPy array.
-            Ignored if kernel is already a tensor. Default torch.float32.
+        device: PyTorch device for the OTF and convolution operations.
+            Only used when kernel is a NumPy array. Default "cpu".
+        dtype: PyTorch dtype for the OTF. Only used when kernel is a NumPy
+            array. Default torch.float32.
         normalize: If True, normalize kernel to sum to 1. Default True.
             Set to False if kernel is already normalized.
         verbose: If True, print operator info. Default False.

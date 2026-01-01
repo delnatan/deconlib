@@ -46,8 +46,8 @@ C, C_adj = make_fft_convolver(kernel, device="cuda", normalize=True)
 | Parameter | Description |
 |-----------|-------------|
 | `kernel` | NumPy array or PyTorch tensor (2D or 3D) |
-| `device` | Target device (only used for NumPy input) |
-| `dtype` | Target dtype (only used for NumPy input) |
+| `device` | PyTorch device for OTF and operations (only for NumPy input) |
+| `dtype` | PyTorch dtype for OTF (only for NumPy input) |
 | `normalize` | Normalize kernel to sum to 1 (default: True) |
 
 The operators implement:
