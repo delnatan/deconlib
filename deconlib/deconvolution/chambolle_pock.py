@@ -287,7 +287,7 @@ def _prox_l1_dual(
     y: torch.Tensor,
     bound: float,
 ) -> torch.Tensor:
-    """Proximal operator for conjugate of weighted L1 norm.
+    """Proximal operator for conjugate of weighted L1 norm (anisotropic).
 
     For G(u) = bound * |u|_1, the conjugate G* is the indicator of the
     L-infinity ball of radius 'bound'. The proximal is projection:
@@ -305,6 +305,50 @@ def _prox_l1_dual(
     return torch.clamp(y, min=-bound, max=bound)
 
 
+def _prox_l2_dual(
+    y_components: List[torch.Tensor],
+    weights: List[float],
+    alpha: float,
+    eps: float = 1e-12,
+) -> List[torch.Tensor]:
+    """Proximal operator for conjugate of weighted L2 norm (isotropic).
+
+    For G(u) = alpha * ||W·u||_2 where W is diagonal weights, the conjugate
+    G* is the indicator of the weighted L2 ball. The proximal is projection:
+        prox_{σG*}(y) = y / max(1, ||W·y||_2 / alpha)
+
+    This is "vector soft-thresholding": shrinks magnitude, preserves direction.
+    Applied per-pixel across all Hessian components.
+
+    Args:
+        y_components: List of dual variables, one per Hessian component.
+        weights: Weight for each component (for anisotropic spacing).
+        alpha: Regularization weight (L2 ball radius).
+        eps: Small constant for numerical stability.
+
+    Returns:
+        List of projected dual variables.
+    """
+    # Stack components: (K, *spatial_dims)
+    stacked = torch.stack(y_components, dim=0)
+
+    # Apply weights: w_k * y_k
+    weight_tensor = torch.tensor(
+        weights, dtype=stacked.dtype, device=stacked.device
+    ).view(-1, *([1] * (stacked.ndim - 1)))
+    weighted = stacked * weight_tensor
+
+    # Compute weighted L2 norm at each pixel: ||W·y||_2
+    norm_sq = torch.sum(weighted ** 2, dim=0, keepdim=True)
+    norm = torch.sqrt(norm_sq + eps)
+
+    # Projection: y / max(1, ||W·y||_2 / alpha)
+    scale = torch.clamp(norm / alpha, min=1.0)
+    projected = stacked / scale
+
+    return [projected[k] for k in range(len(y_components))]
+
+
 def solve_chambolle_pock(
     observed: torch.Tensor,
     C: Callable[[torch.Tensor], torch.Tensor],
@@ -312,6 +356,7 @@ def solve_chambolle_pock(
     num_iter: int = 100,
     alpha: float = 0.01,
     regularization: Literal["hessian", "identity"] = "hessian",
+    isotropic: bool = False,
     spacing: Optional[Tuple[float, ...]] = None,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
@@ -320,13 +365,25 @@ def solve_chambolle_pock(
     verbose: bool = False,
     callback: Optional[Callable[[int, torch.Tensor], None]] = None,
 ) -> DeconvolutionResult:
-    """Solve Poisson deconvolution with L1 regularization using PDHG.
+    """Solve Poisson deconvolution with sparse regularization using PDHG.
 
     Minimizes:
-        sum(Ax + bg - b*log(Ax + bg)) + alpha * Σ_k w_k |L_k x|_1
+        sum(Ax + bg - b*log(Ax + bg)) + alpha * R(Lx)
+
+    where R is the regularization norm:
+        - Anisotropic (isotropic=False): R(Lx) = Σ_k w_k |L_k x|_1
+        - Isotropic (isotropic=True): R(Lx) = Σ_pixels ||W·Lx||_2
 
     subject to x >= 0, where L_k are Hessian components and w_k are spacing
     weights that ensure isotropic regularization in physical space.
+
+    Anisotropic vs Isotropic:
+        - Anisotropic L1: Independent soft-thresholding of each Hessian
+          component. Can produce "blocky" artifacts along coordinate axes.
+        - Isotropic L2: Joint soft-thresholding across all components at
+          each pixel (vector shrinkage). Promotes sparse derivatives while
+          avoiding axis-aligned artifacts. Similar to Total Generalized
+          Variation (TGV) behavior.
 
     For anisotropic spacing (e.g., dz=0.3, dy=dx=0.1), z-derivative terms
     receive LESS weight (R²=0.11 for D_zz) than lateral terms (1.0),
@@ -335,8 +392,8 @@ def solve_chambolle_pock(
 
     The algorithm uses primal-dual updates:
         y1 <- prox_{σF*}(y1 + σ(Ax̄ + bg))          [Poisson dual]
-        y2_k <- clip(y2_k + σL_k x̄, ±α*w_k)        [weighted L1 dual]
-        x  <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))  [primal]
+        y2 <- prox_{σR*}(y2 + σLx̄)                 [L1 or L2 dual]
+        x  <- max(0, x - τ(A^T y1 + L^T y2))       [primal]
         x̄  <- x + θ(x - x_old)                     [overrelaxation]
 
     Args:
@@ -345,11 +402,15 @@ def solve_chambolle_pock(
         C_adj: Adjoint operator (correlation with PSF).
         num_iter: Number of iterations. Default 100.
         alpha: Regularization weight. Larger = smoother/sparser. Default 0.01.
-        regularization: Type of L1 penalty:
+        regularization: Type of regularization operator L:
             - "hessian": All second derivatives (n(n+1)/2 terms for nD),
               weighted by spacing for isotropic physical regularization.
-            - "identity": |x|_1 (sparsity)
+            - "identity": L=I, yielding |x|_1 (sparsity). Ignores isotropic.
             Default "hessian".
+        isotropic: If True, use L2 norm across Hessian components at each pixel
+            instead of L1 on each component independently. This promotes sparse
+            gradients while avoiding axis-aligned "blocky" artifacts. Only
+            applies when regularization="hessian". Default False.
         spacing: Grid spacing for each dimension, e.g., (dz, dy, dx) for 3D
             or (dy, dx) for 2D. Used to weight derivative terms: larger
             spacing = LESS weight (coarser sampling already smooths).
@@ -373,17 +434,27 @@ def solve_chambolle_pock(
         C, C_adj = make_fft_convolver(psf, device="cuda")
         observed = torch.from_numpy(stack).to("cuda")
 
-        # With smoothness regularization (full Hessian, spacing-weighted)
-        # z-derivatives get 0.11x weight (R²) since dz is 3x coarser
+        # Anisotropic L1 on Hessian (can be blocky)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
             alpha=0.001,
             regularization="hessian",
+            isotropic=False,  # default: L1 per component
             spacing=(0.3, 0.1, 0.1),  # (dz, dy, dx) in microns
         )
 
-        # With sparsity regularization (identity)
+        # Isotropic L2 on Hessian (smoother, less blocky)
+        result = solve_chambolle_pock(
+            observed, C, C_adj,
+            num_iter=200,
+            alpha=0.001,
+            regularization="hessian",
+            isotropic=True,  # L2 across components per pixel
+            spacing=(0.3, 0.1, 0.1),
+        )
+
+        # With sparsity regularization on image (identity)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
@@ -450,7 +521,9 @@ def solve_chambolle_pock(
         print(f"  Regularization: {regularization}, Alpha: {alpha}")
         if regularization == "hessian":
             num_hess = _count_hessian_components(ndim)
-            print(f"  Spacing: {spacing}, Hessian components: {num_hess}")
+            norm_type = "L2 (isotropic)" if isotropic else "L1 (anisotropic)"
+            print(f"  Norm: {norm_type}, Hessian components: {num_hess}")
+            print(f"  Spacing: {spacing}")
             print(f"  Weights: {[f'{w:.3f}' for w in weights]}")
         print(f"  Background: {background}")
         print(f"  Step sizes: tau=sigma={step:.4e}, ||K||≈{K_norm_sq**0.5:.4f}")
@@ -467,14 +540,21 @@ def solve_chambolle_pock(
         y1 = _prox_poisson_dual(y1 + sigma * Ax_bar, sigma, observed)
 
         # === Dual update for regularization ===
-        # y2_k <- clip(y2_k + σL_k x̄, ±α*w_k)
         if regularization == "hessian":
             Lx_bar = _compute_all_second_derivatives(x_bar, spacing)
-            y2 = [
-                _prox_l1_dual(y2[k] + sigma * Lx_bar[k], alpha * weights[k])
-                for k in range(len(y2))
-            ]
+            # Update y2 with gradient step
+            y2_updated = [y2[k] + sigma * Lx_bar[k] for k in range(len(y2))]
+            if isotropic:
+                # L2 norm: project onto weighted L2 ball (vector shrinkage)
+                y2 = _prox_l2_dual(y2_updated, weights, alpha, eps)
+            else:
+                # L1 norm: clip each component independently
+                y2 = [
+                    _prox_l1_dual(y2_updated[k], alpha * weights[k])
+                    for k in range(len(y2))
+                ]
         else:
+            # Identity regularization: simple L1 on x
             y2 = _prox_l1_dual(y2 + sigma * x_bar, alpha)
 
         # === Primal update ===
@@ -498,14 +578,25 @@ def solve_chambolle_pock(
 
             if regularization == "hessian":
                 Lx = _compute_all_second_derivatives(x, spacing)
-                # Weighted L1: sum_k w_k * |L_k x|_1
-                l1_reg = alpha * sum(
-                    weights[k] * torch.sum(torch.abs(Lx[k])) for k in range(len(Lx))
-                )
+                if isotropic:
+                    # Weighted L2: sum_pixels ||W·Lx||_2
+                    stacked = torch.stack(Lx, dim=0)
+                    weight_tensor = torch.tensor(
+                        weights, dtype=stacked.dtype, device=stacked.device
+                    ).view(-1, *([1] * (stacked.ndim - 1)))
+                    weighted = stacked * weight_tensor
+                    norm_per_pixel = torch.sqrt(torch.sum(weighted**2, dim=0) + eps)
+                    reg_term = alpha * torch.sum(norm_per_pixel)
+                else:
+                    # Weighted L1: sum_k w_k * |L_k x|_1
+                    reg_term = alpha * sum(
+                        weights[k] * torch.sum(torch.abs(Lx[k]))
+                        for k in range(len(Lx))
+                    )
             else:
-                l1_reg = alpha * torch.sum(torch.abs(x))
+                reg_term = alpha * torch.sum(torch.abs(x))
 
-            objective = float(kl_div + l1_reg)
+            objective = float(kl_div + reg_term)
             loss_history.append(objective)
 
             if verbose:
@@ -527,6 +618,7 @@ def solve_chambolle_pock(
         metadata={
             "algorithm": "Chambolle-Pock",
             "regularization": regularization,
+            "isotropic": isotropic,
             "alpha": alpha,
             "spacing": spacing,
             "weights": weights,
