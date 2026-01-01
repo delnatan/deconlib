@@ -14,10 +14,11 @@ deconlib/
 │   ├── retrieval.py        # Phase retrieval algorithms
 │   └── aberrations/        # Aberration classes
 ├── deconvolution/          # Image restoration (PyTorch)
-│   ├── base.py             # Result dataclass
-│   ├── operators.py        # FFT convolution
+│   ├── base.py             # Result dataclasses
+│   ├── operators.py        # FFT convolution operators
 │   ├── rl.py               # Richardson-Lucy
-│   └── mem.py              # Maximum Entropy Method
+│   ├── sicg.py             # SI-CG (Conjugate Gradient)
+│   └── blind.py            # Blind deconvolution & PSF extraction
 └── utils/                  # Mathematical utilities
     ├── fourier.py          # FFT utilities
     ├── zernike.py          # Zernike polynomials
@@ -49,6 +50,9 @@ deconlib/
 | Function | Description |
 |----------|-------------|
 | [`solve_rl`](deconvolution.md) | Richardson-Lucy deconvolution |
+| [`solve_sicg`](deconvolution.md) | SI-CG regularized deconvolution |
+| [`extract_psf_sicg`](deconvolution.md) | PSF extraction from beads |
+| [`solve_blind_sicg`](deconvolution.md) | Blind deconvolution |
 | [`make_fft_convolver`](deconvolution.md) | Create 2D convolution operators |
 | [`make_fft_convolver_3d`](deconvolution.md) | Create 3D convolution operators |
 

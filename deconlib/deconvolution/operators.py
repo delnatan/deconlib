@@ -11,7 +11,12 @@ from typing import Callable, Tuple
 import numpy as np
 import torch
 
-__all__ = ["make_fft_convolver", "make_fft_convolver_3d"]
+__all__ = [
+    "make_fft_convolver",
+    "make_fft_convolver_3d",
+    "make_fft_convolver_from_tensor",
+    "make_fft_convolver_3d_from_tensor",
+]
 
 
 def make_fft_convolver(
@@ -123,6 +128,98 @@ def make_fft_convolver_3d(
 
     if verbose:
         print(f"3D convolver: PSF {shape}, OTF {otf.shape}, device={device}, dtype={dtype}")
+
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        """Apply 3D forward convolution."""
+        x_ft = torch.fft.rfftn(x)
+        return torch.fft.irfftn(x_ft * otf, s=shape)
+
+    def adjoint(y: torch.Tensor) -> torch.Tensor:
+        """Apply 3D adjoint (correlation)."""
+        y_ft = torch.fft.rfftn(y)
+        return torch.fft.irfftn(y_ft * otf_conj, s=shape)
+
+    return forward, adjoint
+
+
+def make_fft_convolver_from_tensor(
+    kernel: torch.Tensor,
+    normalize: bool = True,
+) -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    """Create 2D FFT-based operators from a PyTorch tensor.
+
+    Unlike make_fft_convolver which takes a NumPy array, this function
+    works directly with PyTorch tensors. Useful for:
+    - Blind deconvolution (rebuild operators each iteration)
+    - PSF extraction from beads (use point source map as kernel)
+    - Any problem where the kernel changes during optimization
+
+    Args:
+        kernel: 2D tensor, shape (H, W). Can be a PSF or an image estimate.
+            Should have DC at corner (index 0, 0).
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (C, C_adj) where:
+            - C(x): Forward operator, computes kernel ⊛ x (convolution)
+            - C_adj(y): Adjoint operator, computes kernel* ⊛ y (correlation)
+
+    Example:
+        ```python
+        # For blind deconvolution - create operators from current image estimate
+        C_psf, C_psf_adj = make_fft_convolver_from_tensor(image_estimate)
+        # Now use these to update PSF estimate
+
+        # For PSF extraction - create operators from point source map
+        C, C_adj = make_fft_convolver_from_tensor(point_sources)
+        # Now use solve_sicg to recover PSF
+        ```
+    """
+    H, W = kernel.shape
+
+    # Normalize if requested
+    if normalize:
+        kernel = kernel / kernel.sum()
+
+    # Compute OTF using rfft2
+    otf = torch.fft.rfft2(kernel)
+    otf_conj = torch.conj(otf)
+
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        """Apply forward convolution: y = kernel ⊛ x."""
+        x_ft = torch.fft.rfft2(x)
+        return torch.fft.irfft2(x_ft * otf, s=(H, W))
+
+    def adjoint(y: torch.Tensor) -> torch.Tensor:
+        """Apply adjoint (correlation): x = kernel* ⊛ y."""
+        y_ft = torch.fft.rfft2(y)
+        return torch.fft.irfft2(y_ft * otf_conj, s=(H, W))
+
+    return forward, adjoint
+
+
+def make_fft_convolver_3d_from_tensor(
+    kernel: torch.Tensor,
+    normalize: bool = True,
+) -> Tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
+    """Create 3D FFT-based operators from a PyTorch tensor.
+
+    3D version of make_fft_convolver_from_tensor.
+
+    Args:
+        kernel: 3D tensor, shape (D, H, W). Can be a PSF or volume estimate.
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (C, C_adj) of forward and adjoint operators.
+    """
+    shape = kernel.shape
+
+    if normalize:
+        kernel = kernel / kernel.sum()
+
+    otf = torch.fft.rfftn(kernel)
+    otf_conj = torch.conj(otf)
 
     def forward(x: torch.Tensor) -> torch.Tensor:
         """Apply 3D forward convolution."""
