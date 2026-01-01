@@ -51,18 +51,18 @@ class BlindDeconvolutionResult:
 
 
 def _fft_convolve(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """FFT-based convolution. Both arrays should have DC at corner."""
-    kernel_fft = fft.fftn(kernel)
-    image_fft = fft.fftn(image)
-    return fft.ifftn(image_fft * kernel_fft).real
+    """FFT-based convolution using rfftn. Both arrays should have DC at corner."""
+    kernel_fft = fft.rfftn(kernel)
+    image_fft = fft.rfftn(image)
+    return fft.irfftn(image_fft * kernel_fft, s=image.shape)
 
 
 def _fft_correlate(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """FFT-based correlation (adjoint of convolution). DC at corner."""
-    kernel_fft = fft.fftn(kernel)
-    image_fft = fft.fftn(image)
+    """FFT-based correlation (adjoint of convolution) using rfftn. DC at corner."""
+    kernel_fft = fft.rfftn(kernel)
+    image_fft = fft.rfftn(image)
     # Correlation = convolution with conjugate of kernel
-    return fft.ifftn(image_fft * kernel_fft.conj()).real
+    return fft.irfftn(image_fft * kernel_fft.conj(), s=image.shape)
 
 
 def solve_blind_rl(
