@@ -354,13 +354,16 @@ def _prox_poisson_dual(
     Args:
         y: Dual variable (after adding σ * forward_model).
         sigma: Dual step size.
-        b: Observed data (photon counts).
+        b: Observed data (photon counts). Must be non-negative for valid
+            Poisson likelihood; negative values are clamped to zero.
 
     Returns:
         Proximal operator result.
     """
+    # Clamp b to non-negative (Poisson counts cannot be negative)
+    b_safe = torch.clamp(b, min=0.0)
     # Correct formula: note the MINUS before sqrt (not plus)
-    term = (y - 1.0) ** 2 + 4.0 * sigma * b
+    term = (y - 1.0) ** 2 + 4.0 * sigma * b_safe
     return 0.5 * (y + 1.0 - torch.sqrt(term))
 
 
