@@ -33,6 +33,8 @@ Example:
 
 from .base import (
     DeconvolutionResult,
+    SICGConfig,
+    PDHGConfig,
 )
 from .operators import make_fft_convolver, make_binned_convolver, power_iteration_norm
 from .rl import (
@@ -44,17 +46,17 @@ from .sicg import (
 from .chambolle_pock import (
     solve_chambolle_pock,
 )
-from .blind import (
-    BlindDeconvolutionResult,
+from .psf_extraction import (
     extract_psf_rl,
     extract_psf_sicg,
-    solve_blind_rl,
 )
 
 __all__ = [
     # Result types
     "DeconvolutionResult",
-    "BlindDeconvolutionResult",
+    # Configuration
+    "SICGConfig",
+    "PDHGConfig",
     # Operators
     "make_fft_convolver",
     "make_binned_convolver",
@@ -66,6 +68,4 @@ __all__ = [
     # PSF extraction
     "extract_psf_rl",
     "extract_psf_sicg",
-    # Blind deconvolution
-    "solve_blind_rl",
 ]

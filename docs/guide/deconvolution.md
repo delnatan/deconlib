@@ -1,7 +1,7 @@
 # Deconvolution
 
 Image deconvolution algorithms with PyTorch backend, including Richardson-Lucy,
-SI-CG (conjugate gradient), PSF extraction, and blind deconvolution.
+SI-CG (conjugate gradient), Chambolle-Pock (PDHG), and PSF extraction.
 
 !!! note "Optional Dependency"
     Deconvolution requires PyTorch. Install with:
@@ -279,66 +279,134 @@ use the point source map as the "kernel" and solve for the PSF.
     - Use `extract_psf_rl` for quick extraction with good SNR
     - Use `extract_psf_sicg` when you need regularization (noisy data)
 
-## Blind Deconvolution
+## Chambolle-Pock (PDHG) Algorithm
 
-When the PSF is not precisely known, blind deconvolution estimates both
-the image and PSF simultaneously using alternating Richardson-Lucy updates.
+The Chambolle-Pock algorithm solves Poisson deconvolution with sparse regularization
+using primal-dual hybrid gradient (PDHG) optimization:
+
+\[
+\min_{x \geq 0} \text{KL}(b \,||\, Ax + \text{bg}) + \alpha \cdot R(Lx)
+\]
+
+where KL is the Kullback-Leibler divergence, \(R\) is L1 or L2 norm, and \(L\) is
+a regularization operator (Hessian or identity).
 
 ```python
-from deconlib.deconvolution import solve_blind_rl
-import torch
+from deconlib.deconvolution import make_fft_convolver, solve_chambolle_pock, PDHGConfig
 
-# Start with an initial PSF guess (DC at corner, same as make_fft_convolver)
-psf_init = torch.from_numpy(theoretical_psf).to("cuda", dtype=torch.float32)
+# Create operators
+C, C_adj = make_fft_convolver(psf, device="cuda")
 observed = torch.from_numpy(image).to("cuda", dtype=torch.float32)
 
-# Run blind deconvolution
-result = solve_blind_rl(
-    observed,
-    psf_init,
-    num_iter=50,           # Total iterations
-    background=100.0,      # Background to subtract
-    verbose=True
+# Configure and run Chambolle-Pock
+config = PDHGConfig(
+    alpha=0.001,               # Regularization weight
+    regularization="hessian",  # Use Hessian (second derivatives)
+    norm="L2",                 # Isotropic (avoids blocky artifacts)
+    spacing=(0.3, 0.1, 0.1),   # Physical spacing (dz, dy, dx) in microns
+    background=50.0,
 )
 
+result = solve_chambolle_pock(
+    observed, C, C_adj,
+    num_iter=200,
+    **config.to_solver_kwargs()
+)
 restored = result.restored.cpu().numpy()
-refined_psf = result.psf.cpu().numpy()  # DC at corner
 ```
 
-### Algorithm
+### Key Parameters
 
-Blind deconvolution follows the Fish et al. (1995) algorithm, alternating
-Richardson-Lucy updates for image and PSF:
+| Parameter | Description | Typical Values |
+|-----------|-------------|----------------|
+| `alpha` | Regularization weight. Higher = smoother/sparser | 0.0001 - 0.01 |
+| `regularization` | `"hessian"` (second derivatives) or `"identity"` (sparsity) | `"hessian"` |
+| `norm` | `"L1"` (anisotropic) or `"L2"` (isotropic) | `"L2"` |
+| `spacing` | Physical grid spacing for volume-consistent regularization | `(dz, dy, dx)` |
+| `background` | Constant background value | 0.0 or measured |
+| `accelerate` | Use FISTA-style momentum (2-3x faster) | `True` (default) |
 
-1. **Compute forward model**: \(F = \text{image} \ast \text{PSF}\)
-2. **Compute ratio**: \(R = \text{data} / F\)
-3. **Update PSF**: \(\text{PSF} \leftarrow \text{PSF} \cdot \text{corr}(R, \text{image})\)
-4. **Normalize PSF**: Ensure PSF sums to 1
-5. **Update image**: \(\text{image} \leftarrow \text{image} \cdot \text{corr}(R, \text{PSF})\)
-6. **Repeat**
+### L1 vs L2 Norm
 
-### Result Object
+- **L1 (anisotropic)**: Soft-thresholds each derivative component independently.
+  Can produce sharper edges but may have axis-aligned artifacts.
+- **L2 (isotropic)**: Joint soft-thresholding across components at each pixel.
+  Promotes sparse derivatives while avoiding blocky artifacts.
 
-`BlindDeconvolutionResult` contains:
+### Super-Resolution Mode
 
-| Attribute | Description |
-|-----------|-------------|
-| `restored` | Deconvolved image |
-| `psf` | Refined PSF estimate (DC at corner) |
-| `iterations` | Number of iterations completed |
+For super-resolution with binned detectors:
 
-!!! warning "Ill-Posed Problem"
-    Blind deconvolution is mathematically ill-posed. Success depends on:
+```python
+from deconlib.deconvolution import make_binned_convolver, solve_chambolle_pock, PDHGConfig
 
-    - Good initial PSF estimate (close to true PSF)
-    - Sufficient image structure/contrast
+# Create binned operators (returns operator norm for correct step sizes)
+A, A_adj, op_norm_sq = make_binned_convolver(psf_fine, bin_factor=2)
+
+config = PDHGConfig(
+    alpha=0.001,
+    blur_norm_sq=op_norm_sq,   # Important: use returned norm
+    spacing=(0.05, 0.05),      # Fine grid spacing
+)
+
+result = solve_chambolle_pock(
+    observed, A, A_adj,
+    num_iter=200,
+    init_shape=psf_fine.shape,  # Fine grid shape
+    **config.to_solver_kwargs()
+)
+```
+
+## Configuration Classes
+
+For complex parameter sets, use the configuration dataclasses:
+
+### SICGConfig
+
+```python
+from deconlib.deconvolution import SICGConfig, solve_sicg
+from dataclasses import replace
+
+config = SICGConfig(
+    beta=0.01,
+    background=100.0,
+    spacing=(0.3, 0.1, 0.1),
+    restart_interval=10,
+)
+
+result = solve_sicg(observed, C, C_adj, num_iter=100, **config.to_solver_kwargs())
+
+# Create variants easily
+stronger_reg = replace(config, beta=0.05)
+```
+
+### PDHGConfig
+
+```python
+from deconlib.deconvolution import PDHGConfig, solve_chambolle_pock
+from dataclasses import replace
+
+config = PDHGConfig(
+    alpha=0.005,
+    regularization="hessian",
+    norm="L2",
+    spacing=(0.3, 0.1, 0.1),
+)
+
+result = solve_chambolle_pock(observed, C, C_adj, num_iter=150, **config.to_solver_kwargs())
+
+# Reuse across multiple images
+for stack in stacks:
+    C, C_adj = make_fft_convolver(psf, device="cuda")
+    result = solve_chambolle_pock(stack, C, C_adj, num_iter=150, **config.to_solver_kwargs())
+```
 
 ## Algorithm Comparison
 
 | Algorithm | Use Case | Regularization | Non-negativity |
 |-----------|----------|----------------|----------------|
 | `solve_rl` | Known PSF, low noise | None (implicit) | Yes (multiplicative) |
-| `solve_sicg` | Known PSF, noisy data | Explicit (β) | Yes (c² parametrization) |
+| `solve_sicg` | Known PSF, noisy data | Laplacian (β) | Yes (c² parametrization) |
+| `solve_chambolle_pock` | Known PSF, sparse/smooth | Hessian/Identity (α) | Yes (primal projection) |
 | `extract_psf_rl` | PSF calibration, fast | None (implicit) | Yes (multiplicative) |
-| `extract_psf_sicg` | PSF calibration, noisy | Explicit (β) | Yes (c² parametrization) |
-| `solve_blind_rl` | Unknown/approximate PSF | None (implicit) | Yes (multiplicative) |
+| `extract_psf_sicg` | PSF calibration, noisy | Laplacian (β) | Yes (c² parametrization) |

@@ -1,187 +1,31 @@
-"""Blind deconvolution and PSF extraction.
+"""PSF extraction (distillation) from calibration data.
 
-This module provides functions for:
-- Blind deconvolution (simultaneous image and PSF estimation)
-- PSF extraction from bead calibration data
+This module provides functions for extracting PSFs from bead calibration
+images where point source locations are known.
 
-The blind deconvolution follows Fish et al. (1995), using alternating
-RL updates for image and PSF.
+The forward model is: observed = PSF ⊛ point_sources + background
 
-References:
-    Fish, D.A., Brinicombe, A.M., Pike, E.R., Walker, J.G. (1995).
-    "Blind deconvolution by means of the Richardson-Lucy algorithm".
-    J. Opt. Soc. Am. A, 12(1): 58-65.
+We solve for PSF by treating point_sources as the convolution kernel,
+effectively "deconvolving" the observed bead image to recover the PSF.
+
+This is useful for:
+- Extracting experimental PSFs from bead calibration stacks
+- Refining theoretical PSF models using measured data
+- PSF averaging across multiple beads
 """
 
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
-import torch.fft as fft
 
 from .base import DeconvolutionResult
 from .operators import make_fft_convolver
 from .sicg import solve_sicg
 
 __all__ = [
-    "BlindDeconvolutionResult",
-    "solve_blind_rl",
     "extract_psf_rl",
     "extract_psf_sicg",
 ]
-
-
-@dataclass
-class BlindDeconvolutionResult:
-    """Result from blind deconvolution.
-
-    Attributes:
-        restored: The restored image tensor.
-        psf: The estimated PSF tensor (DC at corner).
-        iterations: Number of iterations completed.
-        converged: Whether the algorithm converged.
-        metadata: Algorithm-specific metadata.
-    """
-
-    restored: torch.Tensor
-    psf: torch.Tensor
-    iterations: int
-    converged: bool = False
-    metadata: dict = field(default_factory=dict)
-
-
-def _fft_convolve(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """FFT-based convolution using rfftn. Both arrays should have DC at corner."""
-    kernel_fft = fft.rfftn(kernel)
-    image_fft = fft.rfftn(image)
-    return fft.irfftn(image_fft * kernel_fft, s=image.shape)
-
-
-def _fft_correlate(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """FFT-based correlation (adjoint of convolution) using rfftn. DC at corner."""
-    kernel_fft = fft.rfftn(kernel)
-    image_fft = fft.rfftn(image)
-    # Correlation = convolution with conjugate of kernel
-    return fft.irfftn(image_fft * kernel_fft.conj(), s=image.shape)
-
-
-def solve_blind_rl(
-    observed: torch.Tensor,
-    psf_init: torch.Tensor,
-    num_iter: int = 50,
-    background: float = 0.0,
-    eps: float = 1e-12,
-    verbose: bool = False,
-    callback: Optional[Callable[[int, torch.Tensor, torch.Tensor], None]] = None,
-) -> BlindDeconvolutionResult:
-    """Blind deconvolution using alternating Richardson-Lucy updates.
-
-    Estimates both the image and PSF simultaneously using the Fish et al.
-    (1995) algorithm. Each iteration performs one RL update for the PSF
-    followed by one RL update for the image.
-
-    Args:
-        observed: Observed blurred image, shape (H, W) or (D, H, W).
-        psf_init: Initial PSF estimate with DC at corner (same as make_fft_convolver).
-            Should be same shape as observed.
-        num_iter: Number of iterations. Default 50.
-        background: Background value to subtract. Default 0.0.
-        eps: Small value for numerical stability. Default 1e-12.
-        verbose: Print iteration progress. Default False.
-        callback: Optional callback with (iteration, image, psf).
-
-    Returns:
-        BlindDeconvolutionResult with restored image and estimated PSF.
-
-    Example:
-        ```python
-        # PSF with DC at corner (same convention as make_fft_convolver)
-        result = solve_blind_rl(
-            observed, psf_init,
-            num_iter=50,
-            background=100.0,
-            verbose=True
-        )
-        restored = result.restored
-        refined_psf = result.psf
-        ```
-
-    Note:
-        - PSF should have DC at corner [0,0,...] (FFT convention)
-        - Blind deconvolution is ill-posed; good PSF initialization helps
-        - The PSF is normalized to sum to 1 after each update
-    """
-    # Work with background-subtracted data
-    data = observed - background
-    data = torch.clamp(data, min=eps)
-
-    # Initialize PSF (already DC at corner)
-    psf = psf_init.clone()
-    psf = torch.clamp(psf, min=0)
-    psf = psf / (psf.sum() + eps)
-
-    # Initialize image estimate
-    image = data.clone()
-
-    if verbose:
-        print("Blind Richardson-Lucy Deconvolution")
-        print(f"  Iterations: {num_iter}")
-        print(f"  Background: {background}")
-        print()
-
-    for iteration in range(1, num_iter + 1):
-        # Forward model: image ⊛ psf
-        forward = _fft_convolve(image, psf)
-        forward = torch.clamp(forward, min=eps)
-
-        # Ratio: data / forward
-        ratio = data / forward
-
-        # === Update PSF ===
-        # psf *= correlate(ratio, image) / sum(image)
-        # The denominator ensures flux conservation
-        psf_update = _fft_correlate(ratio, image)
-        psf = psf * psf_update
-
-        # Normalize PSF and ensure non-negative
-        psf = torch.clamp(psf, min=0)
-        psf = psf / (psf.sum() + eps)
-
-        # === Update Image ===
-        # Recompute forward with updated PSF
-        forward = _fft_convolve(image, psf)
-        forward = torch.clamp(forward, min=eps)
-        ratio = data / forward
-
-        # image *= correlate(ratio, psf)
-        image_update = _fft_correlate(ratio, psf)
-        image = image * image_update
-        image = torch.clamp(image, min=0)
-
-        if verbose and (iteration % 10 == 0 or iteration == 1):
-            forward = _fft_convolve(image, psf)
-            residual = torch.mean((data - forward) ** 2).item()
-            print(f"  Iteration {iteration:3d}: MSE = {residual:.6e}")
-
-        if callback is not None:
-            callback(iteration, image, psf)
-
-    # Add background back to restored image
-    restored = image + background
-
-    if verbose:
-        print(f"\nCompleted {num_iter} iterations.")
-
-    return BlindDeconvolutionResult(
-        restored=restored,
-        psf=psf,
-        iterations=num_iter,
-        converged=True,
-        metadata={
-            "algorithm": "Blind-RL",
-            "background": background,
-        },
-    )
 
 
 def extract_psf_rl(
@@ -233,9 +77,9 @@ def extract_psf_rl(
     data = observed - background
     data = torch.clamp(data, min=eps)
 
-    # Normalize point sources (kernel)
-    kernel = point_sources.clone()
-    kernel = kernel / (kernel.sum() + eps)
+    # Normalize point sources and create operators
+    kernel = point_sources / (point_sources.sum() + eps)
+    C, C_adj = make_fft_convolver(kernel, normalize=False)
 
     # Initialize PSF estimate
     psf = data.clone()
@@ -248,20 +92,20 @@ def extract_psf_rl(
 
     for iteration in range(1, num_iter + 1):
         # Forward: psf ⊛ kernel
-        forward = _fft_convolve(psf, kernel)
+        forward = C(psf)
         forward = torch.clamp(forward, min=eps)
 
         # Ratio
         ratio = data / forward
 
-        # RL update: psf *= correlate(ratio, kernel)
-        update = _fft_correlate(ratio, kernel)
+        # RL update: psf *= C_adj(ratio)
+        update = C_adj(ratio)
         psf = psf * update
         psf = torch.clamp(psf, min=0)
         psf = psf / (psf.sum() + eps)
 
         if verbose and (iteration % 10 == 0 or iteration == 1):
-            forward = _fft_convolve(psf, kernel)
+            forward = C(psf)
             residual = torch.mean((data - forward) ** 2).item()
             print(f"  Iteration {iteration:3d}: MSE = {residual:.6e}")
 

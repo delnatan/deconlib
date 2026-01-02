@@ -35,6 +35,7 @@ def _compute_objective(
     beta: float,
     eps: float,
     reg_target: Optional[torch.Tensor] = None,
+    pixel_volume: float = 1.0,
 ) -> torch.Tensor:
     """Compute total objective E(c) = J_data + beta * J_reg.
 
@@ -42,6 +43,9 @@ def _compute_objective(
         J_data = sum[ D * log(D/F) + F - D ]
 
     This form has the property that J_data = 0 when F = D (at minimum).
+
+    The regularization term is scaled by pixel_volume to ensure consistent
+    behavior across different grid resolutions (e.g., super-resolution mode).
 
     Args:
         c: Current parameter estimate (sqrt of intensity).
@@ -52,6 +56,7 @@ def _compute_objective(
         eps: Small constant for numerical stability.
         reg_target: Target for regularization. If None, uses (observed - background).
             For PSF estimation, should be set to the initial/current PSF estimate.
+        pixel_volume: Product of spacing values for volume-consistent regularization.
 
     Returns:
         Scalar objective value.
@@ -72,14 +77,13 @@ def _compute_objective(
         - observed
     )
 
-    # Regularization: sum[ (f - target)² ]
-    # Default target is (observed - background) for image deconvolution
-    # For PSF estimation, use reg_target (e.g., initial PSF)
+    # Regularization: sum[ (f - target)² ] * pixel_volume
+    # Volume scaling ensures consistent regularization across resolutions
     if reg_target is None:
         target = observed - background
     else:
         target = reg_target
-    j_reg = torch.sum((f - target) ** 2)
+    j_reg = torch.sum((f - target) ** 2) * pixel_volume
 
     return j_data + beta * j_reg
 
@@ -93,11 +97,12 @@ def _compute_gradient(
     beta: float,
     eps: float,
     reg_target: Optional[torch.Tensor] = None,
+    pixel_volume: float = 1.0,
 ) -> torch.Tensor:
     """Compute negative gradient (steepest descent direction).
 
     The gradient of E(c) with respect to c is:
-        ∇E = 2c ⊙ R^T(1 - g/(R(c²)+b)) + 4βc ⊙ (c² - target)
+        ∇E = 2c ⊙ R^T(1 - g/(R(c²)+b)) + 4βc ⊙ (c² - target) * pixel_volume
 
     We return the negative gradient for use as descent direction.
 
@@ -110,6 +115,7 @@ def _compute_gradient(
         beta: Regularization weight.
         eps: Small constant for numerical stability.
         reg_target: Target for regularization. If None, uses (observed - background).
+        pixel_volume: Product of spacing values for volume-consistent regularization.
 
     Returns:
         Negative gradient tensor (same shape as c).
@@ -124,12 +130,12 @@ def _compute_gradient(
     ratio = 1.0 - observed / g_pred_safe
     grad_data = 2.0 * c * C_adj(ratio)
 
-    # Regularization gradient: 4βc ⊙ (c² - target)
+    # Regularization gradient: 4βc ⊙ (c² - target) * pixel_volume
     if reg_target is None:
         target = observed - background
     else:
         target = reg_target
-    grad_reg = 4.0 * beta * c * (f - target)
+    grad_reg = 4.0 * beta * pixel_volume * c * (f - target)
 
     # Return negative gradient (descent direction)
     return -(grad_data + grad_reg)
@@ -145,6 +151,7 @@ def _line_search_newton(
     eps: float,
     num_iter: int = 3,
     reg_target: Optional[torch.Tensor] = None,
+    pixel_volume: float = 1.0,
 ) -> tuple[float, list[dict]]:
     """Newton-Raphson line search using the 3-convolution trick.
 
@@ -167,6 +174,7 @@ def _line_search_newton(
         eps: Numerical stability constant.
         num_iter: Number of Newton-Raphson iterations.
         reg_target: Target for regularization. If None, uses (observed - background).
+        pixel_volume: Product of spacing values for volume-consistent regularization.
 
     Returns:
         Tuple of (optimal step size, list of iteration stats).
@@ -209,11 +217,11 @@ def _line_search_newton(
         dy_dlam = 2.0 * K_sd + 2.0 * lam * K_dd
         data_deriv1 = torch.sum(dy_dlam * (1.0 - observed / y_safe))
 
-        # Reg term derivative: d/dλ [(f - target)²]
-        #   = 2(f - target) * df/dλ
+        # Reg term derivative: d/dλ [(f - target)²] * pixel_volume
+        #   = 2(f - target) * df/dλ * pixel_volume
         # where df/dλ = 2cd + 2λd²
         df_dlam = 2.0 * c_d + 2.0 * lam * d_sq
-        reg_deriv1 = 2.0 * beta * torch.sum((f_lam - target) * df_dlam)
+        reg_deriv1 = 2.0 * beta * pixel_volume * torch.sum((f_lam - target) * df_dlam)
 
         E_prime = data_deriv1 + reg_deriv1
 
@@ -227,11 +235,11 @@ def _line_search_newton(
             + dy_dlam * dy_dlam * observed / (y_safe * y_safe)
         )
 
-        # Reg term: d²/dλ² [(f - target)²]
-        #   = 2 * (df/dλ)² + 2(f - target) * d²f/dλ²
+        # Reg term: d²/dλ² [(f - target)²] * pixel_volume
+        #   = 2 * (df/dλ)² * pixel_volume + 2(f - target) * d²f/dλ² * pixel_volume
         # where d²f/dλ² = 2d²
         d2f_dlam2 = 2.0 * d_sq
-        reg_deriv2 = 2.0 * beta * torch.sum(
+        reg_deriv2 = 2.0 * beta * pixel_volume * torch.sum(
             df_dlam * df_dlam + (f_lam - target) * d2f_dlam2
         )
 
@@ -268,6 +276,7 @@ def solve_sicg(
     num_iter: int = 50,
     beta: float = 0.001,
     background: float = 0.0,
+    spacing: Optional[Tuple[float, ...]] = None,
     init: Optional[torch.Tensor] = None,
     init_shape: Optional[Tuple[int, ...]] = None,
     reg_target: Optional[torch.Tensor] = None,
@@ -291,6 +300,11 @@ def solve_sicg(
         beta: Regularization weight. Controls smoothness vs fidelity.
             Larger values produce smoother results. Default 0.001.
         background: Background value to subtract. Default 0.0.
+        spacing: Physical grid spacing (dz, dy, dx) or (dy, dx) for the
+            parameter/object domain. Used to compute pixel volume for
+            volume-consistent regularization. This ensures the regularization
+            strength is independent of pixel count when using super-resolution
+            mode. If None, uses unit spacing.
         init: Initial estimate for c (sqrt of intensity). If None,
             uses sqrt(max(observed, eps)) or uniform if init_shape differs.
         init_shape: Shape of the estimate (primal domain). Required when
@@ -347,7 +361,34 @@ def solve_sicg(
         - Regularization weight β should be tuned based on noise level.
         - Lower β = sharper but noisier; higher β = smoother but less sharp.
         - When using make_binned_convolver, init_shape must match the PSF shape.
+        - When using super-resolution, provide spacing for the fine grid to ensure
+          consistent regularization strength.
     """
+    # Determine primal domain shape
+    if init is not None:
+        primal_shape = init.shape
+    elif init_shape is not None:
+        primal_shape = init_shape
+    else:
+        primal_shape = observed.shape
+
+    ndim = len(primal_shape)
+
+    # Compute pixel volume for volume-consistent regularization
+    if spacing is None:
+        spacing = tuple(1.0 for _ in range(ndim))
+    else:
+        if len(spacing) != ndim:
+            raise ValueError(
+                f"spacing must have {ndim} elements for {ndim}D data, "
+                f"got {len(spacing)}"
+            )
+        spacing = tuple(spacing)
+
+    pixel_volume = 1.0
+    for s in spacing:
+        pixel_volume *= s
+
     # Initialize parameter c (sqrt of intensity)
     if init is not None:
         c = init.clone()
@@ -385,12 +426,13 @@ def solve_sicg(
 
     # Compute initial objective for normalization
     obj_initial = float(
-        _compute_objective(c, observed, C, background, beta, eps, reg_target)
+        _compute_objective(c, observed, C, background, beta, eps, reg_target, pixel_volume)
     )
 
     if verbose:
         print("SI-CG Deconvolution")
         print(f"  Iterations: {num_iter}, Beta: {beta}, Background: {background}")
+        print(f"  Spacing: {spacing}, Pixel volume: {pixel_volume:.6e}")
         print(f"  Restart interval: {restart_interval}, Line search iters: {line_search_iter}")
         print(f"  Initial objective: {obj_initial:.4e}")
         print()
@@ -399,7 +441,7 @@ def solve_sicg(
 
     for iteration in range(1, num_iter + 1):
         # Step 1: Compute negative gradient (steepest descent direction)
-        r = _compute_gradient(c, observed, C, C_adj, background, beta, eps, reg_target)
+        r = _compute_gradient(c, observed, C, C_adj, background, beta, eps, reg_target, pixel_volume)
 
         # Step 2: Conjugate direction update (Fletcher-Reeves)
         rho_new = float(torch.sum(r * r))
@@ -417,7 +459,7 @@ def solve_sicg(
 
         # Step 3: Line search (Newton-Raphson with 3-convolution trick)
         step_size, ls_stats = _line_search_newton(
-            c, d, observed, C, background, beta, eps, line_search_iter, reg_target
+            c, d, observed, C, background, beta, eps, line_search_iter, reg_target, pixel_volume
         )
 
         # Step 4: Update parameter
@@ -425,7 +467,7 @@ def solve_sicg(
 
         # Compute objective for tracking
         obj = float(
-            _compute_objective(c, observed, C, background, beta, eps, reg_target)
+            _compute_objective(c, observed, C, background, beta, eps, reg_target, pixel_volume)
         )
         loss_history.append(obj)
 
@@ -465,6 +507,8 @@ def solve_sicg(
             "algorithm": "SI-CG",
             "beta": beta,
             "background": background,
+            "spacing": spacing,
+            "pixel_volume": pixel_volume,
             "restart_interval": restart_interval,
             "line_search_iter": line_search_iter,
             "initial_objective": obj_initial,
