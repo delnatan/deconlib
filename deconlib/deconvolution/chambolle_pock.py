@@ -80,41 +80,6 @@ def _mixed_deriv_adjoint(
     return adj_ij / (h_i * h_j)
 
 
-def _compute_all_second_derivatives(
-    x: torch.Tensor,
-    spacing: Tuple[float, ...],
-) -> List[torch.Tensor]:
-    """Compute all unique second-order partial derivatives (Hessian components).
-
-    For n dimensions, returns n(n+1)/2 unique second derivatives:
-      - 2D: [∂²/∂y², ∂²/∂x², ∂²/∂y∂x] (3 terms)
-      - 3D: [∂²/∂z², ∂²/∂y², ∂²/∂x², ∂²/∂z∂y, ∂²/∂z∂x, ∂²/∂y∂x] (6 terms)
-
-    Uses circular boundary conditions for exact adjoint correspondence.
-
-    Args:
-        x: Input tensor, shape (D, H, W) for 3D or (H, W) for 2D.
-        spacing: Grid spacing for each dimension, e.g., (dz, dy, dx).
-
-    Returns:
-        List of second derivative tensors. First n are pure second derivatives,
-        remaining n(n-1)/2 are mixed partials.
-    """
-    ndim = x.ndim
-    second_derivs = []
-
-    # Pure second derivatives: ∂²f/∂i²
-    for dim in range(ndim):
-        second_derivs.append(_second_deriv_forward(x, dim, spacing[dim]))
-
-    # Mixed second derivatives: ∂²f/∂i∂j for i < j
-    for i in range(ndim):
-        for j in range(i + 1, ndim):
-            second_derivs.append(_mixed_deriv_forward(x, i, j, spacing[i], spacing[j]))
-
-    return second_derivs
-
-
 def _compute_all_second_derivatives_stacked(
     x: torch.Tensor,
     spacing: Tuple[float, ...],
@@ -153,48 +118,6 @@ def _compute_all_second_derivatives_stacked(
             idx += 1
 
     return stacked
-
-
-def _compute_hessian_adjoint(
-    y_components: List[torch.Tensor],
-    spacing: Tuple[float, ...],
-    weights: List[float],
-) -> torch.Tensor:
-    """Compute adjoint of the weighted Hessian operator.
-
-    For L = [w_k * D_k], the adjoint L^T applies:
-        L^T y = sum_k w_k * D_k^T(y_k)
-
-    Uses exact algebraic adjoints (circular boundary).
-
-    Args:
-        y_components: List of dual variables, one per Hessian component.
-            Order: pure derivatives first, then mixed.
-        spacing: Grid spacing for each dimension.
-        weights: Weight for each Hessian component (from spacing).
-
-    Returns:
-        Adjoint applied to y components.
-    """
-    ndim = len(spacing)
-    result = torch.zeros_like(y_components[0])
-
-    # Pure second derivatives (first ndim components)
-    for dim in range(ndim):
-        y_d = y_components[dim]
-        result = result + weights[dim] * _second_deriv_adjoint(y_d, dim, spacing[dim])
-
-    # Mixed second derivatives (remaining components)
-    idx = ndim
-    for i in range(ndim):
-        for j in range(i + 1, ndim):
-            y_ij = y_components[idx]
-            result = result + weights[idx] * _mixed_deriv_adjoint(
-                y_ij, i, j, spacing[i], spacing[j]
-            )
-            idx += 1
-
-    return result
 
 
 def _compute_hessian_adjoint_stacked(
@@ -389,6 +312,32 @@ def _prox_l1_dual(
     return torch.clamp(y, min=-bound, max=bound)
 
 
+def _prox_l2_dual_global(
+    y: torch.Tensor,
+    alpha: float,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Proximal operator for conjugate of global L2 norm.
+
+    For G(x) = alpha * ||x||_2, the conjugate G* is the indicator of the
+    L2 ball of radius alpha. The proximal is projection onto this ball:
+        prox_{σG*}(y) = y / max(1, ||y||_2 / alpha)
+
+    This is used for identity regularization with L2 norm (Tikhonov-like).
+
+    Args:
+        y: Dual variable (full tensor).
+        alpha: Regularization weight (L2 ball radius).
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Projected dual variable.
+    """
+    norm = torch.sqrt(torch.sum(y**2) + eps)
+    scale = torch.clamp(norm / alpha, min=1.0)
+    return y / scale
+
+
 def _prox_l1_dual_stacked(
     y_stacked: torch.Tensor,
     bounds: torch.Tensor,
@@ -410,59 +359,20 @@ def _prox_l1_dual_stacked(
     return torch.clamp(y_stacked, min=-bounds_view, max=bounds_view)
 
 
-def _prox_l2_dual(
-    y_components: List[torch.Tensor],
-    weights: List[float],
-    alpha: float,
-    eps: float = 1e-12,
-) -> List[torch.Tensor]:
-    """Proximal operator for conjugate of weighted L2 norm (isotropic).
-
-    For G(u) = alpha * ||W·u||_2 where W is diagonal weights, the conjugate
-    G* is the indicator of the weighted L2 ball. The proximal is projection:
-        prox_{σG*}(y) = y / max(1, ||W·y||_2 / alpha)
-
-    This is "vector soft-thresholding": shrinks magnitude, preserves direction.
-    Applied per-pixel across all Hessian components.
-
-    Args:
-        y_components: List of dual variables, one per Hessian component.
-        weights: Weight for each component (for anisotropic spacing).
-        alpha: Regularization weight (L2 ball radius).
-        eps: Small constant for numerical stability.
-
-    Returns:
-        List of projected dual variables.
-    """
-    # Stack components: (K, *spatial_dims)
-    stacked = torch.stack(y_components, dim=0)
-
-    # Apply weights: w_k * y_k
-    weight_tensor = torch.tensor(
-        weights, dtype=stacked.dtype, device=stacked.device
-    ).view(-1, *([1] * (stacked.ndim - 1)))
-    weighted = stacked * weight_tensor
-
-    # Compute weighted L2 norm at each pixel: ||W·y||_2
-    norm_sq = torch.sum(weighted ** 2, dim=0, keepdim=True)
-    norm = torch.sqrt(norm_sq + eps)
-
-    # Projection: y / max(1, ||W·y||_2 / alpha)
-    scale = torch.clamp(norm / alpha, min=1.0)
-    projected = stacked / scale
-
-    return [projected[k] for k in range(len(y_components))]
-
-
 def _prox_l2_dual_stacked(
     y_stacked: torch.Tensor,
     weights: torch.Tensor,
     alpha: float,
     eps: float = 1e-12,
 ) -> torch.Tensor:
-    """Proximal operator for L2 dual on stacked tensor (vectorized).
+    """Proximal operator for conjugate of weighted L2 norm (isotropic).
 
-    Same as _prox_l2_dual but operates on stacked tensor directly.
+    For G(u) = alpha * ||W·u||_2 where W is diagonal weights, the conjugate
+    G* is the indicator of the weighted L2 ball. The proximal is projection:
+        prox_{σG*}(y) = y / max(1, ||W·y||_2 / alpha)
+
+    This is "vector soft-thresholding" applied per-pixel across all Hessian
+    components: shrinks magnitude, preserves direction.
 
     Args:
         y_stacked: Stacked dual variables, shape (N_components, *spatial_dims).
@@ -763,8 +673,14 @@ def solve_chambolle_pock(
                 # L1 norm: clip each component (vectorized with broadcasting)
                 y2 = _prox_l1_dual_stacked(y2_updated, bounds_tensor)
         else:
-            # Identity regularization: simple L1 on x
-            y2 = _prox_l1_dual(y2 + sigma * x_bar, alpha)
+            # Identity regularization
+            y2_updated = y2 + sigma * x_bar
+            if norm == "L2":
+                # L2 norm: project onto global L2 ball
+                y2 = _prox_l2_dual_global(y2_updated, alpha, eps)
+            else:
+                # L1 norm: clamp to [-alpha, alpha]
+                y2 = _prox_l1_dual(y2_updated, alpha)
 
         # === Primal update ===
         # x <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))
@@ -807,7 +723,11 @@ def solve_chambolle_pock(
                     weighted_abs = weight_view * torch.abs(Lx)
                     reg_term = alpha * torch.sum(weighted_abs)
             else:
-                reg_term = alpha * torch.sum(torch.abs(x))
+                # Identity regularization
+                if norm == "L2":
+                    reg_term = alpha * torch.sqrt(torch.sum(x**2) + eps)
+                else:
+                    reg_term = alpha * torch.sum(torch.abs(x))
 
             objective = float(kl_div + reg_term)
             loss_history.append(objective)
