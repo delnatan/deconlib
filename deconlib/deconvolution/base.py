@@ -71,6 +71,9 @@ class SICGConfig:
         beta: Regularization weight. Controls smoothness vs data fidelity.
             Larger values produce smoother results. Typical range: 1e-4 to 1e-2.
         background: Constant background value in the forward model.
+        spacing: Physical grid spacing (dz, dy, dx) or (dy, dx). Used for
+            volume-consistent regularization in super-resolution mode. If None,
+            uses unit spacing.
         restart_interval: Reset conjugate direction every N iterations to
             prevent direction degradation.
         line_search_iter: Number of Newton-Raphson iterations for step size.
@@ -78,6 +81,7 @@ class SICGConfig:
 
     beta: float = 0.001
     background: float = 0.0
+    spacing: Optional[Tuple[float, ...]] = None
     restart_interval: int = 5
     line_search_iter: int = 3
 
@@ -86,6 +90,7 @@ class SICGConfig:
         return {
             "beta": self.beta,
             "background": self.background,
+            "spacing": self.spacing,
             "restart_interval": self.restart_interval,
             "line_search_iter": self.line_search_iter,
         }

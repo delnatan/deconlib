@@ -573,6 +573,11 @@ def solve_chambolle_pock(
             )
         spacing = tuple(spacing)
 
+    # Compute pixel volume for volume-consistent regularization
+    pixel_volume = 1.0
+    for s in spacing:
+        pixel_volume *= s
+
     # Compute spacing-based weights for Hessian regularization
     if regularization == "hessian":
         weights = _compute_hessian_weights(spacing)
@@ -597,6 +602,12 @@ def solve_chambolle_pock(
     # y1: dual for data fidelity - lives on observation/data domain
     y1 = torch.zeros_like(observed)
     # y2: dual for regularization - lives on primal domain (same as x)
+    # Compute effective alpha scaled by pixel volume for volume-consistent regularization
+    # For L1 and per-pixel L2 norms, scale by pixel_volume
+    # For global L2 (identity), scale by sqrt(pixel_volume)
+    alpha_vol = alpha * pixel_volume
+    alpha_vol_sqrt = alpha * (pixel_volume ** 0.5)
+
     if regularization == "hessian":
         # Stacked dual variable: (N_components, *spatial_dims)
         num_hess = _count_hessian_components(ndim)
@@ -607,8 +618,8 @@ def solve_chambolle_pock(
         weights_tensor = torch.tensor(
             weights, dtype=observed.dtype, device=observed.device
         )
-        # Pre-compute bounds for L1 prox: alpha * weights
-        bounds_tensor = alpha * weights_tensor
+        # Pre-compute bounds for L1 prox: alpha * pixel_volume * weights
+        bounds_tensor = alpha_vol * weights_tensor
     else:
         # Single dual variable for identity
         y2 = torch.zeros(primal_shape, dtype=observed.dtype, device=observed.device)
@@ -637,10 +648,10 @@ def solve_chambolle_pock(
         print("Chambolle-Pock (PDHG) Deconvolution")
         print(f"  Shape: {tuple(observed.shape)}")
         print(f"  Regularization: {regularization}, Alpha: {alpha}")
+        print(f"  Spacing: {spacing}, Pixel volume: {pixel_volume:.6e}")
         if regularization == "hessian":
             num_hess = _count_hessian_components(ndim)
             print(f"  Norm: {norm}, Hessian components: {num_hess}")
-            print(f"  Spacing: {spacing}")
             print(f"  Weights: {[f'{w:.3f}' for w in weights]}")
         print(f"  Background: {background}")
         print(f"  Acceleration: {'FISTA with restart' if accelerate else 'fixed θ=' + str(theta)}")
@@ -668,19 +679,22 @@ def solve_chambolle_pock(
             y2_updated = y2 + sigma * Lx_bar
             if norm == "L2":
                 # L2 norm: project onto weighted L2 ball (vector shrinkage)
-                y2 = _prox_l2_dual_stacked(y2_updated, weights_tensor, alpha, eps)
+                # Use alpha_vol for volume-consistent regularization
+                y2 = _prox_l2_dual_stacked(y2_updated, weights_tensor, alpha_vol, eps)
             else:
                 # L1 norm: clip each component (vectorized with broadcasting)
+                # bounds_tensor already includes alpha_vol
                 y2 = _prox_l1_dual_stacked(y2_updated, bounds_tensor)
         else:
             # Identity regularization
             y2_updated = y2 + sigma * x_bar
             if norm == "L2":
                 # L2 norm: project onto global L2 ball
-                y2 = _prox_l2_dual_global(y2_updated, alpha, eps)
+                # Use alpha_vol_sqrt for global L2 norm
+                y2 = _prox_l2_dual_global(y2_updated, alpha_vol_sqrt, eps)
             else:
-                # L1 norm: clamp to [-alpha, alpha]
-                y2 = _prox_l1_dual(y2_updated, alpha)
+                # L1 norm: clamp to [-alpha_vol, alpha_vol]
+                y2 = _prox_l1_dual(y2_updated, alpha_vol)
 
         # === Primal update ===
         # x <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))
@@ -714,20 +728,22 @@ def solve_chambolle_pock(
                 # Reshape weights for broadcasting: (N_components, 1, 1, ...)
                 weight_view = weights_tensor.view(-1, *([1] * (Lx.ndim - 1)))
                 if norm == "L2":
-                    # Weighted L2: sum_pixels ||W·Lx||_2
+                    # Weighted L2: sum_pixels ||W·Lx||_2 * pixel_volume
                     weighted = Lx * weight_view
                     norm_per_pixel = torch.sqrt(torch.sum(weighted**2, dim=0) + eps)
-                    reg_term = alpha * torch.sum(norm_per_pixel)
+                    reg_term = alpha_vol * torch.sum(norm_per_pixel)
                 else:
-                    # Weighted L1: sum_k w_k * |L_k x|_1 (vectorized)
+                    # Weighted L1: sum_k w_k * |L_k x|_1 * pixel_volume (vectorized)
                     weighted_abs = weight_view * torch.abs(Lx)
-                    reg_term = alpha * torch.sum(weighted_abs)
+                    reg_term = alpha_vol * torch.sum(weighted_abs)
             else:
                 # Identity regularization
                 if norm == "L2":
-                    reg_term = alpha * torch.sqrt(torch.sum(x**2) + eps)
+                    # Global L2: alpha * sqrt(pixel_volume) * ||x||_2
+                    reg_term = alpha_vol_sqrt * torch.sqrt(torch.sum(x**2) + eps)
                 else:
-                    reg_term = alpha * torch.sum(torch.abs(x))
+                    # L1: alpha * pixel_volume * sum|x|
+                    reg_term = alpha_vol * torch.sum(torch.abs(x))
 
             objective = float(kl_div + reg_term)
             loss_history.append(objective)
@@ -767,6 +783,7 @@ def solve_chambolle_pock(
             "norm": norm,
             "alpha": alpha,
             "spacing": spacing,
+            "pixel_volume": pixel_volume,
             "weights": weights,
             "background": background,
             "blur_norm_sq": blur_norm_sq,
