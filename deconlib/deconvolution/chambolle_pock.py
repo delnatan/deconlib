@@ -360,6 +360,7 @@ def solve_chambolle_pock(
     spacing: Optional[Tuple[float, ...]] = None,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
+    blur_norm_sq: float = 1.0,
     eps: float = 1e-12,
     theta: float = 1.0,
     accelerate: bool = True,
@@ -424,6 +425,10 @@ def solve_chambolle_pock(
         background: Constant background in forward model. The model is
             forward = Ax + background. Default 0.0.
         init: Initial estimate. If None, uses max(observed - background, eps).
+        blur_norm_sq: Squared operator norm of the blur operator ||C||².
+            Default 1.0 (correct for convolution with normalized PSF).
+            When using make_binned_convolver, pass the operator_norm_sq it returns
+            to ensure correct step sizes for convergence.
         eps: Small constant for numerical stability. Default 1e-12.
         theta: Overrelaxation parameter in [0, 1]. Used when accelerate=False.
             Default 1.0.
@@ -473,6 +478,16 @@ def solve_chambolle_pock(
             alpha=0.001,
             regularization="identity",
         )
+
+        # With binned convolver (super-resolution)
+        from deconlib.deconvolution import make_binned_convolver
+        A, A_adj, norm_sq = make_binned_convolver(psf_highres, bin_factor=2)
+        result = solve_chambolle_pock(
+            observed, A, A_adj,
+            num_iter=200,
+            alpha=0.001,
+            blur_norm_sq=norm_sq,  # Pass operator norm for correct step sizes
+        )
         ```
     """
     ndim = observed.ndim
@@ -520,7 +535,9 @@ def solve_chambolle_pock(
     x_bar = x.clone()
 
     # Compute step sizes: τσ||K||² < 1
-    K_norm_sq = _estimate_operator_norm_squared(spacing, regularization, weights)
+    K_norm_sq = _estimate_operator_norm_squared(
+        spacing, regularization, weights, blur_norm=blur_norm_sq**0.5
+    )
     step = 0.99 / (K_norm_sq**0.5)
     tau = step  # primal step
     sigma = step  # dual step
@@ -665,6 +682,7 @@ def solve_chambolle_pock(
             "spacing": spacing,
             "weights": weights,
             "background": background,
+            "blur_norm_sq": blur_norm_sq,
             "tau": tau,
             "sigma": sigma,
             "theta": theta,
