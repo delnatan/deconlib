@@ -493,7 +493,7 @@ def solve_chambolle_pock(
     num_iter: int = 100,
     alpha: float = 0.01,
     regularization: Literal["hessian", "identity"] = "hessian",
-    isotropic: bool = False,
+    norm: Literal["L1", "L2"] = "L1",
     spacing: Optional[Tuple[float, ...]] = None,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
@@ -511,19 +511,18 @@ def solve_chambolle_pock(
         sum(Ax + bg - b*log(Ax + bg)) + alpha * R(Lx)
 
     where R is the regularization norm:
-        - Anisotropic (isotropic=False): R(Lx) = Σ_k w_k |L_k x|_1
-        - Isotropic (isotropic=True): R(Lx) = Σ_pixels ||W·Lx||_2
+        - L1 (norm="L1"): R(Lx) = Σ_k w_k |L_k x|_1 (anisotropic)
+        - L2 (norm="L2"): R(Lx) = Σ_pixels ||W·Lx||_2 (isotropic)
 
     subject to x >= 0, where L_k are Hessian components and w_k are spacing
     weights that ensure isotropic regularization in physical space.
 
-    Anisotropic vs Isotropic:
-        - Anisotropic L1: Independent soft-thresholding of each Hessian
-          component. Can produce "blocky" artifacts along coordinate axes.
-        - Isotropic L2: Joint soft-thresholding across all components at
-          each pixel (vector shrinkage). Promotes sparse derivatives while
-          avoiding axis-aligned artifacts. Similar to Total Generalized
-          Variation (TGV) behavior.
+    L1 vs L2 Regularization:
+        - L1: Independent soft-thresholding of each Hessian component.
+          Sharper edges but can produce "blocky" artifacts along axes.
+        - L2: Joint soft-thresholding across all components at each pixel
+          (vector shrinkage). Promotes sparse derivatives while avoiding
+          axis-aligned artifacts. Similar to Total Generalized Variation.
 
     For anisotropic spacing (e.g., dz=0.3, dy=dx=0.1), z-derivative terms
     receive LESS weight (R²=0.11 for D_zz) than lateral terms (1.0),
@@ -550,12 +549,13 @@ def solve_chambolle_pock(
         regularization: Type of regularization operator L:
             - "hessian": All second derivatives (n(n+1)/2 terms for nD),
               weighted by spacing for isotropic physical regularization.
-            - "identity": L=I, yielding |x|_1 (sparsity). Ignores isotropic.
+            - "identity": L=I, yielding |x|_1 (sparsity).
             Default "hessian".
-        isotropic: If True, use L2 norm across Hessian components at each pixel
-            instead of L1 on each component independently. This promotes sparse
-            gradients while avoiding axis-aligned "blocky" artifacts. Only
-            applies when regularization="hessian". Default False.
+        norm: Type of norm for the regularization penalty:
+            - "L1": Soft-threshold each component independently (anisotropic).
+              Sharper but may have axis-aligned artifacts.
+            - "L2": Joint soft-threshold across components per pixel (isotropic).
+              Smoother, avoids blocky artifacts. Default "L1".
         spacing: Grid spacing for each dimension, e.g., (dz, dy, dx) for 3D
             or (dy, dx) for 2D. Used to weight derivative terms: larger
             spacing = LESS weight (coarser sampling already smooths).
@@ -594,27 +594,27 @@ def solve_chambolle_pock(
         C, C_adj = make_fft_convolver(psf, device="cuda")
         observed = torch.from_numpy(stack).to("cuda")
 
-        # Anisotropic L1 on Hessian (can be blocky)
+        # L1 on Hessian (default, sharper but can be blocky)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
             alpha=0.001,
             regularization="hessian",
-            isotropic=False,  # default: L1 per component
+            norm="L1",
             spacing=(0.3, 0.1, 0.1),  # (dz, dy, dx) in microns
         )
 
-        # Isotropic L2 on Hessian (smoother, less blocky)
+        # L2 on Hessian (smoother, avoids axis artifacts)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
             alpha=0.001,
             regularization="hessian",
-            isotropic=True,  # L2 across components per pixel
+            norm="L2",
             spacing=(0.3, 0.1, 0.1),
         )
 
-        # With sparsity regularization on image (identity)
+        # Sparsity regularization on image (identity)
         result = solve_chambolle_pock(
             observed, C, C_adj,
             num_iter=200,
@@ -625,13 +625,13 @@ def solve_chambolle_pock(
         # With binned convolver (super-resolution)
         from deconlib.deconvolution import make_binned_convolver
         # PSF on fine grid (512x512), observed on coarse grid (256x256)
-        A, A_adj, norm_sq = make_binned_convolver(psf_highres, bin_factor=2)
+        A, A_adj, op_norm_sq = make_binned_convolver(psf_highres, bin_factor=2)
         result = solve_chambolle_pock(
             observed, A, A_adj,
             num_iter=200,
             alpha=0.001,
             init_shape=psf_highres.shape,  # Fine grid shape
-            blur_norm_sq=norm_sq,  # Operator norm for correct step sizes
+            blur_norm_sq=op_norm_sq,  # Operator norm for correct step sizes
         )
         # result.restored has shape (512, 512)
         ```
@@ -729,8 +729,7 @@ def solve_chambolle_pock(
         print(f"  Regularization: {regularization}, Alpha: {alpha}")
         if regularization == "hessian":
             num_hess = _count_hessian_components(ndim)
-            norm_type = "L2 (isotropic)" if isotropic else "L1 (anisotropic)"
-            print(f"  Norm: {norm_type}, Hessian components: {num_hess}")
+            print(f"  Norm: {norm}, Hessian components: {num_hess}")
             print(f"  Spacing: {spacing}")
             print(f"  Weights: {[f'{w:.3f}' for w in weights]}")
         print(f"  Background: {background}")
@@ -757,7 +756,7 @@ def solve_chambolle_pock(
             Lx_bar = _compute_all_second_derivatives_stacked(x_bar, spacing)
             # Update y2 with gradient step (vectorized)
             y2_updated = y2 + sigma * Lx_bar
-            if isotropic:
+            if norm == "L2":
                 # L2 norm: project onto weighted L2 ball (vector shrinkage)
                 y2 = _prox_l2_dual_stacked(y2_updated, weights_tensor, alpha, eps)
             else:
@@ -798,7 +797,7 @@ def solve_chambolle_pock(
                 Lx = _compute_all_second_derivatives_stacked(x, spacing)
                 # Reshape weights for broadcasting: (N_components, 1, 1, ...)
                 weight_view = weights_tensor.view(-1, *([1] * (Lx.ndim - 1)))
-                if isotropic:
+                if norm == "L2":
                     # Weighted L2: sum_pixels ||W·Lx||_2
                     weighted = Lx * weight_view
                     norm_per_pixel = torch.sqrt(torch.sum(weighted**2, dim=0) + eps)
@@ -845,7 +844,7 @@ def solve_chambolle_pock(
         metadata={
             "algorithm": "Chambolle-Pock",
             "regularization": regularization,
-            "isotropic": isotropic,
+            "norm": norm,
             "alpha": alpha,
             "spacing": spacing,
             "weights": weights,
