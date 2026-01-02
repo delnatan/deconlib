@@ -14,11 +14,12 @@ deconlib/
 │   ├── retrieval.py        # Phase retrieval algorithms
 │   └── aberrations/        # Aberration classes
 ├── deconvolution/          # Image restoration (PyTorch)
-│   ├── base.py             # Result dataclasses
+│   ├── base.py             # Result and config dataclasses
 │   ├── operators.py        # FFT convolution operators
 │   ├── rl.py               # Richardson-Lucy
 │   ├── sicg.py             # SI-CG (Conjugate Gradient)
-│   └── blind.py            # Blind deconvolution & PSF extraction
+│   ├── chambolle_pock.py   # Chambolle-Pock (PDHG)
+│   └── psf_extraction.py   # PSF extraction from beads
 └── utils/                  # Mathematical utilities
     ├── fourier.py          # FFT utilities
     ├── zernike.py          # Zernike polynomials
@@ -51,10 +52,13 @@ deconlib/
 |----------|-------------|
 | [`solve_rl`](deconvolution.md) | Richardson-Lucy deconvolution |
 | [`solve_sicg`](deconvolution.md) | SI-CG regularized deconvolution |
-| [`extract_psf_sicg`](deconvolution.md) | PSF extraction from beads |
-| [`solve_blind_sicg`](deconvolution.md) | Blind deconvolution |
-| [`make_fft_convolver`](deconvolution.md) | Create 2D convolution operators |
-| [`make_fft_convolver_3d`](deconvolution.md) | Create 3D convolution operators |
+| [`solve_chambolle_pock`](deconvolution.md) | Chambolle-Pock (PDHG) deconvolution |
+| [`extract_psf_rl`](deconvolution.md) | PSF extraction (Richardson-Lucy) |
+| [`extract_psf_sicg`](deconvolution.md) | PSF extraction (SI-CG) |
+| [`make_fft_convolver`](deconvolution.md) | Create FFT convolution operators |
+| [`make_binned_convolver`](deconvolution.md) | Create binned convolver for super-resolution |
+| [`SICGConfig`](deconvolution.md) | Configuration for SI-CG solver |
+| [`PDHGConfig`](deconvolution.md) | Configuration for Chambolle-Pock solver |
 
 ### Utilities
 
