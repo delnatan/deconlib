@@ -21,7 +21,7 @@ Reference:
     observed distributions". The Astronomical Journal 79(6): 745-754.
 """
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import torch
 
@@ -36,6 +36,7 @@ def solve_rl(
     C_adj: Callable[[torch.Tensor], torch.Tensor],
     num_iter: int = 50,
     init: Optional[torch.Tensor] = None,
+    init_shape: Optional[Tuple[int, ...]] = None,
     eps: float = 1e-12,
     callback: Optional[Callable[[int, torch.Tensor], None]] = None,
 ) -> DeconvolutionResult:
@@ -47,7 +48,11 @@ def solve_rl(
         C_adj: Adjoint operator (correlation with PSF).
         num_iter: Number of iterations. Default 50.
         init: Initial estimate. If None, uses uniform image with same
-            mean as observed.
+            mean as observed. Shape must match init_shape if provided.
+        init_shape: Shape of the estimate (primal domain). Required when
+            using operators where input and output have different shapes
+            (e.g., make_binned_convolver for super-resolution). If None,
+            uses the same shape as observed.
         eps: Small constant for numerical stability. Default 1e-12.
         callback: Optional function called each iteration with
             (iteration, current_estimate).
@@ -57,11 +62,22 @@ def solve_rl(
 
     Example:
         ```python
+        # Standard deconvolution (same input/output shape)
         from deconlib.deconvolution import make_fft_convolver, solve_rl
         C, C_adj = make_fft_convolver(psf, device="cuda")
         observed = torch.from_numpy(blurred).to("cuda")
         result = solve_rl(observed, C, C_adj, num_iter=100)
-        restored = result.restored.cpu().numpy()
+
+        # Super-resolution with binned convolver
+        from deconlib.deconvolution import make_binned_convolver, solve_rl
+        # PSF on fine grid (512x512), observed on coarse grid (256x256)
+        A, A_adj, _ = make_binned_convolver(psf_fine, bin_factor=2)
+        result = solve_rl(
+            observed, A, A_adj,
+            num_iter=100,
+            init_shape=(512, 512),  # Fine grid shape (must match PSF)
+        )
+        # result.restored has shape (512, 512)
         ```
 
     Note:
@@ -69,13 +85,22 @@ def solve_rl(
         - The algorithm preserves positivity of the estimate.
         - More iterations generally improve resolution but may amplify noise.
         - Consider early stopping or regularization for noisy data.
+        - When using make_binned_convolver, init_shape must match the PSF shape.
     """
-    # Initialize estimate
-    if init is None:
-        # Start with uniform image matching observed mean
-        x = torch.full_like(observed, observed.mean())
-    else:
+    # Determine estimate shape
+    if init is not None:
         x = init.clone()
+    elif init_shape is not None:
+        # Initialize on specified grid (e.g., high-res for super-resolution)
+        x = torch.full(
+            init_shape,
+            observed.mean().item(),
+            dtype=observed.dtype,
+            device=observed.device,
+        )
+    else:
+        # Default: same shape as observed
+        x = torch.full_like(observed, observed.mean())
 
     # Ensure positivity
     x = torch.clamp(x, min=eps)

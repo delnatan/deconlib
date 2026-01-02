@@ -360,6 +360,7 @@ def solve_chambolle_pock(
     spacing: Optional[Tuple[float, ...]] = None,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
+    init_shape: Optional[Tuple[int, ...]] = None,
     blur_norm_sq: float = 1.0,
     eps: float = 1e-12,
     theta: float = 1.0,
@@ -424,7 +425,12 @@ def solve_chambolle_pock(
             If None, uses unit spacing (isotropic weights).
         background: Constant background in forward model. The model is
             forward = Ax + background. Default 0.0.
-        init: Initial estimate. If None, uses max(observed - background, eps).
+        init: Initial estimate. If None, uses max(observed - background, eps)
+            (or uniform if init_shape differs from observed).
+        init_shape: Shape of the estimate (primal domain). Required when
+            using operators where input and output have different shapes
+            (e.g., make_binned_convolver for super-resolution). If None,
+            uses the same shape as observed.
         blur_norm_sq: Squared operator norm of the blur operator ||C||².
             Default 1.0 (correct for convolution with normalized PSF).
             When using make_binned_convolver, pass the operator_norm_sq it returns
@@ -481,16 +487,27 @@ def solve_chambolle_pock(
 
         # With binned convolver (super-resolution)
         from deconlib.deconvolution import make_binned_convolver
+        # PSF on fine grid (512x512), observed on coarse grid (256x256)
         A, A_adj, norm_sq = make_binned_convolver(psf_highres, bin_factor=2)
         result = solve_chambolle_pock(
             observed, A, A_adj,
             num_iter=200,
             alpha=0.001,
-            blur_norm_sq=norm_sq,  # Pass operator norm for correct step sizes
+            init_shape=psf_highres.shape,  # Fine grid shape
+            blur_norm_sq=norm_sq,  # Operator norm for correct step sizes
         )
+        # result.restored has shape (512, 512)
         ```
     """
-    ndim = observed.ndim
+    # Determine primal domain shape (may differ from observed for super-resolution)
+    if init is not None:
+        primal_shape = init.shape
+    elif init_shape is not None:
+        primal_shape = init_shape
+    else:
+        primal_shape = observed.shape
+
+    ndim = len(primal_shape)
 
     # Validate regularization type
     if regularization not in ("hessian", "identity"):
@@ -515,21 +532,34 @@ def solve_chambolle_pock(
     else:
         weights = None
 
-    # Initialize primal variable
-    if init is None:
-        x = torch.clamp(observed - background, min=eps)
-    else:
+    # Initialize primal variable (on primal/fine grid)
+    if init is not None:
         x = init.clone()
+    elif init_shape is not None:
+        # Initialize on specified grid (e.g., high-res for super-resolution)
+        x = torch.full(
+            init_shape,
+            max(observed.mean().item() - background, eps),
+            dtype=observed.dtype,
+            device=observed.device,
+        )
+    else:
+        x = torch.clamp(observed - background, min=eps)
 
     # Initialize dual variables
-    y1 = torch.zeros_like(observed)  # dual for data fidelity
+    # y1: dual for data fidelity - lives on observation/data domain
+    y1 = torch.zeros_like(observed)
+    # y2: dual for regularization - lives on primal domain (same as x)
     if regularization == "hessian":
         # One dual variable per Hessian component: n(n+1)/2 for nD
         num_hess = _count_hessian_components(ndim)
-        y2 = [torch.zeros_like(observed) for _ in range(num_hess)]
+        y2 = [
+            torch.zeros(primal_shape, dtype=observed.dtype, device=observed.device)
+            for _ in range(num_hess)
+        ]
     else:
         # Single dual variable for identity
-        y2 = torch.zeros_like(observed)
+        y2 = torch.zeros(primal_shape, dtype=observed.dtype, device=observed.device)
 
     # Overrelaxed primal variable
     x_bar = x.clone()

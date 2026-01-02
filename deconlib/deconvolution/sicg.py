@@ -18,7 +18,7 @@ Reference:
     deconvolution of large 3D microscopy datasets.
 """
 
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 
@@ -269,6 +269,7 @@ def solve_sicg(
     beta: float = 0.001,
     background: float = 0.0,
     init: Optional[torch.Tensor] = None,
+    init_shape: Optional[Tuple[int, ...]] = None,
     reg_target: Optional[torch.Tensor] = None,
     eps: float = 1e-12,
     restart_interval: int = 5,
@@ -291,10 +292,15 @@ def solve_sicg(
             Larger values produce smoother results. Default 0.001.
         background: Background value to subtract. Default 0.0.
         init: Initial estimate for c (sqrt of intensity). If None,
-            uses sqrt(max(observed, eps)).
+            uses sqrt(max(observed, eps)) or uniform if init_shape differs.
+        init_shape: Shape of the estimate (primal domain). Required when
+            using operators where input and output have different shapes
+            (e.g., make_binned_convolver for super-resolution). If None,
+            uses the same shape as observed.
         reg_target: Target for regularization term. If None, uses
-            (observed - background). For PSF estimation, set this to
-            the initial PSF to regularize toward the prior.
+            (observed - background) when shapes match, or uniform value
+            based on observed mean when using init_shape. For PSF estimation,
+            set this to the initial PSF to regularize toward the prior.
         eps: Small constant for numerical stability. Default 1e-12.
         restart_interval: Reset conjugate direction every N iterations
             to prevent direction degradation. Default 5.
@@ -310,6 +316,7 @@ def solve_sicg(
 
     Example:
         ```python
+        # Standard deconvolution
         from deconlib.deconvolution import make_fft_convolver, solve_sicg
 
         C, C_adj = make_fft_convolver(psf, device="cuda")
@@ -320,7 +327,18 @@ def solve_sicg(
             beta=0.001,
             verbose=True
         )
-        restored = result.restored.cpu().numpy()
+
+        # Super-resolution with binned convolver
+        from deconlib.deconvolution import make_binned_convolver, solve_sicg
+        # PSF on fine grid (512x512), observed on coarse grid (256x256)
+        A, A_adj, _ = make_binned_convolver(psf_fine, bin_factor=2)
+        result = solve_sicg(
+            observed, A, A_adj,
+            num_iter=100,
+            beta=0.001,
+            init_shape=(512, 512),  # Fine grid shape (must match PSF)
+        )
+        # result.restored has shape (512, 512)
         ```
 
     Note:
@@ -328,12 +346,35 @@ def solve_sicg(
         - The algorithm automatically ensures non-negativity via c² parametrization.
         - Regularization weight β should be tuned based on noise level.
         - Lower β = sharper but noisier; higher β = smoother but less sharp.
+        - When using make_binned_convolver, init_shape must match the PSF shape.
     """
     # Initialize parameter c (sqrt of intensity)
-    if init is None:
-        c = torch.sqrt(torch.clamp(observed, min=eps))
-    else:
+    if init is not None:
         c = init.clone()
+    elif init_shape is not None:
+        # Initialize on specified grid (e.g., high-res for super-resolution)
+        mean_val = max(observed.mean().item() - background, eps)
+        c = torch.full(
+            init_shape,
+            mean_val**0.5,  # sqrt since c² = intensity
+            dtype=observed.dtype,
+            device=observed.device,
+        )
+    else:
+        c = torch.sqrt(torch.clamp(observed, min=eps))
+
+    # Set default reg_target if not provided
+    if reg_target is None:
+        if init_shape is not None and init_shape != tuple(observed.shape):
+            # For super-resolution: use uniform target based on observed mean
+            reg_target = torch.full(
+                init_shape,
+                max(observed.mean().item() - background, eps),
+                dtype=observed.dtype,
+                device=observed.device,
+            )
+        else:
+            reg_target = observed - background
 
     # Initialize conjugate gradient state
     d = torch.zeros_like(c)  # Search direction

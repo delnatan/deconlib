@@ -206,10 +206,34 @@ def make_binned_convolver(
         # Forward model: object (512x512) -> observation (256x256)
         observed = A(object_highres)
 
-        # Use with deconvolution algorithms
-        result = solve_rl(observed, A, A_adj, num_iter=50)
+        # Deconvolution: MUST specify init_shape to match PSF (fine grid)
+        result = solve_rl(
+            observed, A, A_adj,
+            num_iter=50,
+            init_shape=psf_highres.shape,  # Critical: fine grid shape
+        )
         # result.restored has shape (512, 512) - the high-res reconstruction
+
+        # For PDHG, also pass the operator norm
+        result = solve_chambolle_pock(
+            observed, A, A_adj,
+            num_iter=100,
+            init_shape=psf_highres.shape,
+            blur_norm_sq=norm_sq,
+        )
         ```
+
+    Domain requirements:
+        The PSF defines the fine (high-resolution) grid, and observed data
+        lives on the coarse (low-resolution) grid:
+
+        - PSF shape: (H, W) or (D, H, W) - the fine grid
+        - Observed shape: (H/k, W/k) or (D/k, H/k, W/k) - the coarse grid
+        - Estimate shape: same as PSF - the fine grid
+
+        When calling solve_rl, solve_sicg, or solve_chambolle_pock, you MUST
+        provide init_shape=psf.shape (or init with correct shape) so the
+        estimate is initialized on the fine grid.
 
     Note:
         - Input to A must have shape matching kernel (high-res grid)
