@@ -40,13 +40,31 @@ class SICGConfig:
 
     Example:
         ```python
-        config = SICGConfig(beta=0.01, background=100.0)
+        from deconlib.deconvolution import (
+            make_fft_convolver, solve_sicg, SICGConfig
+        )
 
+        # Create operators
+        C, C_adj = make_fft_convolver(psf, device="cuda")
+
+        # Create config
+        config = SICGConfig(
+            beta=0.01,
+            background=100.0,
+            restart_interval=10,
+            line_search_iter=5,
+        )
+
+        # Use with solver - unpack config to kwargs
         result = solve_sicg(
             observed, C, C_adj,
             num_iter=100,
             **config.to_solver_kwargs()
         )
+
+        # Create variants using dataclasses.replace
+        from dataclasses import replace
+        stronger_reg = replace(config, beta=0.05)
         ```
 
     Attributes:
@@ -84,12 +102,20 @@ class PDHGConfig:
 
     Example:
         ```python
-        # Hessian regularization with L2 norm (smooth, isotropic)
+        from deconlib.deconvolution import (
+            make_fft_convolver, make_binned_convolver,
+            solve_chambolle_pock, PDHGConfig
+        )
+
+        # Standard deconvolution with Hessian regularization
+        C, C_adj = make_fft_convolver(psf, device="cuda")
+
         config = PDHGConfig(
-            alpha=0.01,
+            alpha=0.001,
             regularization="hessian",
-            norm="L2",
-            spacing=(0.3, 0.1, 0.1),  # (dz, dy, dx) in microns
+            norm="L2",                     # Isotropic, avoids blocky artifacts
+            spacing=(0.3, 0.1, 0.1),       # (dz, dy, dx) in microns
+            background=50.0,
         )
 
         result = solve_chambolle_pock(
@@ -98,13 +124,43 @@ class PDHGConfig:
             **config.to_solver_kwargs()
         )
 
-        # For super-resolution with binned operators:
-        A, A_adj, norm_sq = make_binned_convolver(psf_fine, bin_factor=2)
-        config = PDHGConfig(
+        # Super-resolution with binned operators
+        A, A_adj, op_norm_sq = make_binned_convolver(psf_fine, bin_factor=2)
+
+        config_sr = PDHGConfig(
             alpha=0.001,
-            blur_norm_sq=norm_sq,  # Important for correct step sizes
-            spacing=(0.05, 0.05),   # Fine grid spacing
+            blur_norm_sq=op_norm_sq,       # Important: use returned norm
+            spacing=(0.05, 0.05),          # Fine grid spacing
+            norm="L1",
         )
+
+        result = solve_chambolle_pock(
+            observed, A, A_adj,
+            num_iter=200,
+            init_shape=psf_fine.shape,     # Fine grid shape
+            **config_sr.to_solver_kwargs()
+        )
+
+        # Reuse configs across multiple images
+        widefield_config = PDHGConfig(
+            alpha=0.005,
+            regularization="hessian",
+            norm="L2",
+            spacing=(0.3, 0.1, 0.1),
+        )
+
+        for stack in stacks:
+            C, C_adj = make_fft_convolver(psf, device="cuda")
+            result = solve_chambolle_pock(
+                stack, C, C_adj,
+                num_iter=150,
+                **widefield_config.to_solver_kwargs()
+            )
+
+        # Create variants using dataclasses.replace
+        from dataclasses import replace
+        stronger_reg = replace(widefield_config, alpha=0.05)
+        l1_variant = replace(widefield_config, norm="L1")
         ```
 
     Attributes:
