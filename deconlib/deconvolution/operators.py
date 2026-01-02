@@ -29,7 +29,79 @@ from typing import Callable, Tuple, Union
 import numpy as np
 import torch
 
-__all__ = ["make_fft_convolver"]
+__all__ = ["make_fft_convolver", "make_binned_convolver", "power_iteration_norm"]
+
+
+def power_iteration_norm(
+    A: Callable[[torch.Tensor], torch.Tensor],
+    A_adj: Callable[[torch.Tensor], torch.Tensor],
+    shape: Tuple[int, ...],
+    num_iter: int = 50,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    verbose: bool = False,
+) -> float:
+    """Estimate ||A||² using power iteration on A^T A.
+
+    The largest singular value σ_max of A satisfies:
+        σ_max² = largest eigenvalue of A^T A
+
+    Power iteration: x_{k+1} = A^T A x_k / ||A^T A x_k||
+    converges to the eigenvector for the largest eigenvalue.
+
+    Args:
+        A: Forward operator.
+        A_adj: Adjoint operator.
+        shape: Shape of the input (primal domain).
+        num_iter: Maximum number of iterations. Default 50.
+        device: PyTorch device. Default "cpu".
+        dtype: PyTorch dtype. Default torch.float32.
+        tol: Convergence tolerance for eigenvalue estimate. Default 1e-6.
+        verbose: Print iteration progress. Default False.
+
+    Returns:
+        Estimated squared operator norm ||A||².
+
+    Example:
+        ```python
+        A, A_adj, estimated_norm_sq = make_binned_convolver(psf, bin_factor=2)
+        actual_norm_sq = power_iteration_norm(A, A_adj, shape=psf.shape, device="cuda")
+        print(f"Estimated: {estimated_norm_sq:.4f}, Actual: {actual_norm_sq:.4f}")
+        ```
+    """
+    # Initialize with random vector
+    x = torch.randn(shape, device=device, dtype=dtype)
+    x = x / torch.norm(x)
+
+    sigma_sq_prev = 0.0
+
+    for k in range(num_iter):
+        # Apply A^T A
+        Ax = A(x)
+        ATAx = A_adj(Ax)
+
+        # Rayleigh quotient: <x, A^T A x> / <x, x> = ||Ax||² (since ||x||=1)
+        sigma_sq = float(torch.sum(x * ATAx))
+
+        # Normalize for next iteration
+        norm_ATAx = torch.norm(ATAx)
+        if norm_ATAx < 1e-12:
+            break
+        x = ATAx / norm_ATAx
+
+        if verbose and (k + 1) % 10 == 0:
+            print(f"  Power iter {k+1}: ||A||² ≈ {sigma_sq:.6f}")
+
+        # Check convergence
+        if abs(sigma_sq - sigma_sq_prev) < tol * abs(sigma_sq):
+            if verbose:
+                print(f"  Converged at iteration {k+1}")
+            break
+
+        sigma_sq_prev = sigma_sq
+
+    return sigma_sq
 
 
 def make_fft_convolver(
@@ -153,3 +225,174 @@ def make_fft_convolver(
         return torch.fft.irfftn(y_ft * otf_conj, s=shape)
 
     return forward, adjoint
+
+
+def make_binned_convolver(
+    kernel: Union[np.ndarray, torch.Tensor],
+    bin_factor: int,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+    normalize: bool = True,
+    verbose: bool = False,
+) -> Tuple[
+    Callable[[torch.Tensor], torch.Tensor],
+    Callable[[torch.Tensor], torch.Tensor],
+    float,
+]:
+    """Create convolution + binning operators for continuous-to-discrete forward model.
+
+    Models the physical process where a continuous object is:
+    1. Blurred by the optical system (convolution with PSF)
+    2. Integrated by discrete camera pixels (sum-binning)
+
+    The forward model is: A = D ∘ C (convolve then downsample)
+    The adjoint is: A^T = C^T ∘ D^T (upsample then correlate)
+
+    For sum-binning, the adjoint of summation is replication (not division),
+    which preserves the inner product relationship ⟨Ax, y⟩ = ⟨x, A^T y⟩.
+
+    Args:
+        kernel: High-resolution PSF kernel (2D or 3D). Shape must be divisible
+            by bin_factor in all spatial dimensions.
+        bin_factor: Downsampling factor. Each bin_factor×bin_factor (2D) or
+            bin_factor×bin_factor×bin_factor (3D) block is summed to one pixel.
+        device: PyTorch device. Only used when kernel is NumPy array.
+        dtype: PyTorch dtype. Only used when kernel is NumPy array.
+        normalize: If True, normalize kernel to sum to 1. Default True.
+        verbose: If True, print operator info. Default False.
+
+    Returns:
+        Tuple (A, A_adj, operator_norm_sq) where:
+            - A(x): Forward operator (convolve + bin), maps high-res to low-res
+            - A_adj(y): Adjoint operator (upsample + correlate), maps low-res to high-res
+            - operator_norm_sq: Estimate of ||A||² for step size selection in PDHG
+
+    Example:
+        ```python
+        # High-resolution PSF (e.g., 512x512 for 2x oversampling)
+        psf_highres = create_psf(shape=(512, 512), pixel_size=0.05)
+
+        # Create operators with 2x binning (output will be 256x256)
+        A, A_adj, norm_sq = make_binned_convolver(psf_highres, bin_factor=2)
+
+        # Forward model: object (512x512) -> observation (256x256)
+        observed = A(object_highres)
+
+        # Deconvolution: MUST specify init_shape to match PSF (fine grid)
+        result = solve_rl(
+            observed, A, A_adj,
+            num_iter=50,
+            init_shape=psf_highres.shape,  # Critical: fine grid shape
+        )
+        # result.restored has shape (512, 512) - the high-res reconstruction
+
+        # For PDHG, also pass the operator norm
+        result = solve_chambolle_pock(
+            observed, A, A_adj,
+            num_iter=100,
+            init_shape=psf_highres.shape,
+            blur_norm_sq=norm_sq,
+        )
+        ```
+
+    Domain requirements:
+        The PSF defines the fine (high-resolution) grid, and observed data
+        lives on the coarse (low-resolution) grid:
+
+        - PSF shape: (H, W) or (D, H, W) - the fine grid
+        - Observed shape: (H/k, W/k) or (D/k, H/k, W/k) - the coarse grid
+        - Estimate shape: same as PSF - the fine grid
+
+        When calling solve_rl, solve_sicg, or solve_chambolle_pock, you MUST
+        provide init_shape=psf.shape (or init with correct shape) so the
+        estimate is initialized on the fine grid.
+
+    Note:
+        - Input to A must have shape matching kernel (high-res grid)
+        - Output of A has shape reduced by bin_factor (low-res grid)
+        - The adjoint A_adj maps from low-res back to high-res
+        - For PDHG, use operator_norm_sq to set step sizes: τσ||A||² < 1
+    """
+    # Convert numpy to tensor if needed
+    if isinstance(kernel, np.ndarray):
+        kernel_tensor = torch.from_numpy(kernel.astype(np.float64)).to(
+            device=device, dtype=dtype
+        )
+    else:
+        kernel_tensor = kernel
+
+    ndim = kernel_tensor.ndim
+    highres_shape = kernel_tensor.shape
+
+    # Validate shape divisibility
+    for i, s in enumerate(highres_shape):
+        if s % bin_factor != 0:
+            raise ValueError(
+                f"Kernel dimension {i} has size {s}, which is not divisible "
+                f"by bin_factor={bin_factor}"
+            )
+
+    lowres_shape = tuple(s // bin_factor for s in highres_shape)
+
+    # Normalize if requested
+    if normalize:
+        kernel_tensor = kernel_tensor / kernel_tensor.sum()
+
+    # Compute OTF for high-res convolution
+    otf = torch.fft.rfftn(kernel_tensor)
+    otf_conj = torch.conj(otf)
+
+    if verbose:
+        hr_str = "x".join(str(s) for s in highres_shape)
+        lr_str = "x".join(str(s) for s in lowres_shape)
+        input_type = "NumPy" if isinstance(kernel, np.ndarray) else "Tensor"
+        print(
+            f"{ndim}D binned convolver: kernel {hr_str}, bin={bin_factor}, "
+            f"output {lr_str}, input={input_type}, "
+            f"device={kernel_tensor.device}, dtype={kernel_tensor.dtype}"
+        )
+
+    # Operator norm estimate: ||D ∘ C||² ≤ ||D||² · ||C||²
+    # For normalized PSF: ||C|| ≤ 1
+    # For sum-binning k^d elements: ||D|| = k^(d/2) (Frobenius sense)
+    # Conservative estimate: ||A||² ≈ bin_factor^ndim
+    operator_norm_sq = float(bin_factor**ndim)
+
+    def _downsample(x: torch.Tensor) -> torch.Tensor:
+        """Sum-bin high-res tensor to low-res (adjoint is replication)."""
+        # Reshape to expose bins, then sum
+        # For 2D (H, W) -> (H//k, k, W//k, k) -> sum over axes (1, 3)
+        # For 3D (D, H, W) -> (D//k, k, H//k, k, W//k, k) -> sum over axes (1, 3, 5)
+        new_shape = []
+        for s in x.shape:
+            new_shape.extend([s // bin_factor, bin_factor])
+        reshaped = x.reshape(new_shape)
+        # Sum over the bin axes (1, 3, 5, ...)
+        sum_axes = tuple(range(1, 2 * ndim, 2))
+        return reshaped.sum(dim=sum_axes)
+
+    def _upsample(y: torch.Tensor) -> torch.Tensor:
+        """Replicate low-res tensor to high-res (adjoint of sum-binning)."""
+        # Use repeat_interleave along each dimension
+        result = y
+        for dim in range(ndim):
+            result = result.repeat_interleave(bin_factor, dim=dim)
+        return result
+
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        """Forward model: A = D ∘ C (convolve then downsample)."""
+        # Convolve with PSF
+        x_ft = torch.fft.rfftn(x)
+        convolved = torch.fft.irfftn(x_ft * otf, s=highres_shape)
+        # Downsample (sum-bin)
+        return _downsample(convolved)
+
+    def adjoint(y: torch.Tensor) -> torch.Tensor:
+        """Adjoint: A^T = C^T ∘ D^T (upsample then correlate)."""
+        # Upsample (replicate)
+        upsampled = _upsample(y)
+        # Correlate with PSF (adjoint of convolution)
+        y_ft = torch.fft.rfftn(upsampled)
+        return torch.fft.irfftn(y_ft * otf_conj, s=highres_shape)
+
+    return forward, adjoint, operator_norm_sq
