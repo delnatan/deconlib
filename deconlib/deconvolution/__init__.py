@@ -34,7 +34,7 @@ Example:
 from .base import (
     DeconvolutionResult,
 )
-from .operators import make_fft_convolver, make_binned_convolver
+from .operators import make_fft_convolver, make_binned_convolver, power_iteration_norm
 from .rl import (
     solve_rl,
 )
@@ -58,6 +58,7 @@ __all__ = [
     # Operators
     "make_fft_convolver",
     "make_binned_convolver",
+    "power_iteration_norm",
     # Algorithms
     "solve_rl",
     "solve_sicg",

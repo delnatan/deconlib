@@ -29,7 +29,79 @@ from typing import Callable, Tuple, Union
 import numpy as np
 import torch
 
-__all__ = ["make_fft_convolver", "make_binned_convolver"]
+__all__ = ["make_fft_convolver", "make_binned_convolver", "power_iteration_norm"]
+
+
+def power_iteration_norm(
+    A: Callable[[torch.Tensor], torch.Tensor],
+    A_adj: Callable[[torch.Tensor], torch.Tensor],
+    shape: Tuple[int, ...],
+    num_iter: int = 50,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    verbose: bool = False,
+) -> float:
+    """Estimate ||A||² using power iteration on A^T A.
+
+    The largest singular value σ_max of A satisfies:
+        σ_max² = largest eigenvalue of A^T A
+
+    Power iteration: x_{k+1} = A^T A x_k / ||A^T A x_k||
+    converges to the eigenvector for the largest eigenvalue.
+
+    Args:
+        A: Forward operator.
+        A_adj: Adjoint operator.
+        shape: Shape of the input (primal domain).
+        num_iter: Maximum number of iterations. Default 50.
+        device: PyTorch device. Default "cpu".
+        dtype: PyTorch dtype. Default torch.float32.
+        tol: Convergence tolerance for eigenvalue estimate. Default 1e-6.
+        verbose: Print iteration progress. Default False.
+
+    Returns:
+        Estimated squared operator norm ||A||².
+
+    Example:
+        ```python
+        A, A_adj, estimated_norm_sq = make_binned_convolver(psf, bin_factor=2)
+        actual_norm_sq = power_iteration_norm(A, A_adj, shape=psf.shape, device="cuda")
+        print(f"Estimated: {estimated_norm_sq:.4f}, Actual: {actual_norm_sq:.4f}")
+        ```
+    """
+    # Initialize with random vector
+    x = torch.randn(shape, device=device, dtype=dtype)
+    x = x / torch.norm(x)
+
+    sigma_sq_prev = 0.0
+
+    for k in range(num_iter):
+        # Apply A^T A
+        Ax = A(x)
+        ATAx = A_adj(Ax)
+
+        # Rayleigh quotient: <x, A^T A x> / <x, x> = ||Ax||² (since ||x||=1)
+        sigma_sq = float(torch.sum(x * ATAx))
+
+        # Normalize for next iteration
+        norm_ATAx = torch.norm(ATAx)
+        if norm_ATAx < 1e-12:
+            break
+        x = ATAx / norm_ATAx
+
+        if verbose and (k + 1) % 10 == 0:
+            print(f"  Power iter {k+1}: ||A||² ≈ {sigma_sq:.6f}")
+
+        # Check convergence
+        if abs(sigma_sq - sigma_sq_prev) < tol * abs(sigma_sq):
+            if verbose:
+                print(f"  Converged at iteration {k+1}")
+            break
+
+        sigma_sq_prev = sigma_sq
+
+    return sigma_sq
 
 
 def make_fft_convolver(

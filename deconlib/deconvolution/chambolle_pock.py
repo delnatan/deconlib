@@ -115,6 +115,46 @@ def _compute_all_second_derivatives(
     return second_derivs
 
 
+def _compute_all_second_derivatives_stacked(
+    x: torch.Tensor,
+    spacing: Tuple[float, ...],
+) -> torch.Tensor:
+    """Compute all second derivatives as a stacked tensor (vectorized).
+
+    Same as _compute_all_second_derivatives but returns a stacked tensor of
+    shape (N_components, *spatial_dims) for efficient vectorized operations.
+
+    Args:
+        x: Input tensor, shape (D, H, W) for 3D or (H, W) for 2D.
+        spacing: Grid spacing for each dimension, e.g., (dz, dy, dx).
+
+    Returns:
+        Stacked tensor of shape (N_components, *x.shape) where
+        N_components = ndim*(ndim+1)//2.
+    """
+    ndim = x.ndim
+    num_components = ndim * (ndim + 1) // 2
+
+    # Pre-allocate stacked tensor
+    stacked = torch.empty(
+        (num_components, *x.shape), dtype=x.dtype, device=x.device
+    )
+
+    idx = 0
+    # Pure second derivatives: ∂²f/∂i²
+    for dim in range(ndim):
+        stacked[idx] = _second_deriv_forward(x, dim, spacing[dim])
+        idx += 1
+
+    # Mixed second derivatives: ∂²f/∂i∂j for i < j
+    for i in range(ndim):
+        for j in range(i + 1, ndim):
+            stacked[idx] = _mixed_deriv_forward(x, i, j, spacing[i], spacing[j])
+            idx += 1
+
+    return stacked
+
+
 def _compute_hessian_adjoint(
     y_components: List[torch.Tensor],
     spacing: Tuple[float, ...],
@@ -151,6 +191,47 @@ def _compute_hessian_adjoint(
             y_ij = y_components[idx]
             result = result + weights[idx] * _mixed_deriv_adjoint(
                 y_ij, i, j, spacing[i], spacing[j]
+            )
+            idx += 1
+
+    return result
+
+
+def _compute_hessian_adjoint_stacked(
+    y_stacked: torch.Tensor,
+    spacing: Tuple[float, ...],
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    """Compute adjoint of the weighted Hessian operator (vectorized).
+
+    Takes a stacked tensor of shape (N_components, *spatial_dims) and
+    computes the weighted adjoint. Weights are applied via broadcasting.
+
+    Args:
+        y_stacked: Stacked dual variables, shape (N_components, *spatial_dims).
+        spacing: Grid spacing for each dimension.
+        weights: Weight tensor of shape (N_components,).
+
+    Returns:
+        Adjoint applied to y components.
+    """
+    ndim = len(spacing)
+    spatial_shape = y_stacked.shape[1:]
+    result = torch.zeros(spatial_shape, dtype=y_stacked.dtype, device=y_stacked.device)
+
+    idx = 0
+    # Pure second derivatives (first ndim components)
+    for dim in range(ndim):
+        result = result + weights[idx] * _second_deriv_adjoint(
+            y_stacked[idx], dim, spacing[dim]
+        )
+        idx += 1
+
+    # Mixed second derivatives (remaining components)
+    for i in range(ndim):
+        for j in range(i + 1, ndim):
+            result = result + weights[idx] * _mixed_deriv_adjoint(
+                y_stacked[idx], i, j, spacing[i], spacing[j]
             )
             idx += 1
 
@@ -305,6 +386,27 @@ def _prox_l1_dual(
     return torch.clamp(y, min=-bound, max=bound)
 
 
+def _prox_l1_dual_stacked(
+    y_stacked: torch.Tensor,
+    bounds: torch.Tensor,
+) -> torch.Tensor:
+    """Proximal operator for L1 dual on stacked tensor (vectorized).
+
+    Applies per-component bounds via broadcasting. Each component k is clamped
+    to [-bounds[k], bounds[k]].
+
+    Args:
+        y_stacked: Stacked dual variables, shape (N_components, *spatial_dims).
+        bounds: Bound per component, shape (N_components,). Typically alpha * weights.
+
+    Returns:
+        Projected stacked tensor.
+    """
+    # Reshape bounds for broadcasting: (N_components, 1, 1, ...) for spatial dims
+    bounds_view = bounds.view(-1, *([1] * (y_stacked.ndim - 1)))
+    return torch.clamp(y_stacked, min=-bounds_view, max=bounds_view)
+
+
 def _prox_l2_dual(
     y_components: List[torch.Tensor],
     weights: List[float],
@@ -347,6 +449,38 @@ def _prox_l2_dual(
     projected = stacked / scale
 
     return [projected[k] for k in range(len(y_components))]
+
+
+def _prox_l2_dual_stacked(
+    y_stacked: torch.Tensor,
+    weights: torch.Tensor,
+    alpha: float,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Proximal operator for L2 dual on stacked tensor (vectorized).
+
+    Same as _prox_l2_dual but operates on stacked tensor directly.
+
+    Args:
+        y_stacked: Stacked dual variables, shape (N_components, *spatial_dims).
+        weights: Weight tensor of shape (N_components,).
+        alpha: Regularization weight (L2 ball radius).
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Projected stacked tensor.
+    """
+    # Reshape weights for broadcasting: (N_components, 1, 1, ...)
+    weight_view = weights.view(-1, *([1] * (y_stacked.ndim - 1)))
+    weighted = y_stacked * weight_view
+
+    # Compute weighted L2 norm at each pixel: ||W·y||_2
+    norm_sq = torch.sum(weighted ** 2, dim=0, keepdim=True)
+    norm = torch.sqrt(norm_sq + eps)
+
+    # Projection: y / max(1, ||W·y||_2 / alpha)
+    scale = torch.clamp(norm / alpha, min=1.0)
+    return y_stacked / scale
 
 
 def solve_chambolle_pock(
@@ -551,15 +685,22 @@ def solve_chambolle_pock(
     y1 = torch.zeros_like(observed)
     # y2: dual for regularization - lives on primal domain (same as x)
     if regularization == "hessian":
-        # One dual variable per Hessian component: n(n+1)/2 for nD
+        # Stacked dual variable: (N_components, *spatial_dims)
         num_hess = _count_hessian_components(ndim)
-        y2 = [
-            torch.zeros(primal_shape, dtype=observed.dtype, device=observed.device)
-            for _ in range(num_hess)
-        ]
+        y2 = torch.zeros(
+            (num_hess, *primal_shape), dtype=observed.dtype, device=observed.device
+        )
+        # Pre-compute weight tensor for vectorized operations
+        weights_tensor = torch.tensor(
+            weights, dtype=observed.dtype, device=observed.device
+        )
+        # Pre-compute bounds for L1 prox: alpha * weights
+        bounds_tensor = alpha * weights_tensor
     else:
         # Single dual variable for identity
         y2 = torch.zeros(primal_shape, dtype=observed.dtype, device=observed.device)
+        weights_tensor = None
+        bounds_tensor = None
 
     # Overrelaxed primal variable
     x_bar = x.clone()
@@ -609,18 +750,16 @@ def solve_chambolle_pock(
 
         # === Dual update for regularization ===
         if regularization == "hessian":
-            Lx_bar = _compute_all_second_derivatives(x_bar, spacing)
-            # Update y2 with gradient step
-            y2_updated = [y2[k] + sigma * Lx_bar[k] for k in range(len(y2))]
+            # Compute Hessian as stacked tensor: (N_components, *spatial_dims)
+            Lx_bar = _compute_all_second_derivatives_stacked(x_bar, spacing)
+            # Update y2 with gradient step (vectorized)
+            y2_updated = y2 + sigma * Lx_bar
             if isotropic:
                 # L2 norm: project onto weighted L2 ball (vector shrinkage)
-                y2 = _prox_l2_dual(y2_updated, weights, alpha, eps)
+                y2 = _prox_l2_dual_stacked(y2_updated, weights_tensor, alpha, eps)
             else:
-                # L1 norm: clip each component independently
-                y2 = [
-                    _prox_l1_dual(y2_updated[k], alpha * weights[k])
-                    for k in range(len(y2))
-                ]
+                # L1 norm: clip each component (vectorized with broadcasting)
+                y2 = _prox_l1_dual_stacked(y2_updated, bounds_tensor)
         else:
             # Identity regularization: simple L1 on x
             y2 = _prox_l1_dual(y2 + sigma * x_bar, alpha)
@@ -629,7 +768,7 @@ def solve_chambolle_pock(
         # x <- max(0, x - τ(A^T y1 + Σ w_k L_k^T y2_k))
         ATy1 = C_adj(y1)
         if regularization == "hessian":
-            LTy2 = _compute_hessian_adjoint(y2, spacing, weights)
+            LTy2 = _compute_hessian_adjoint_stacked(y2, spacing, weights_tensor)
         else:
             LTy2 = y2  # L^T = I for identity
 
@@ -653,22 +792,18 @@ def solve_chambolle_pock(
             kl_div = torch.sum(Ax - observed * torch.log(Ax_safe))
 
             if regularization == "hessian":
-                Lx = _compute_all_second_derivatives(x, spacing)
+                Lx = _compute_all_second_derivatives_stacked(x, spacing)
+                # Reshape weights for broadcasting: (N_components, 1, 1, ...)
+                weight_view = weights_tensor.view(-1, *([1] * (Lx.ndim - 1)))
                 if isotropic:
                     # Weighted L2: sum_pixels ||W·Lx||_2
-                    stacked = torch.stack(Lx, dim=0)
-                    weight_tensor = torch.tensor(
-                        weights, dtype=stacked.dtype, device=stacked.device
-                    ).view(-1, *([1] * (stacked.ndim - 1)))
-                    weighted = stacked * weight_tensor
+                    weighted = Lx * weight_view
                     norm_per_pixel = torch.sqrt(torch.sum(weighted**2, dim=0) + eps)
                     reg_term = alpha * torch.sum(norm_per_pixel)
                 else:
-                    # Weighted L1: sum_k w_k * |L_k x|_1
-                    reg_term = alpha * sum(
-                        weights[k] * torch.sum(torch.abs(Lx[k]))
-                        for k in range(len(Lx))
-                    )
+                    # Weighted L1: sum_k w_k * |L_k x|_1 (vectorized)
+                    weighted_abs = weight_view * torch.abs(Lx)
+                    reg_term = alpha * torch.sum(weighted_abs)
             else:
                 reg_term = alpha * torch.sum(torch.abs(x))
 
