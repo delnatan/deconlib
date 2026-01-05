@@ -4,7 +4,85 @@ import numpy as np
 
 from .fourier import imshift
 
-__all__ = ["pad_to_shape"]
+__all__ = ["pad_to_shape", "soft_pad"]
+
+
+from typing import Sequence, Union
+
+import numpy as np
+
+
+def tukey_window(N: int, pad: int, dtype=np.float32) -> np.ndarray:
+    """
+    Create a 1D Tukey (tapered cosine) window.
+
+    Produces a window that is 1.0 in the center region [0, N) and smoothly
+    tapers to 0 over `pad` samples on each side using a cosine taper.
+    """
+    n = np.arange(-pad, N + pad, dtype=dtype)
+
+    window = np.ones_like(n)
+
+    # Left taper: [-pad, 0)
+    left = n < 0
+    window[left] = (1 + np.cos(np.pi * n[left] / pad)) / 2.0
+
+    # Right taper: [N, N+pad]
+    right = n >= N
+    window[right] = (1 + np.cos(np.pi * (n[right] - N) / pad)) / 2.0
+
+    return window
+
+
+def soft_pad(
+    image: np.ndarray,
+    pad_width: Union[int, Sequence[int]],
+    dtype=np.float32,
+) -> np.ndarray:
+    """
+    Pad an image with edge values and apply a smooth Tukey taper.
+
+    Parameters
+    ----------
+    image : ndarray
+        Input array (2D or 3D).
+    pad_width : int or sequence of int
+        Padding size for each axis. If int, same padding for all axes.
+        If sequence, must match the number of dimensions.
+    dtype : dtype, optional
+        Output dtype (default: float32).
+
+    Returns
+    -------
+    ndarray
+        Padded array with smooth taper to zero at edges.
+    """
+    ndim = image.ndim
+    shape = image.shape
+
+    # Normalize pad_width to per-axis tuple
+    if np.isscalar(pad_width):
+        pads = (int(pad_width),) * ndim
+    else:
+        pads = tuple(pad_width)
+        if len(pads) != ndim:
+            raise ValueError(
+                f"pad_width length {len(pads)} != image ndim {ndim}"
+            )
+
+    # Pad with edge values
+    padded = np.pad(image, [(p, p) for p in pads], mode="edge").astype(dtype)
+
+    # Apply separable Tukey window along each axis
+    for axis, (N, pad) in enumerate(zip(shape, pads)):
+        if pad > 0:
+            window = tukey_window(N, pad, dtype=dtype)
+            # Reshape for broadcasting: size along `axis`, 1 elsewhere
+            broadcast_shape = [1] * ndim
+            broadcast_shape[axis] = len(window)
+            padded *= window.reshape(broadcast_shape)
+
+    return padded
 
 
 def pad_to_shape(
@@ -59,7 +137,9 @@ def pad_to_shape(
     elif mode == "origin":
         return _pad_origin_centered(img, output_shape)
     else:
-        raise ValueError(f"Unknown padding mode: {mode}. Use 'origin' or 'corner'.")
+        raise ValueError(
+            f"Unknown padding mode: {mode}. Use 'origin' or 'corner'."
+        )
 
 
 def _pad_corner(img: np.ndarray, output_shape: tuple[int, ...]) -> np.ndarray:
@@ -70,7 +150,9 @@ def _pad_corner(img: np.ndarray, output_shape: tuple[int, ...]) -> np.ndarray:
     return result
 
 
-def _pad_origin_centered(img: np.ndarray, output_shape: tuple[int, ...]) -> np.ndarray:
+def _pad_origin_centered(
+    img: np.ndarray, output_shape: tuple[int, ...]
+) -> np.ndarray:
     """Pad origin-centered array while preserving centering.
 
     Uses Fourier shift theorem to properly handle the centering.
