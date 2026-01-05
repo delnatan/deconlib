@@ -9,6 +9,7 @@ __all__ = [
     "DeconvolutionResult",
     "SICGConfig",
     "PDHGConfig",
+    "MetricWeightedTVConfig",
 ]
 
 
@@ -211,4 +212,69 @@ class PDHGConfig:
             "blur_norm_sq": self.blur_norm_sq,
             "accelerate": self.accelerate,
             "theta": self.theta,
+        }
+
+
+@dataclass
+class MetricWeightedTVConfig:
+    """Configuration for the metric-weighted TV solver.
+
+    Uses exponentiated gradient descent with Fisher information metric
+    for geometrically natural regularization on the positive cone.
+
+    Example:
+        ```python
+        from deconlib.deconvolution import (
+            make_fft_convolver,
+            solve_metric_weighted_tv,
+            MetricWeightedTVConfig,
+        )
+
+        C, C_adj = make_fft_convolver(psf, device="cuda")
+
+        config = MetricWeightedTVConfig(
+            alpha=0.1,
+            delta=0.3,
+            spacing=(0.3, 0.1, 0.1),
+            background=50.0,
+        )
+
+        result = solve_metric_weighted_tv(
+            observed, C, C_adj,
+            num_iter=200,
+            **config.to_solver_kwargs(),
+        )
+
+        # Create variants using dataclasses.replace
+        from dataclasses import replace
+        stronger_reg = replace(config, alpha=0.5)
+        ```
+
+    Attributes:
+        alpha: Regularization strength. Larger = smoother.
+            Typical range: 0.01-1.0.
+        delta: Trust region radius. Controls step conservativeness.
+            Typical range: 0.1-0.5.
+        eta_max: Maximum step size. Caps updates in flat regions.
+            Typical range: 0.5-2.0.
+        spacing: Physical grid spacing (dz, dy, dx) or (dy, dx).
+            Used for isotropic regularization weighting. Coarser axes
+            (larger spacing) receive less penalty.
+        background: Constant background in forward model.
+    """
+
+    alpha: float = 0.1
+    delta: float = 0.3
+    eta_max: float = 1.0
+    spacing: Optional[Tuple[float, ...]] = None
+    background: float = 0.0
+
+    def to_solver_kwargs(self) -> Dict[str, Any]:
+        """Convert config to keyword arguments for solve_metric_weighted_tv."""
+        return {
+            "alpha": self.alpha,
+            "delta": self.delta,
+            "eta_max": self.eta_max,
+            "spacing": self.spacing,
+            "background": self.background,
         }

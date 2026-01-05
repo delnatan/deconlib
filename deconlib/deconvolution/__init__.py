@@ -35,6 +35,7 @@ from .base import (
     DeconvolutionResult,
     SICGConfig,
     PDHGConfig,
+    MetricWeightedTVConfig,
 )
 from .operators import make_fft_convolver, make_binned_convolver, power_iteration_norm
 from .rl import (
@@ -45,6 +46,9 @@ from .sicg import (
 )
 from .chambolle_pock import (
     solve_chambolle_pock,
+)
+from .metric_weighted_tv import (
+    solve_metric_weighted_tv,
 )
 from .psf_extraction import (
     extract_psf_rl,
@@ -57,6 +61,7 @@ __all__ = [
     # Configuration
     "SICGConfig",
     "PDHGConfig",
+    "MetricWeightedTVConfig",
     # Operators
     "make_fft_convolver",
     "make_binned_convolver",
@@ -65,6 +70,7 @@ __all__ = [
     "solve_rl",
     "solve_sicg",
     "solve_chambolle_pock",
+    "solve_metric_weighted_tv",
     # PSF extraction
     "extract_psf_rl",
     "extract_psf_sicg",
