@@ -30,19 +30,22 @@ __all__ = ["solve_metric_weighted_tv"]
 # =============================================================================
 # Finite Difference Operators (Circular Boundary)
 # =============================================================================
+# Using torch.roll ensures the forward and adjoint operators are exact
+# algebraic transposes, which is required for correct gradient computation.
+#
+# For mixed derivatives, we use forward-forward differences (NOT centered),
+# which gives a compact 2x2 stencil. Centered differences create an X-shaped
+# stencil that samples only diagonal corners, causing diamond artifacts.
 
 
-def _centered_diff(x: torch.Tensor, dim: int, h: float = 1.0) -> torch.Tensor:
-    """Centered first difference: D[i] = (x[i+1] - x[i-1]) / (2h).
-
-    This operator is antisymmetric: D^T = -D.
-    """
-    return (torch.roll(x, -1, dims=dim) - torch.roll(x, 1, dims=dim)) / (2.0 * h)
+def _forward_diff(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Forward difference: D[i] = x[i+1] - x[i] (circular boundary)."""
+    return torch.roll(x, -1, dims=dim) - x
 
 
-def _centered_diff_adj(y: torch.Tensor, dim: int, h: float = 1.0) -> torch.Tensor:
-    """Adjoint of centered difference: D^T = -D (antisymmetric)."""
-    return -_centered_diff(y, dim, h)
+def _backward_diff(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """Backward difference (adjoint of forward): D[i] = x[i] - x[i-1]."""
+    return x - torch.roll(x, 1, dims=dim)
 
 
 def _pure_second_deriv(x: torch.Tensor, dim: int, h: float = 1.0) -> torch.Tensor:
@@ -61,14 +64,17 @@ def _pure_second_deriv_adj(y: torch.Tensor, dim: int, h: float = 1.0) -> torch.T
 def _mixed_second_deriv(
     x: torch.Tensor, dim_a: int, dim_b: int, h_a: float = 1.0, h_b: float = 1.0
 ) -> torch.Tensor:
-    """Mixed second derivative using centered differences: ∂_a(∂_b f).
+    """Mixed second derivative using forward differences: ∂_a(∂_b f).
 
-    Since centered diff is antisymmetric (D^T = -D), the composition
-    D_a ∘ D_b has adjoint (-D_a) ∘ (-D_b) = D_a ∘ D_b, so this operator
-    is self-adjoint under periodic boundaries.
+    Uses forward-forward differences which gives a compact 2x2 stencil:
+        [+1, -1]
+        [-1, +1]
+
+    This avoids the diamond artifacts that centered differences create.
     """
-    diff_b = _centered_diff(x, dim_b, h_b)
-    return _centered_diff(diff_b, dim_a, h_a)
+    diff_b = _forward_diff(x, dim_b)
+    diff_ab = _forward_diff(diff_b, dim_a)
+    return diff_ab / (h_a * h_b)
 
 
 def _mixed_second_deriv_adj(
@@ -76,11 +82,12 @@ def _mixed_second_deriv_adj(
 ) -> torch.Tensor:
     """Adjoint of mixed second derivative.
 
-    For D_a ∘ D_b where D is centered diff (antisymmetric):
-    (D_a ∘ D_b)^T = D_b^T ∘ D_a^T = (-D_b) ∘ (-D_a) = D_b ∘ D_a = D_a ∘ D_b
-    So this is self-adjoint.
+    For D_a ∘ D_b where D is forward diff:
+    (D_a ∘ D_b)^T = D_b^T ∘ D_a^T = backward_b ∘ backward_a
     """
-    return _mixed_second_deriv(y, dim_a, dim_b, h_a, h_b)
+    adj_a = _backward_diff(y, dim_a)
+    adj_ab = _backward_diff(adj_a, dim_b)
+    return adj_ab / (h_a * h_b)
 
 
 # =============================================================================

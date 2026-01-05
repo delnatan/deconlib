@@ -16,8 +16,8 @@ except ImportError:
 
 # Import the internal functions we need to test
 from deconlib.deconvolution.metric_weighted_tv import (
-    _centered_diff,
-    _centered_diff_adj,
+    _forward_diff,
+    _backward_diff,
     _pure_second_deriv,
     _pure_second_deriv_adj,
     _mixed_second_deriv,
@@ -76,43 +76,39 @@ def dot_product_test(
 class TestFiniteDifferenceAdjoints:
     """Test that finite difference operators satisfy adjoint relations."""
 
-    def test_centered_diff_adjoint_2d_dim0(self):
-        """Test centered difference adjoint along dim 0 in 2D."""
+    def test_forward_backward_adjoint_2d_dim0(self):
+        """Test forward/backward difference adjoint along dim 0 in 2D."""
         shape = (32, 32)
-        h = 1.0
 
         lhs, rhs, err = dot_product_test(
-            lambda x: _centered_diff(x, dim=0, h=h),
-            lambda y: _centered_diff_adj(y, dim=0, h=h),
+            lambda x: _forward_diff(x, dim=0),
+            lambda y: _backward_diff(y, dim=0),
             shape,
         )
-        print(f"Centered diff 2D dim0: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
+        print(f"Forward/backward 2D dim0: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
 
-    def test_centered_diff_adjoint_2d_dim1(self):
-        """Test centered difference adjoint along dim 1 in 2D."""
+    def test_forward_backward_adjoint_2d_dim1(self):
+        """Test forward/backward difference adjoint along dim 1 in 2D."""
         shape = (32, 32)
-        h = 0.5
 
         lhs, rhs, err = dot_product_test(
-            lambda x: _centered_diff(x, dim=1, h=h),
-            lambda y: _centered_diff_adj(y, dim=1, h=h),
+            lambda x: _forward_diff(x, dim=1),
+            lambda y: _backward_diff(y, dim=1),
             shape,
         )
-        print(f"Centered diff 2D dim1: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
+        print(f"Forward/backward 2D dim1: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
 
-    def test_centered_diff_adjoint_3d(self):
-        """Test centered difference adjoint in 3D for all dimensions."""
+    def test_forward_backward_adjoint_3d(self):
+        """Test forward/backward difference adjoint in 3D for all dimensions."""
         shape = (16, 32, 32)
-        spacings = [0.3, 0.1, 0.1]
 
         for dim in range(3):
-            h = spacings[dim]
             lhs, rhs, err = dot_product_test(
-                lambda x, d=dim, hh=h: _centered_diff(x, dim=d, h=hh),
-                lambda y, d=dim, hh=h: _centered_diff_adj(y, dim=d, h=hh),
+                lambda x, d=dim: _forward_diff(x, dim=d),
+                lambda y, d=dim: _backward_diff(y, dim=d),
                 shape,
             )
-            print(f"Centered diff 3D dim{dim}: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
+            print(f"Forward/backward 3D dim{dim}: ⟨Dx, y⟩={lhs:.10e}, ⟨x, D^T y⟩={rhs:.10e}, err={err:.2e}")
 
     def test_pure_second_deriv_adjoint_2d(self):
         """Test pure second derivative is self-adjoint in 2D."""
@@ -319,34 +315,23 @@ class TestRegularizationGradient:
         assert mean_rel_err < 1e-4, f"Gradient check failed: mean relative error = {mean_rel_err:.2e}"
 
 
-class TestCenteredDiffAntiSymmetry:
-    """Verify that centered difference is antisymmetric (D^T = -D)."""
+class TestForwardBackwardRelation:
+    """Verify the forward/backward difference adjoint relationship."""
 
-    def test_antisymmetry_2d(self):
-        """Verify D^T = -D for centered difference."""
+    def test_forward_backward_2d(self):
+        """Verify backward is adjoint of forward via dot-product test."""
         shape = (16, 16)
-        h = 1.0
 
         torch.manual_seed(789)
-        x = torch.randn(shape, dtype=torch.float64)
 
         for dim in range(2):
-            Dx = _centered_diff(x, dim=dim, h=h)
-            DTx = _centered_diff_adj(x, dim=dim, h=h)
-            neg_Dx = -Dx
-
-            # D^T(x) should equal -D(x) (antisymmetry)
-            # But wait - the adjoint of D is -D when applied to the SAME vector
-            # Let me verify: ⟨Dx, y⟩ = ⟨x, D^T y⟩
-            # If D is antisymmetric, then D^T = -D
-            # So _centered_diff_adj returns -_centered_diff
-
-            # Verify: D^T = -D directly
-            diff = torch.abs(DTx - neg_Dx)
-            max_diff = diff.max().item()
-
-            print(f"Antisymmetry check dim{dim}: max|D^T(x) - (-D(x))| = {max_diff:.2e}")
-            assert max_diff < 1e-14, f"Antisymmetry failed: max diff = {max_diff}"
+            lhs, rhs, err = dot_product_test(
+                lambda x, d=dim: _forward_diff(x, dim=d),
+                lambda y, d=dim: _backward_diff(y, dim=d),
+                shape,
+            )
+            print(f"Forward/backward adjoint dim{dim}: err={err:.2e}")
+            assert err < 1e-10, f"Adjoint test failed: rel error = {err:.2e}"
 
 
 if __name__ == "__main__":
@@ -356,10 +341,10 @@ if __name__ == "__main__":
     print("=" * 70)
 
     test_adj = TestFiniteDifferenceAdjoints()
-    print("\n--- Centered Difference ---")
-    test_adj.test_centered_diff_adjoint_2d_dim0()
-    test_adj.test_centered_diff_adjoint_2d_dim1()
-    test_adj.test_centered_diff_adjoint_3d()
+    print("\n--- Forward/Backward Difference ---")
+    test_adj.test_forward_backward_adjoint_2d_dim0()
+    test_adj.test_forward_backward_adjoint_2d_dim1()
+    test_adj.test_forward_backward_adjoint_3d()
 
     print("\n--- Pure Second Derivative ---")
     test_adj.test_pure_second_deriv_adjoint_2d()
@@ -370,10 +355,10 @@ if __name__ == "__main__":
     test_adj.test_mixed_second_deriv_adjoint_3d()
 
     print("\n" + "=" * 70)
-    print("Testing Centered Difference Antisymmetry")
+    print("Testing Forward/Backward Adjoint Relation")
     print("=" * 70)
-    test_anti = TestCenteredDiffAntiSymmetry()
-    test_anti.test_antisymmetry_2d()
+    test_fb = TestForwardBackwardRelation()
+    test_fb.test_forward_backward_2d()
 
     print("\n" + "=" * 70)
     print("Testing Spacing Weights")
