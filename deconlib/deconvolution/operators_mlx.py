@@ -372,87 +372,95 @@ def upsample(y: mx.array, factors: Union[int, Tuple[int, ...]]) -> mx.array:
 ###############################################################################
 
 
-def make_fft_convolver(
-    kernel: Union[np.ndarray, mx.array],
-    normalize: bool = True,
-) -> Tuple[Callable[[mx.array], mx.array], Callable[[mx.array], mx.array]]:
-    """Create FFT-based forward and adjoint convolution operators.
+class FFTConvolver:
+    """FFT-based convolution operator with forward and adjoint.
 
-    Given a kernel (PSF or point source map), creates efficient FFT-based
-    operators for convolution and its adjoint (correlation). Works with
-    2D and 3D data.
+    Stores the OTF (Optical Transfer Function) in memory for efficient
+    repeated application. Supports MLX autodiff and JIT compilation.
 
-    The operators implement:
+    The operator implements:
         - Forward: y = kernel ⊛ x (convolution)
         - Adjoint: x = kernel* ⊛ y (correlation)
 
-    Uses rfftn/irfftn for efficiency with real-valued signals.
-
-    Args:
-        kernel: The convolution kernel (2D or 3D). Can be NumPy array or
-            MLX array. The kernel should have DC at corner (index [0, 0, ...])
-            as produced by pupil_to_psf or as expected by FFT operations.
-        normalize: If True, normalize kernel to sum to 1. Default True.
-
-    Returns:
-        Tuple (C, C_adj) where:
-            - C(x): Forward operator, computes kernel ⊛ x (convolution)
-            - C_adj(y): Adjoint operator, computes kernel* ⊛ y (correlation)
+    Attributes:
+        otf: Precomputed OTF (Fourier transform of kernel)
+        shape: Spatial shape of the kernel/signal
 
     Example:
-        # Create convolution operators from PSF
-        C, C_adj = make_fft_convolver(psf)
+        # Create convolver from PSF
+        C = FFTConvolver(psf)
 
         # Forward model: blur an image
-        blurred = C(image)
+        blurred = C(image)  # or C.forward(image)
 
         # Adjoint: correlation (used in iterative algorithms)
-        correlated = C_adj(blurred)
+        correlated = C.adjoint(blurred)
+
+        # With autodiff (gradient computed automatically):
+        def loss(x):
+            return 0.5 * mx.sum((C(x) - observed)**2)
+
+        grad_fn = mx.grad(loss)
+        gradient = grad_fn(x0)
+
+        # JIT compilation for speed:
+        C_compiled = mx.compile(C.forward)
 
     Note:
-        The adjoint of convolution with a kernel is correlation with that
-        kernel, which equals convolution with the spatially-flipped,
-        complex-conjugated kernel. In Fourier space: C_adj uses conj(OTF).
+        For pure gradient-based optimization, you typically only need the
+        forward operator - autodiff handles the gradient computation.
+        Explicit adjoints are useful for proximal algorithms (ADMM, FISTA).
     """
-    # Convert numpy to MLX array if needed
-    if isinstance(kernel, np.ndarray):
-        kernel_arr = mx.array(kernel)
-    else:
-        kernel_arr = kernel
 
-    shape = kernel_arr.shape
+    def __init__(
+        self,
+        kernel: Union[np.ndarray, mx.array],
+        normalize: bool = True,
+    ):
+        """Initialize FFT convolver with a kernel.
 
-    # Normalize if requested
-    if normalize:
-        kernel_arr = kernel_arr / mx.sum(kernel_arr)
+        Args:
+            kernel: Convolution kernel (2D or 3D). Can be NumPy or MLX array.
+                Should have DC at corner (index [0, 0, ...]) as expected by FFT.
+            normalize: If True, normalize kernel to sum to 1. Default True.
+        """
+        # Convert numpy to MLX array if needed
+        if isinstance(kernel, np.ndarray):
+            kernel_arr = mx.array(kernel)
+        else:
+            kernel_arr = kernel
 
-    # Compute OTF using rfftn
-    otf = mx.fft.rfftn(kernel_arr)
-    otf_conj = mx.conj(otf)
+        self.shape = kernel_arr.shape
 
-    def forward(x: mx.array) -> mx.array:
+        # Normalize if requested
+        if normalize:
+            kernel_arr = kernel_arr / mx.sum(kernel_arr)
+
+        # Precompute and store OTF
+        self.otf = mx.fft.rfftn(kernel_arr)
+
+    @property
+    def otf_conj(self) -> mx.array:
+        """Conjugate of OTF (computed lazily, cached by MLX)."""
+        return mx.conj(self.otf)
+
+    def forward(self, x: mx.array) -> mx.array:
         """Apply forward convolution: y = kernel ⊛ x."""
         x_ft = mx.fft.rfftn(x)
-        return mx.fft.irfftn(x_ft * otf, s=shape)
+        return mx.fft.irfftn(x_ft * self.otf, s=self.shape)
 
-    def adjoint(y: mx.array) -> mx.array:
+    def adjoint(self, y: mx.array) -> mx.array:
         """Apply adjoint (correlation): x = kernel* ⊛ y."""
         y_ft = mx.fft.rfftn(y)
-        return mx.fft.irfftn(y_ft * otf_conj, s=shape)
+        return mx.fft.irfftn(y_ft * self.otf_conj, s=self.shape)
 
-    return forward, adjoint
+    def __call__(self, x: mx.array) -> mx.array:
+        """Apply forward convolution (callable interface)."""
+        return self.forward(x)
 
 
-def make_binned_convolver(
-    kernel: Union[np.ndarray, mx.array],
-    factors: Union[int, Tuple[int, ...]],
-    normalize: bool = True,
-) -> Tuple[
-    Callable[[mx.array], mx.array],
-    Callable[[mx.array], mx.array],
-    float,
-]:
-    """Create convolution + binning operators for continuous-to-discrete forward model.
+class BinnedConvolver:
+    """Convolution + binning operator for continuous-to-discrete imaging.
 
     Models the physical process where a continuous object is:
     1. Blurred by the optical system (convolution with PSF)
@@ -461,77 +469,152 @@ def make_binned_convolver(
     The forward model is: A = D ∘ C (convolve then downsample)
     The adjoint is: A^T = C^T ∘ D^T (upsample then correlate)
 
-    Args:
-        kernel: High-resolution PSF kernel (2D or 3D). Shape must be divisible
-            by factors in corresponding dimensions.
-        factors: Downsampling factor(s). Can be:
-            - int: same factor for all dimensions
-            - tuple: per-dimension factors, e.g., (factor_z, factor_y, factor_x)
-              Use 1 for dimensions that should not be binned.
-        normalize: If True, normalize kernel to sum to 1. Default True.
-
-    Returns:
-        Tuple (A, A_adj, operator_norm_sq) where:
-            - A(x): Forward operator (convolve + bin), maps high-res to low-res
-            - A_adj(y): Adjoint operator (upsample + correlate), maps low-res to high-res
-            - operator_norm_sq: Estimate of ||A||² for step size selection
+    Attributes:
+        otf: Precomputed OTF at high resolution
+        highres_shape: Shape of high-resolution grid
+        lowres_shape: Shape of low-resolution (binned) grid
+        factors: Binning factors per dimension
+        operator_norm_sq: Estimate of ||A||² for step size selection
 
     Example:
         # High-resolution PSF with 2x2 binning in XY only
-        A, A_adj, norm_sq = make_binned_convolver(psf_highres, factors=(1, 2, 2))
+        A = BinnedConvolver(psf_highres, factors=(1, 2, 2))
 
         # Forward model: object (D, H, W) -> observation (D, H/2, W/2)
         observed = A(object_highres)
+
+        # Adjoint for iterative reconstruction
+        backprojected = A.adjoint(residual)
+
+        # Step size for gradient descent
+        step = 1.0 / A.operator_norm_sq
     """
-    # Convert numpy to MLX array if needed
-    if isinstance(kernel, np.ndarray):
-        kernel_arr = mx.array(kernel)
-    else:
-        kernel_arr = kernel
 
-    ndim = kernel_arr.ndim
-    highres_shape = kernel_arr.shape
-    factors_tuple = _normalize_factors(factors, ndim)
+    def __init__(
+        self,
+        kernel: Union[np.ndarray, mx.array],
+        factors: Union[int, Tuple[int, ...]],
+        normalize: bool = True,
+    ):
+        """Initialize binned convolver.
 
-    # Validate shape divisibility
-    for i, (s, f) in enumerate(zip(highres_shape, factors_tuple)):
-        if f > 1 and s % f != 0:
-            raise ValueError(
-                f"Kernel dimension {i} has size {s}, not divisible by factor {f}"
-            )
+        Args:
+            kernel: High-resolution PSF kernel (2D or 3D). Shape must be
+                divisible by factors in corresponding dimensions.
+            factors: Downsampling factor(s). Can be:
+                - int: same factor for all dimensions
+                - tuple: per-dimension factors, e.g., (factor_z, factor_y, factor_x)
+                  Use 1 for dimensions that should not be binned.
+            normalize: If True, normalize kernel to sum to 1. Default True.
+        """
+        # Convert numpy to MLX array if needed
+        if isinstance(kernel, np.ndarray):
+            kernel_arr = mx.array(kernel)
+        else:
+            kernel_arr = kernel
 
-    # Normalize if requested
-    if normalize:
-        kernel_arr = kernel_arr / mx.sum(kernel_arr)
+        ndim = kernel_arr.ndim
+        self.highres_shape = kernel_arr.shape
+        self.factors = _normalize_factors(factors, ndim)
 
-    # Compute OTF for high-res convolution
-    otf = mx.fft.rfftn(kernel_arr)
-    otf_conj = mx.conj(otf)
+        # Validate shape divisibility
+        for i, (s, f) in enumerate(zip(self.highres_shape, self.factors)):
+            if f > 1 and s % f != 0:
+                raise ValueError(
+                    f"Kernel dimension {i} has size {s}, not divisible by factor {f}"
+                )
 
-    # Operator norm estimate: ||D ∘ C||² ≤ ||D||² · ||C||²
-    # For normalized PSF: ||C|| ≤ 1
-    # For sum-binning: ||D|| = sqrt(prod of factors with f > 1)
-    # Conservative estimate
-    total_bin = 1
-    for f in factors_tuple:
-        if f > 1:
-            total_bin *= f
-    operator_norm_sq = float(total_bin)
+        # Compute low-res shape
+        self.lowres_shape = tuple(
+            s // f for s, f in zip(self.highres_shape, self.factors)
+        )
 
-    def forward(x: mx.array) -> mx.array:
+        # Normalize if requested
+        if normalize:
+            kernel_arr = kernel_arr / mx.sum(kernel_arr)
+
+        # Precompute and store OTF
+        self.otf = mx.fft.rfftn(kernel_arr)
+
+        # Operator norm estimate: ||D ∘ C||² ≤ ||D||² · ||C||²
+        # For normalized PSF: ||C|| ≤ 1
+        # For sum-binning: ||D||² = prod of factors
+        total_bin = 1
+        for f in self.factors:
+            if f > 1:
+                total_bin *= f
+        self.operator_norm_sq = float(total_bin)
+
+    @property
+    def otf_conj(self) -> mx.array:
+        """Conjugate of OTF (computed lazily, cached by MLX)."""
+        return mx.conj(self.otf)
+
+    def forward(self, x: mx.array) -> mx.array:
         """Forward model: A = D ∘ C (convolve then downsample)."""
         # Convolve with PSF
         x_ft = mx.fft.rfftn(x)
-        convolved = mx.fft.irfftn(x_ft * otf, s=highres_shape)
+        convolved = mx.fft.irfftn(x_ft * self.otf, s=self.highres_shape)
         # Downsample (sum-bin)
-        return downsample(convolved, factors_tuple)
+        return downsample(convolved, self.factors)
 
-    def adjoint(y: mx.array) -> mx.array:
+    def adjoint(self, y: mx.array) -> mx.array:
         """Adjoint: A^T = C^T ∘ D^T (upsample then correlate)."""
         # Upsample (replicate)
-        upsampled = upsample(y, factors_tuple)
+        upsampled = upsample(y, self.factors)
         # Correlate with PSF (adjoint of convolution)
         y_ft = mx.fft.rfftn(upsampled)
-        return mx.fft.irfftn(y_ft * otf_conj, s=highres_shape)
+        return mx.fft.irfftn(y_ft * self.otf_conj, s=self.highres_shape)
 
-    return forward, adjoint, operator_norm_sq
+    def __call__(self, x: mx.array) -> mx.array:
+        """Apply forward model (callable interface)."""
+        return self.forward(x)
+
+
+# Factory functions for backward compatibility and convenience
+def make_fft_convolver(
+    kernel: Union[np.ndarray, mx.array],
+    normalize: bool = True,
+) -> Tuple[Callable[[mx.array], mx.array], Callable[[mx.array], mx.array]]:
+    """Create FFT-based forward and adjoint convolution operators.
+
+    This is a convenience function that returns callable functions.
+    For more control, use the FFTConvolver class directly.
+
+    Args:
+        kernel: The convolution kernel (2D or 3D).
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (forward, adjoint) of callable functions.
+
+    See Also:
+        FFTConvolver: Class-based interface with explicit OTF storage.
+    """
+    conv = FFTConvolver(kernel, normalize=normalize)
+    return conv.forward, conv.adjoint
+
+
+def make_binned_convolver(
+    kernel: Union[np.ndarray, mx.array],
+    factors: Union[int, Tuple[int, ...]],
+    normalize: bool = True,
+) -> Tuple[Callable[[mx.array], mx.array], Callable[[mx.array], mx.array], float]:
+    """Create convolution + binning operators.
+
+    This is a convenience function that returns callable functions.
+    For more control, use the BinnedConvolver class directly.
+
+    Args:
+        kernel: High-resolution PSF kernel (2D or 3D).
+        factors: Downsampling factor(s).
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (forward, adjoint, operator_norm_sq).
+
+    See Also:
+        BinnedConvolver: Class-based interface with explicit state.
+    """
+    conv = BinnedConvolver(kernel, factors, normalize=normalize)
+    return conv.forward, conv.adjoint, conv.operator_norm_sq

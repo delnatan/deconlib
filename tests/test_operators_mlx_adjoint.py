@@ -391,11 +391,11 @@ def test_downsample_upsample_adjoint():
 
 
 def test_fft_convolver_adjoint():
-    """Test make_fft_convolver forward/adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import make_fft_convolver
+    """Test FFTConvolver forward/adjoint pair (class and factory)."""
+    from deconlib.deconvolution.operators_mlx import FFTConvolver, make_fft_convolver
 
     print("\n" + "="*60)
-    print("Testing make_fft_convolver (FFT convolution / correlation)")
+    print("Testing FFTConvolver (FFT convolution / correlation)")
     print("="*60)
 
     all_passed = True
@@ -413,13 +413,15 @@ def test_fft_convolver_adjoint():
         kernel = mx.abs(kernel)  # Make positive
         kernel = kernel / mx.sum(kernel)  # Normalize
 
-        C, C_adj = make_fft_convolver(kernel, normalize=False)
+        # Test class-based interface
+        C = FFTConvolver(kernel, normalize=False)
 
         x = mx.random.normal(shape)
         y = mx.random.normal(shape)
 
+        # Test __call__ interface
         Cx = C(x)
-        C_adj_y = C_adj(y)
+        C_adj_y = C.adjoint(y)
 
         # Adjoint test: <Cx, y> = <x, C_adj(y)>
         lhs = mx.sum(Cx * y).item()
@@ -438,17 +440,35 @@ def test_fft_convolver_adjoint():
             print(f"       [FAIL] Shape mismatch: Cx={Cx.shape}, C*y={C_adj_y.shape}")
             passed = False
 
+        # Verify OTF is stored
+        if C.otf is None:
+            print(f"       [FAIL] OTF not stored")
+            passed = False
+
         all_passed = all_passed and passed
+
+    # Test factory function returns bound methods
+    print("  Testing factory function compatibility...")
+    kernel = mx.abs(mx.random.normal((16, 16)))
+    fwd, adj = make_fft_convolver(kernel)
+    x = mx.random.normal((16, 16))
+    y = mx.random.normal((16, 16))
+    lhs = mx.sum(fwd(x) * y).item()
+    rhs = mx.sum(x * adj(y)).item()
+    err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-10)
+    factory_ok = err < RTOL
+    print(f"  [{'PASS' if factory_ok else 'FAIL'}] Factory function: err={err:.2e}")
+    all_passed = all_passed and factory_ok
 
     return all_passed
 
 
 def test_binned_convolver_adjoint():
-    """Test make_binned_convolver forward/adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import make_binned_convolver
+    """Test BinnedConvolver forward/adjoint pair (class and factory)."""
+    from deconlib.deconvolution.operators_mlx import BinnedConvolver, make_binned_convolver
 
     print("\n" + "="*60)
-    print("Testing make_binned_convolver (convolution + binning)")
+    print("Testing BinnedConvolver (convolution + binning)")
     print("="*60)
 
     all_passed = True
@@ -473,14 +493,16 @@ def test_binned_convolver_adjoint():
         kernel = mx.abs(kernel)
         kernel = kernel / mx.sum(kernel)
 
-        A, A_adj, norm_sq = make_binned_convolver(kernel, factors, normalize=False)
+        # Test class-based interface
+        A = BinnedConvolver(kernel, factors, normalize=False)
 
         # x lives on highres grid, y lives on lowres grid
         x = mx.random.normal(highres_shape)
         y = mx.random.normal(lowres_shape)
 
+        # Test __call__ interface
         Ax = A(x)  # highres -> lowres
-        A_adj_y = A_adj(y)  # lowres -> highres
+        A_adj_y = A.adjoint(y)  # lowres -> highres
 
         # Adjoint test: <Ax, y> = <x, A_adj(y)>
         lhs = mx.sum(Ax * y).item()
@@ -492,7 +514,7 @@ def test_binned_convolver_adjoint():
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] {desc}: <Ax,y>={lhs:.8f}, <x,A*y>={rhs:.8f}, err={err:.2e}")
-        print(f"       norm_sq estimate: {norm_sq:.2f}")
+        print(f"       norm_sq: {A.operator_norm_sq:.2f}, shapes: {A.highres_shape} -> {A.lowres_shape}")
 
         # Verify shapes
         shape_ok = Ax.shape == lowres_shape and A_adj_y.shape == highres_shape
@@ -500,7 +522,25 @@ def test_binned_convolver_adjoint():
             print(f"       [FAIL] Shape mismatch: Ax={Ax.shape}, A*y={A_adj_y.shape}")
             passed = False
 
+        # Verify stored shapes match
+        if A.lowres_shape != lowres_shape or A.highres_shape != highres_shape:
+            print(f"       [FAIL] Stored shape mismatch")
+            passed = False
+
         all_passed = all_passed and passed
+
+    # Test factory function
+    print("  Testing factory function compatibility...")
+    kernel = mx.abs(mx.random.normal((16, 16)))
+    fwd, adj, norm_sq = make_binned_convolver(kernel, 2)
+    x = mx.random.normal((16, 16))
+    y = mx.random.normal((8, 8))
+    lhs = mx.sum(fwd(x) * y).item()
+    rhs = mx.sum(x * adj(y)).item()
+    err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-10)
+    factory_ok = err < RTOL
+    print(f"  [{'PASS' if factory_ok else 'FAIL'}] Factory function: err={err:.2e}")
+    all_passed = all_passed and factory_ok
 
     return all_passed
 
