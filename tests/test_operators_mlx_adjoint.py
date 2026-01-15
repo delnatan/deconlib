@@ -391,8 +391,8 @@ def test_downsample_upsample_adjoint():
 
 
 def test_fft_convolver_adjoint():
-    """Test FFTConvolver forward/adjoint pair (class and factory)."""
-    from deconlib.deconvolution.operators_mlx import FFTConvolver, make_fft_convolver
+    """Test FFTConvolver forward/adjoint pair."""
+    from deconlib.deconvolution.operators_mlx import FFTConvolver
 
     print("\n" + "="*60)
     print("Testing FFTConvolver (FFT convolution / correlation)")
@@ -447,25 +447,12 @@ def test_fft_convolver_adjoint():
 
         all_passed = all_passed and passed
 
-    # Test factory function returns bound methods
-    print("  Testing factory function compatibility...")
-    kernel = mx.abs(mx.random.normal((16, 16)))
-    fwd, adj = make_fft_convolver(kernel)
-    x = mx.random.normal((16, 16))
-    y = mx.random.normal((16, 16))
-    lhs = mx.sum(fwd(x) * y).item()
-    rhs = mx.sum(x * adj(y)).item()
-    err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-10)
-    factory_ok = err < RTOL
-    print(f"  [{'PASS' if factory_ok else 'FAIL'}] Factory function: err={err:.2e}")
-    all_passed = all_passed and factory_ok
-
     return all_passed
 
 
 def test_binned_convolver_adjoint():
-    """Test BinnedConvolver forward/adjoint pair (class and factory)."""
-    from deconlib.deconvolution.operators_mlx import BinnedConvolver, make_binned_convolver
+    """Test BinnedConvolver forward/adjoint pair."""
+    from deconlib.deconvolution.operators_mlx import BinnedConvolver
 
     print("\n" + "="*60)
     print("Testing BinnedConvolver (convolution + binning)")
@@ -529,19 +516,6 @@ def test_binned_convolver_adjoint():
 
         all_passed = all_passed and passed
 
-    # Test factory function
-    print("  Testing factory function compatibility...")
-    kernel = mx.abs(mx.random.normal((16, 16)))
-    fwd, adj, norm_sq = make_binned_convolver(kernel, 2)
-    x = mx.random.normal((16, 16))
-    y = mx.random.normal((8, 8))
-    lhs = mx.sum(fwd(x) * y).item()
-    rhs = mx.sum(x * adj(y)).item()
-    err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-10)
-    factory_ok = err < RTOL
-    print(f"  [{'PASS' if factory_ok else 'FAIL'}] Factory function: err={err:.2e}")
-    all_passed = all_passed and factory_ok
-
     return all_passed
 
 
@@ -562,8 +536,8 @@ def main():
     results["grad_3d/grad_3d_adj"] = test_grad_3d_adjoint()
     results["hessian_3d/hessian_3d_adj"] = test_hessian_3d_adjoint()
     results["downsample/upsample"] = test_downsample_upsample_adjoint()
-    results["make_fft_convolver"] = test_fft_convolver_adjoint()
-    results["make_binned_convolver"] = test_binned_convolver_adjoint()
+    results["FFTConvolver"] = test_fft_convolver_adjoint()
+    results["BinnedConvolver"] = test_binned_convolver_adjoint()
 
     # Summary
     print("\n" + "="*60)
