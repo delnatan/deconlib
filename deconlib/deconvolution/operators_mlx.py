@@ -45,8 +45,8 @@ def d1_cen(f, axis=-1):
     with the centered second derivative stencil.
     """
     f = mx.swapaxes(f, axis, 0)
-    fpad = mx.concatenate([f[1:], f, f[-1:]], axis=0)
-    result = (fpad[2:] - fpad[:-2]) / 2
+    fpad = mx.concatenate([f[:1], f, f[-1:]], axis=0)
+    result = (fpad[2:] - fpad[:-2]) / 2.0
     return mx.swapaxes(result, axis, 0)
 
 
@@ -101,19 +101,20 @@ def hessian_2d(f):
     H_xx = d2(f, axis=1)
     # H_xy = d/dx (d/dy f), start from outermost axis first
     H_xy = d1_cen(d1_cen(f, axis=0), axis=1)
-    return [H_yy, H_xx, SQRT2 * H_yx]
+    return mx.stack([H_yy, H_xx, SQRT2 * H_xy], axis=0)
 
 
 def hessian_2d_adj(H_list):
     """
     Adjoint of 2D Hessian
-    Input: List [H_yy, H_xx, H_xy]
+    Input: stacked array [H_yy, H_xx, H_xy]
     """
-    H_yy, H_xx, H_xy = H_list
+    H_yy = H_list[0]
+    H_xx = H_list[1]
+    H_xy = H_list[2]
 
     adj_yy = d2_adj(H_yy, axis=0)
     adj_xx = d2_adj(H_xx, axis=1)
-
     adj_xy = d1_cen_adj(d1_cen_adj(H_xy, axis=0), axis=1)
 
     return adj_yy + adj_xx + SQRT2 * adj_xy
