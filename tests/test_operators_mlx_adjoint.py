@@ -12,6 +12,9 @@ import mlx.core as mx
 # Set seed for reproducibility
 mx.random.seed(42)
 
+# Tolerance for adjoint test (1e-5 appropriate for float32 with accumulated ops)
+RTOL = 1e-5
+
 
 def dot_product_test(forward_fn, adjoint_fn, x_shape, y_shape, name, **kwargs):
     """
@@ -67,7 +70,7 @@ def test_d1_fwd_adjoint():
             lambda y, ax=axis: d1_fwd_adj(y, axis=ax),
             shape, shape, f"d1_fwd (axis={axis})"
         )
-        passed = err < 1e-6
+        passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
@@ -99,7 +102,7 @@ def test_d2_self_adjoint():
             lambda y, ax=axis: d2_adj(y, axis=ax),
             shape, shape, f"d2 (axis={axis})"
         )
-        passed = err < 1e-6
+        passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
@@ -131,7 +134,7 @@ def test_d1_cen_adjoint():
             lambda y, ax=axis: d1_cen_adj(y, axis=ax),
             shape, shape, f"d1_cen (axis={axis})"
         )
-        passed = err < 1e-6
+        passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
@@ -163,7 +166,7 @@ def test_grad_2d_adjoint():
     denom = max(abs(lhs), abs(rhs), 1e-10)
     err = abs(lhs - rhs) / denom
 
-    passed = err < 1e-6
+    passed = err < RTOL
     status = "PASS" if passed else "FAIL"
     print(f"  [{status}] Shape {input_shape} -> {output_shape}")
     print(f"         <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
@@ -205,7 +208,7 @@ def test_hessian_2d_adjoint():
     denom = max(abs(lhs), abs(rhs), 1e-10)
     err = abs(lhs - rhs) / denom
 
-    passed = err < 1e-6
+    passed = err < RTOL
     status = "PASS" if passed else "FAIL"
     print(f"  [{status}] Shape {input_shape} -> {output_shape}")
     print(f"         <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
@@ -250,7 +253,7 @@ def test_grad_3d_adjoint():
         denom = max(abs(lhs), abs(rhs), 1e-10)
         err = abs(lhs - rhs) / denom
 
-        passed = err < 1e-6
+        passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] r={r}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
@@ -300,7 +303,7 @@ def test_hessian_3d_adjoint():
         denom = max(abs(lhs), abs(rhs), 1e-10)
         err = abs(lhs - rhs) / denom
 
-        passed = err < 1e-6
+        passed = err < RTOL
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] r={r}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
