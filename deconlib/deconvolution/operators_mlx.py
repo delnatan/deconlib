@@ -762,17 +762,19 @@ def upsample(y: mx.array, factors: Union[int, Tuple[int, ...]]) -> mx.array:
         return y
 
     # Use reshape + broadcast for efficient replication
-    # E.g., for 2D with factors (2, 2): (H, W) -> (H, 1, W, 1) -> broadcast -> (H, 2, W, 2) -> reshape
+    # Track how many dimensions we've added to calculate correct axis positions
     result = y
+    added_dims = 0
     for axis in range(ndim):
         f = factors[axis]
         if f > 1:
-            # Expand dimension and tile
-            result = mx.expand_dims(result, axis=axis * 2 + 1)
-            # Build tile pattern: all 1s except f at the expanded axis
+            # Calculate axis position in the current (expanded) array
+            current_axis = axis + added_dims
+            result = mx.expand_dims(result, axis=current_axis + 1)
             tile_pattern = [1] * result.ndim
-            tile_pattern[axis * 2 + 1] = f
+            tile_pattern[current_axis + 1] = f
             result = mx.tile(result, tile_pattern)
+            added_dims += 1
 
     # Reshape back to merged dimensions
     output_shape = tuple(s * f for s, f in zip(y.shape, factors))
