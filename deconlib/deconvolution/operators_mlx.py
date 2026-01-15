@@ -485,7 +485,7 @@ class Hessian3D:
         # For d2: ||d2||² = 16, for d1_cen∘d1_cen: ||·||² ≤ 1
         # ||H_3d||² ≤ 16r⁴ + 16 + 16 + 2r² + 2r² + 2
         #          = 16r⁴ + 4r² + 34
-        self.operator_norm_sq = 16.0 * (r ** 4) + 4.0 * (r ** 2) + 34.0
+        self.operator_norm_sq = 16.0 * (r**4) + 4.0 * (r**2) + 34.0
 
     def forward(self, f: mx.array) -> mx.array:
         """Compute weighted Hessian components.
@@ -510,10 +510,9 @@ class Hessian3D:
 
         # Stack and apply weights
         H_stack = mx.stack([H_zz, H_yy, H_xx, H_yz, H_xz, H_xy], axis=0)
-        weights = mx.array([
-            self.r ** 2, 1.0, 1.0,
-            self.r * SQRT2, self.r * SQRT2, SQRT2
-        ])
+        weights = mx.array(
+            [self.r**2, 1.0, 1.0, self.r * SQRT2, self.r * SQRT2, SQRT2]
+        )
         weights = weights.reshape(6, 1, 1, 1)
         return H_stack * weights
 
@@ -527,15 +526,19 @@ class Hessian3D:
             Array of shape (Z, Y, X).
         """
         # Apply weights (same as forward for real diagonal weights)
-        weights = mx.array([
-            self.r ** 2, 1.0, 1.0,
-            self.r * SQRT2, self.r * SQRT2, SQRT2
-        ])
+        weights = mx.array(
+            [self.r**2, 1.0, 1.0, self.r * SQRT2, self.r * SQRT2, SQRT2]
+        )
         weights = weights.reshape(6, 1, 1, 1)
         H_w = H * weights
 
         H_zz, H_yy, H_xx, H_yz, H_xz, H_xy = (
-            H_w[0], H_w[1], H_w[2], H_w[3], H_w[4], H_w[5]
+            H_w[0],
+            H_w[1],
+            H_w[2],
+            H_w[3],
+            H_w[4],
+            H_w[5],
         )
 
         # Apply adjoints
@@ -641,7 +644,12 @@ def hessian_3d_adj(H: mx.array, r: float = 1.0) -> mx.array:
     H_w = H * weights
 
     H_zz, H_yy, H_xx, H_yz, H_xz, H_xy = (
-        H_w[0], H_w[1], H_w[2], H_w[3], H_w[4], H_w[5]
+        H_w[0],
+        H_w[1],
+        H_w[2],
+        H_w[3],
+        H_w[4],
+        H_w[5],
     )
 
     adj_xx = d2_adj(H_xx, axis=2)
@@ -659,7 +667,9 @@ def hessian_3d_adj(H: mx.array, r: float = 1.0) -> mx.array:
 ###############################################################################
 
 
-def _normalize_factors(factors: Union[int, Tuple[int, ...]], ndim: int) -> Tuple[int, ...]:
+def _normalize_factors(
+    factors: Union[int, Tuple[int, ...]], ndim: int
+) -> Tuple[int, ...]:
     """Normalize bin factors to a tuple matching the number of dimensions."""
     if isinstance(factors, int):
         return (factors,) * ndim
@@ -853,6 +863,8 @@ class FFTConvolver:
         # Precompute and store OTF
         self.otf = mx.fft.rfftn(kernel_arr)
 
+        self.axes = tuple(range(-len(self.shape), 0))
+
     @property
     def otf_conj(self) -> mx.array:
         """Conjugate of OTF (computed lazily, cached by MLX)."""
@@ -861,12 +873,14 @@ class FFTConvolver:
     def forward(self, x: mx.array) -> mx.array:
         """Apply forward convolution: y = kernel ⊛ x."""
         x_ft = mx.fft.rfftn(x)
-        return mx.fft.irfftn(x_ft * self.otf, s=self.shape)
+        return mx.fft.irfftn(x_ft * self.otf, axes=self.axes, s=self.shape)
 
     def adjoint(self, y: mx.array) -> mx.array:
         """Apply adjoint (correlation): x = kernel* ⊛ y."""
         y_ft = mx.fft.rfftn(y)
-        return mx.fft.irfftn(y_ft * self.otf_conj, s=self.shape)
+        return mx.fft.irfftn(
+            y_ft * self.otf_conj, axes=self.axes, s=self.shape
+        )
 
     def __call__(self, x: mx.array) -> mx.array:
         """Apply forward convolution (callable interface)."""
@@ -950,6 +964,8 @@ class BinnedConvolver:
         # Precompute and store OTF
         self.otf = mx.fft.rfftn(kernel_arr)
 
+        self.axes = tuple(range(-len(self.highres_shape), 0))
+
         # Operator norm estimate: ||D ∘ C||² ≤ ||D||² · ||C||²
         # For normalized PSF: ||C|| ≤ 1
         # For sum-binning: ||D||² = prod of factors
@@ -968,7 +984,9 @@ class BinnedConvolver:
         """Forward model: A = D ∘ C (convolve then downsample)."""
         # Convolve with PSF
         x_ft = mx.fft.rfftn(x)
-        convolved = mx.fft.irfftn(x_ft * self.otf, s=self.highres_shape)
+        convolved = mx.fft.irfftn(
+            x_ft * self.otf, axes=self.axes, s=self.highres_shape
+        )
         # Downsample (sum-bin)
         return downsample(convolved, self.factors)
 
@@ -978,7 +996,9 @@ class BinnedConvolver:
         upsampled = upsample(y, self.factors)
         # Correlate with PSF (adjoint of convolution)
         y_ft = mx.fft.rfftn(upsampled)
-        return mx.fft.irfftn(y_ft * self.otf_conj, s=self.highres_shape)
+        return mx.fft.irfftn(
+            y_ft * self.otf_conj, axes=self.axes, s=self.highres_shape
+        )
 
     def __call__(self, x: mx.array) -> mx.array:
         """Apply forward model (callable interface)."""
@@ -1013,7 +1033,9 @@ def make_binned_convolver(
     kernel: Union[np.ndarray, mx.array],
     factors: Union[int, Tuple[int, ...]],
     normalize: bool = True,
-) -> Tuple[Callable[[mx.array], mx.array], Callable[[mx.array], mx.array], float]:
+) -> Tuple[
+    Callable[[mx.array], mx.array], Callable[[mx.array], mx.array], float
+]:
     """Create convolution + binning operators.
 
     This is a convenience function that returns callable functions.
