@@ -143,22 +143,26 @@ def test_d1_cen_adjoint():
 
 
 def test_grad_2d_adjoint():
-    """Test grad_2d / grad_2d_adj pair."""
-    from deconlib.deconvolution.operators_mlx import grad_2d, grad_2d_adj
+    """Test Gradient2D class and grad_2d / grad_2d_adj functions."""
+    from deconlib.deconvolution.operators_mlx import Gradient2D, grad_2d, grad_2d_adj
 
     print("\n" + "="*60)
-    print("Testing grad_2d / grad_2d_adj")
+    print("Testing Gradient2D (class and functions)")
     print("="*60)
 
     # Input shape (Y, X), output shape (2, Y, X)
     input_shape = (16, 20)
     output_shape = (2, 16, 20)
 
+    # Test class-based interface
+    D = Gradient2D()
+    print(f"  operator_norm_sq = {D.operator_norm_sq}")
+
     x = mx.random.normal(input_shape)
     y = mx.random.normal(output_shape)
 
-    Lx = grad_2d(x)
-    Lstar_y = grad_2d_adj(y)
+    Lx = D(x)
+    Lstar_y = D.adjoint(y)
 
     lhs = mx.sum(Lx * y).item()
     rhs = mx.sum(x * Lstar_y).item()
@@ -168,39 +172,45 @@ def test_grad_2d_adjoint():
 
     passed = err < RTOL
     status = "PASS" if passed else "FAIL"
-    print(f"  [{status}] Shape {input_shape} -> {output_shape}")
-    print(f"         <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+    print(f"  [{status}] Class: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}")
 
     # Verify shapes
-    print(f"  Input shape: {input_shape}")
-    print(f"  grad_2d output shape: {Lx.shape}")
-    print(f"  grad_2d_adj output shape: {Lstar_y.shape}")
-
     shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
     if not shape_ok:
         print("  [FAIL] Shape mismatch!")
         passed = False
 
+    # Test function interface matches class
+    Lx_func = grad_2d(x)
+    Lstar_y_func = grad_2d_adj(y)
+    func_match = mx.allclose(Lx, Lx_func).item() and mx.allclose(Lstar_y, Lstar_y_func).item()
+    print(f"  [{'PASS' if func_match else 'FAIL'}] Function interface matches class")
+    passed = passed and func_match
+
     return passed
 
 
 def test_hessian_2d_adjoint():
-    """Test hessian_2d / hessian_2d_adj pair."""
-    from deconlib.deconvolution.operators_mlx import hessian_2d, hessian_2d_adj
+    """Test Hessian2D class and hessian_2d / hessian_2d_adj functions."""
+    from deconlib.deconvolution.operators_mlx import Hessian2D, hessian_2d, hessian_2d_adj
 
     print("\n" + "="*60)
-    print("Testing hessian_2d / hessian_2d_adj")
+    print("Testing Hessian2D (class and functions)")
     print("="*60)
 
-    # Input shape (Y, X), output shape (3, Y, X) for [H_yy, H_xx, sqrt(2)*H_xy]
+    # Input shape (Y, X), output shape (3, Y, X)
     input_shape = (16, 20)
     output_shape = (3, 16, 20)
+
+    # Test class-based interface
+    H_op = Hessian2D()
+    print(f"  operator_norm_sq = {H_op.operator_norm_sq}")
 
     x = mx.random.normal(input_shape)
     y = mx.random.normal(output_shape)
 
-    Lx = hessian_2d(x)
-    Lstar_y = hessian_2d_adj(y)
+    Lx = H_op(x)
+    Lstar_y = H_op.adjoint(y)
 
     lhs = mx.sum(Lx * y).item()
     rhs = mx.sum(x * Lstar_y).item()
@@ -210,13 +220,7 @@ def test_hessian_2d_adjoint():
 
     passed = err < RTOL
     status = "PASS" if passed else "FAIL"
-    print(f"  [{status}] Shape {input_shape} -> {output_shape}")
-    print(f"         <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
-
-    # Verify shapes
-    print(f"  Input shape: {input_shape}")
-    print(f"  hessian_2d output shape: {Lx.shape}")
-    print(f"  hessian_2d_adj output shape: {Lstar_y.shape}")
+    print(f"  [{status}] Class: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}")
 
     shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
     if not shape_ok:
@@ -227,11 +231,11 @@ def test_hessian_2d_adjoint():
 
 
 def test_grad_3d_adjoint():
-    """Test grad_3d / grad_3d_adj pair."""
-    from deconlib.deconvolution.operators_mlx import grad_3d, grad_3d_adj
+    """Test Gradient3D class and grad_3d / grad_3d_adj functions."""
+    from deconlib.deconvolution.operators_mlx import Gradient3D, grad_3d, grad_3d_adj
 
     print("\n" + "="*60)
-    print("Testing grad_3d / grad_3d_adj")
+    print("Testing Gradient3D (class and functions)")
     print("="*60)
 
     # Input shape (Z, Y, X), output shape (3, Z, Y, X)
@@ -241,11 +245,15 @@ def test_grad_3d_adjoint():
     all_passed = True
 
     for r in [1.0, 0.5, 2.0]:
+        # Test class-based interface
+        D = Gradient3D(r=r)
+        print(f"  r={r}: operator_norm_sq = {D.operator_norm_sq:.2f}")
+
         x = mx.random.normal(input_shape)
         y = mx.random.normal(output_shape)
 
-        Lx = grad_3d(x, r=r)
-        Lstar_y = grad_3d_adj(y, r=r)
+        Lx = D(x)
+        Lstar_y = D.adjoint(y)
 
         lhs = mx.sum(Lx * y).item()
         rhs = mx.sum(x * Lstar_y).item()
@@ -255,20 +263,14 @@ def test_grad_3d_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] r={r}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+        print(f"  [{status}] r={r}: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
 
-    # Verify shapes (using r=1.0)
+    # Verify shapes
+    D = Gradient3D()
     x = mx.random.normal(input_shape)
-    Lx = grad_3d(x)
-    y = mx.random.normal(output_shape)
-    Lstar_y = grad_3d_adj(y)
-
-    print(f"  Input shape: {input_shape}")
-    print(f"  grad_3d output shape: {Lx.shape}")
-    print(f"  grad_3d_adj output shape: {Lstar_y.shape}")
-
-    shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
+    Lx = D(x)
+    shape_ok = Lx.shape == output_shape
     if not shape_ok:
         print("  [FAIL] Shape mismatch!")
         all_passed = False
@@ -277,11 +279,11 @@ def test_grad_3d_adjoint():
 
 
 def test_hessian_3d_adjoint():
-    """Test hessian_3d / hessian_3d_adj pair."""
-    from deconlib.deconvolution.operators_mlx import hessian_3d, hessian_3d_adj
+    """Test Hessian3D class and hessian_3d / hessian_3d_adj functions."""
+    from deconlib.deconvolution.operators_mlx import Hessian3D, hessian_3d, hessian_3d_adj
 
     print("\n" + "="*60)
-    print("Testing hessian_3d / hessian_3d_adj")
+    print("Testing Hessian3D (class and functions)")
     print("="*60)
 
     # Input shape (Z, Y, X), output shape (6, Z, Y, X)
@@ -291,11 +293,15 @@ def test_hessian_3d_adjoint():
     all_passed = True
 
     for r in [1.0, 0.5, 2.0]:
+        # Test class-based interface
+        H_op = Hessian3D(r=r)
+        print(f"  r={r}: operator_norm_sq = {H_op.operator_norm_sq:.2f}")
+
         x = mx.random.normal(input_shape)
         y = mx.random.normal(output_shape)
 
-        Lx = hessian_3d(x, r=r)
-        Lstar_y = hessian_3d_adj(y, r=r)
+        Lx = H_op(x)
+        Lstar_y = H_op.adjoint(y)
 
         lhs = mx.sum(Lx * y).item()
         rhs = mx.sum(x * Lstar_y).item()
@@ -305,20 +311,14 @@ def test_hessian_3d_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] r={r}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+        print(f"  [{status}] r={r}: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}")
         all_passed = all_passed and passed
 
-    # Verify shapes (using r=1.0)
+    # Verify shapes
+    H_op = Hessian3D()
     x = mx.random.normal(input_shape)
-    Lx = hessian_3d(x)
-    y = mx.random.normal(output_shape)
-    Lstar_y = hessian_3d_adj(y)
-
-    print(f"  Input shape: {input_shape}")
-    print(f"  hessian_3d output shape: {Lx.shape}")
-    print(f"  hessian_3d_adj output shape: {Lstar_y.shape}")
-
-    shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
+    Lx = H_op(x)
+    shape_ok = Lx.shape == output_shape
     if not shape_ok:
         print("  [FAIL] Shape mismatch!")
         all_passed = False

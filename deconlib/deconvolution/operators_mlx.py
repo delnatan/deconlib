@@ -158,6 +158,141 @@ d2_adj = d2
 ###############################################################################
 
 
+class Gradient2D:
+    """2D gradient operator for total variation regularization.
+
+    Computes the discrete gradient ∇f = (∂f/∂y, ∂f/∂x) using forward
+    differences with Neumann boundary conditions.
+
+    Attributes:
+        operator_norm_sq: Spectral norm squared ||∇||² = 8
+
+    Example:
+        # Create operator
+        D = Gradient2D()
+
+        # Apply to image
+        grad = D(image)  # shape: (2, H, W)
+
+        # Adjoint (negative divergence)
+        div = D.adjoint(grad)  # shape: (H, W)
+
+        # For Chambolle-Pock step sizes
+        sigma = 1.0 / D.operator_norm_sq
+
+    Note:
+        The spectral norm ||∇||² = 8 comes from the eigenvalues of
+        ∇ᵀ∇ = -Δ (negative Laplacian) with Neumann BC.
+    """
+
+    def __init__(self):
+        """Initialize 2D gradient operator."""
+        # Spectral norm: ||∇||² = ||D_y||² + ||D_x||² = 4 + 4 = 8
+        # This is tight for large arrays with Neumann BC
+        self.operator_norm_sq = 8.0
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute gradient: ∇f = (∂f/∂y, ∂f/∂x).
+
+        Args:
+            f: Input 2D array of shape (H, W).
+
+        Returns:
+            Stacked gradient of shape (2, H, W).
+        """
+        g_y = d1_fwd(f, axis=0)
+        g_x = d1_fwd(f, axis=1)
+        return mx.stack([g_y, g_x], axis=0)
+
+    def adjoint(self, g: mx.array) -> mx.array:
+        """Compute negative divergence: -div(g).
+
+        Args:
+            g: Stacked gradient of shape (2, H, W).
+
+        Returns:
+            Array of shape (H, W).
+        """
+        g_y, g_x = g[0], g[1]
+        return d1_fwd_adj(g_y, axis=0) + d1_fwd_adj(g_x, axis=1)
+
+    def __call__(self, f: mx.array) -> mx.array:
+        """Apply gradient operator."""
+        return self.forward(f)
+
+
+class Gradient3D:
+    """3D gradient operator with anisotropic voxel spacing.
+
+    Computes the discrete gradient ∇f = (∂f/∂z, ∂f/∂y, ∂f/∂x) with
+    optional weighting for anisotropic voxels (common in microscopy).
+
+    Attributes:
+        r: Voxel spacing ratio (lateral/axial)
+        operator_norm_sq: Spectral norm squared, accounts for anisotropy
+
+    Example:
+        # Confocal: 100nm XY, 300nm Z spacing
+        D = Gradient3D(r=3.0)
+
+        # Apply gradient
+        grad = D(volume)  # shape: (3, Z, Y, X)
+
+        # For Chambolle-Pock
+        sigma = 1.0 / D.operator_norm_sq
+
+    Note:
+        The spectral norm ||∇_r||² = 4r² + 8 accounts for the
+        weighted Z derivative contribution.
+    """
+
+    def __init__(self, r: float = 1.0):
+        """Initialize 3D gradient operator.
+
+        Args:
+            r: Ratio of lateral (XY) to axial (Z) pixel size.
+               r > 1 means Z spacing is larger (typical in microscopy).
+        """
+        self.r = r
+        # Spectral norm: ||∇_r||² = r²||D_z||² + ||D_y||² + ||D_x||²
+        # = 4r² + 4 + 4 = 4(r² + 2)
+        self.operator_norm_sq = 4.0 * (r * r + 2.0)
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute weighted gradient.
+
+        Args:
+            f: Input 3D array of shape (Z, Y, X).
+
+        Returns:
+            Stacked gradient of shape (3, Z, Y, X).
+        """
+        g_z = self.r * d1_fwd(f, axis=0)
+        g_y = d1_fwd(f, axis=1)
+        g_x = d1_fwd(f, axis=2)
+        return mx.stack([g_z, g_y, g_x], axis=0)
+
+    def adjoint(self, g: mx.array) -> mx.array:
+        """Compute weighted negative divergence.
+
+        Args:
+            g: Stacked gradient of shape (3, Z, Y, X).
+
+        Returns:
+            Array of shape (Z, Y, X).
+        """
+        g_z, g_y, g_x = g[0], g[1], g[2]
+        adj_z = d1_fwd_adj(self.r * g_z, axis=0)
+        adj_y = d1_fwd_adj(g_y, axis=1)
+        adj_x = d1_fwd_adj(g_x, axis=2)
+        return adj_z + adj_y + adj_x
+
+    def __call__(self, f: mx.array) -> mx.array:
+        """Apply gradient operator."""
+        return self.forward(f)
+
+
+# Backward-compatible function wrappers
 def grad_2d(f: mx.array) -> mx.array:
     """2D gradient operator using forward differences.
 
@@ -172,13 +307,8 @@ def grad_2d(f: mx.array) -> mx.array:
             - [0]: ∂f/∂y (derivative along axis 0)
             - [1]: ∂f/∂x (derivative along axis 1)
 
-    Example:
-        grad = grad_2d(image)  # shape: (2, H, W)
-        grad_y, grad_x = grad[0], grad[1]
-
-    Note:
-        Used for total variation (TV) regularization. The adjoint is
-        `grad_2d_adj` (negative divergence).
+    See Also:
+        Gradient2D: Class-based interface with spectral norm.
     """
     g_y = d1_fwd(f, axis=0)
     g_x = d1_fwd(f, axis=1)
@@ -188,18 +318,14 @@ def grad_2d(f: mx.array) -> mx.array:
 def grad_2d_adj(g: mx.array) -> mx.array:
     """Adjoint of 2D gradient (negative divergence).
 
-    Computes -div(g) = -(∂g_y/∂y + ∂g_x/∂x), the adjoint of the gradient
-    operator, satisfying: <grad_2d(f), g> = <f, grad_2d_adj(g)>
-
     Args:
         g: Stacked gradient array of shape (2, H, W).
 
     Returns:
         Array of shape (H, W).
 
-    Note:
-        In variational methods, this appears in the gradient of TV:
-        ∇TV(f) involves grad_2d_adj applied to normalized gradients.
+    See Also:
+        Gradient2D: Class-based interface with spectral norm.
     """
     g_y, g_x = g[0], g[1]
     return d1_fwd_adj(g_y, axis=0) + d1_fwd_adj(g_x, axis=1)
@@ -208,45 +334,24 @@ def grad_2d_adj(g: mx.array) -> mx.array:
 def grad_3d(f: mx.array, r: float = 1.0) -> mx.array:
     """3D gradient operator with anisotropic voxel spacing.
 
-    Computes the discrete gradient ∇f = (∂f/∂z, ∂f/∂y, ∂f/∂x) using
-    forward differences, with optional weighting for anisotropic voxels.
-
     Args:
         f: Input 3D array of shape (Z, Y, X).
         r: Ratio of lateral (XY) to axial (Z) pixel size. Default 1.0.
-            - r > 1: Z spacing larger than XY (typical in microscopy)
-            - r < 1: Z spacing smaller than XY
-            The Z derivative is scaled by r to account for physical spacing.
 
     Returns:
-        Stacked gradient array of shape (3, Z, Y, X) where:
-            - [0]: r * ∂f/∂z (weighted Z derivative)
-            - [1]: ∂f/∂y
-            - [2]: ∂f/∂x
+        Stacked gradient array of shape (3, Z, Y, X).
 
-    Example:
-        # Confocal microscopy: 100nm XY, 300nm Z -> r = 3.0
-        grad = grad_3d(volume, r=3.0)
-
-    Note:
-        The weighting ensures isotropic regularization in physical space.
-        The adjoint is `grad_3d_adj(g, r)`.
+    See Also:
+        Gradient3D: Class-based interface with spectral norm.
     """
-    g_z = d1_fwd(f, axis=0)
+    g_z = r * d1_fwd(f, axis=0)
     g_y = d1_fwd(f, axis=1)
     g_x = d1_fwd(f, axis=2)
-
-    # Weight Z derivative by voxel spacing ratio
-    g_z = r * g_z
-
     return mx.stack([g_z, g_y, g_x], axis=0)
 
 
 def grad_3d_adj(g: mx.array, r: float = 1.0) -> mx.array:
     """Adjoint of 3D gradient (negative divergence).
-
-    Computes the adjoint of `grad_3d`, satisfying:
-        <grad_3d(f, r), g> = <f, grad_3d_adj(g, r)>
 
     Args:
         g: Stacked gradient array of shape (3, Z, Y, X).
@@ -254,13 +359,14 @@ def grad_3d_adj(g: mx.array, r: float = 1.0) -> mx.array:
 
     Returns:
         Array of shape (Z, Y, X).
+
+    See Also:
+        Gradient3D: Class-based interface with spectral norm.
     """
     g_z, g_y, g_x = g[0], g[1], g[2]
-
     adj_z = d1_fwd_adj(r * g_z, axis=0)
     adj_y = d1_fwd_adj(g_y, axis=1)
     adj_x = d1_fwd_adj(g_x, axis=2)
-
     return adj_z + adj_y + adj_x
 
 
@@ -269,12 +375,187 @@ def grad_3d_adj(g: mx.array, r: float = 1.0) -> mx.array:
 ###############################################################################
 
 
-def hessian_2d(f: mx.array) -> mx.array:
-    """2D Hessian operator for second-order regularization.
+class Hessian2D:
+    """2D Hessian operator for second-order (Hessian-Schatten) regularization.
 
     Computes the Hessian matrix components of a 2D field. The off-diagonal
     term is scaled by √2 so the Frobenius norm equals the nuclear norm
     for symmetric matrices.
+
+    Attributes:
+        operator_norm_sq: Spectral norm squared ||H||²
+
+    Example:
+        # Create operator
+        H_op = Hessian2D()
+
+        # Apply to image
+        H = H_op(image)  # shape: (3, H, W)
+
+        # Adjoint
+        adj = H_op.adjoint(H)  # shape: (H, W)
+
+        # For Chambolle-Pock step sizes
+        sigma = 1.0 / H_op.operator_norm_sq
+
+    Note:
+        The Hessian-Schatten norm promotes piecewise-linear solutions,
+        producing smoother results than TV with fewer staircasing artifacts.
+    """
+
+    def __init__(self):
+        """Initialize 2D Hessian operator."""
+        # Spectral norm bound for 2D Hessian
+        # ||H||² = ||[d2_y; d2_x; √2 d_xy]||²
+        # Conservative upper bound: 16 + 16 + 2 = 34
+        # Tighter empirical bound commonly used: 48
+        self.operator_norm_sq = 48.0
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute Hessian components.
+
+        Args:
+            f: Input 2D array of shape (H, W).
+
+        Returns:
+            Stacked Hessian of shape (3, H, W):
+                [0]: H_yy, [1]: H_xx, [2]: √2 * H_xy
+        """
+        H_yy = d2(f, axis=0)
+        H_xx = d2(f, axis=1)
+        H_xy = d1_cen(d1_cen(f, axis=0), axis=1)
+        return mx.stack([H_yy, H_xx, SQRT2 * H_xy], axis=0)
+
+    def adjoint(self, H: mx.array) -> mx.array:
+        """Compute adjoint of Hessian.
+
+        Args:
+            H: Stacked Hessian of shape (3, H, W).
+
+        Returns:
+            Array of shape (H, W).
+        """
+        H_yy, H_xx, H_xy = H[0], H[1], H[2]
+        adj_yy = d2_adj(H_yy, axis=0)
+        adj_xx = d2_adj(H_xx, axis=1)
+        adj_xy = d1_cen_adj(d1_cen_adj(H_xy, axis=0), axis=1)
+        return adj_yy + adj_xx + SQRT2 * adj_xy
+
+    def __call__(self, f: mx.array) -> mx.array:
+        """Apply Hessian operator."""
+        return self.forward(f)
+
+
+class Hessian3D:
+    """3D Hessian operator with anisotropic voxel spacing.
+
+    Computes all 6 unique components of the symmetric 3D Hessian matrix,
+    with appropriate weighting for anisotropic voxels. Off-diagonal terms
+    are scaled by √2 for Frobenius norm consistency.
+
+    Attributes:
+        r: Voxel spacing ratio (lateral/axial)
+        operator_norm_sq: Spectral norm squared, accounts for anisotropy
+
+    Example:
+        # Confocal: 100nm XY, 300nm Z spacing
+        H_op = Hessian3D(r=3.0)
+
+        # Apply Hessian
+        H = H_op(volume)  # shape: (6, Z, Y, X)
+
+        # For Chambolle-Pock
+        sigma = 1.0 / H_op.operator_norm_sq
+
+    Note:
+        Output order: [r²H_zz, H_yy, H_xx, r√2 H_yz, r√2 H_xz, √2 H_xy]
+        The weighting ensures physically isotropic regularization.
+    """
+
+    def __init__(self, r: float = 1.0):
+        """Initialize 3D Hessian operator.
+
+        Args:
+            r: Ratio of lateral (XY) to axial (Z) pixel size.
+               r > 1 means Z spacing is larger (typical in microscopy).
+        """
+        self.r = r
+        # Spectral norm for weighted 3D Hessian
+        # Contributions: r⁴||d2_z||² + ||d2_y||² + ||d2_x||² + mixed terms
+        # For d2: ||d2||² = 16, for d1_cen∘d1_cen: ||·||² ≤ 1
+        # ||H_3d||² ≤ 16r⁴ + 16 + 16 + 2r² + 2r² + 2
+        #          = 16r⁴ + 4r² + 34
+        self.operator_norm_sq = 16.0 * (r ** 4) + 4.0 * (r ** 2) + 34.0
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute weighted Hessian components.
+
+        Args:
+            f: Input 3D array of shape (Z, Y, X).
+
+        Returns:
+            Stacked Hessian of shape (6, Z, Y, X).
+        """
+        # Diagonal second derivatives
+        H_zz = d2(f, axis=0)
+        H_yy = d2(f, axis=1)
+        H_xx = d2(f, axis=2)
+
+        # Mixed partials using centered differences
+        Dz = d1_cen(f, axis=0)
+        Dy = d1_cen(f, axis=1)
+        H_xy = d1_cen(Dy, axis=2)
+        H_xz = d1_cen(Dz, axis=2)
+        H_yz = d1_cen(Dz, axis=1)
+
+        # Stack and apply weights
+        H_stack = mx.stack([H_zz, H_yy, H_xx, H_yz, H_xz, H_xy], axis=0)
+        weights = mx.array([
+            self.r ** 2, 1.0, 1.0,
+            self.r * SQRT2, self.r * SQRT2, SQRT2
+        ])
+        weights = weights.reshape(6, 1, 1, 1)
+        return H_stack * weights
+
+    def adjoint(self, H: mx.array) -> mx.array:
+        """Compute adjoint of weighted Hessian.
+
+        Args:
+            H: Stacked Hessian of shape (6, Z, Y, X).
+
+        Returns:
+            Array of shape (Z, Y, X).
+        """
+        # Apply weights (same as forward for real diagonal weights)
+        weights = mx.array([
+            self.r ** 2, 1.0, 1.0,
+            self.r * SQRT2, self.r * SQRT2, SQRT2
+        ])
+        weights = weights.reshape(6, 1, 1, 1)
+        H_w = H * weights
+
+        H_zz, H_yy, H_xx, H_yz, H_xz, H_xy = (
+            H_w[0], H_w[1], H_w[2], H_w[3], H_w[4], H_w[5]
+        )
+
+        # Apply adjoints
+        adj_xx = d2_adj(H_xx, axis=2)
+        adj_yy = d2_adj(H_yy, axis=1)
+        adj_zz = d2_adj(H_zz, axis=0)
+        adj_xy = d1_cen_adj(d1_cen_adj(H_xy, axis=2), axis=1)
+        adj_xz = d1_cen_adj(d1_cen_adj(H_xz, axis=2), axis=0)
+        adj_yz = d1_cen_adj(d1_cen_adj(H_yz, axis=1), axis=0)
+
+        return adj_xx + adj_yy + adj_zz + adj_xy + adj_xz + adj_yz
+
+    def __call__(self, f: mx.array) -> mx.array:
+        """Apply Hessian operator."""
+        return self.forward(f)
+
+
+# Backward-compatible function wrappers
+def hessian_2d(f: mx.array) -> mx.array:
+    """2D Hessian operator for second-order regularization.
 
     Args:
         f: Input 2D array of shape (H, W).
@@ -285,18 +566,11 @@ def hessian_2d(f: mx.array) -> mx.array:
             - [1]: ∂²f/∂x² (H_xx)
             - [2]: √2 * ∂²f/∂x∂y (scaled H_xy)
 
-    Example:
-        H = hessian_2d(image)
-        H_yy, H_xx, H_xy_scaled = H[0], H[1], H[2]
-
-    Note:
-        Used for Hessian-Schatten norm regularization which promotes
-        piecewise-linear solutions (fewer discontinuities than TV).
-        The adjoint is `hessian_2d_adj`.
+    See Also:
+        Hessian2D: Class-based interface with spectral norm.
     """
     H_yy = d2(f, axis=0)
     H_xx = d2(f, axis=1)
-    # Mixed partial: d/dx(d/dy f) using centered differences for grid alignment
     H_xy = d1_cen(d1_cen(f, axis=0), axis=1)
     return mx.stack([H_yy, H_xx, SQRT2 * H_xy], axis=0)
 
@@ -304,83 +578,53 @@ def hessian_2d(f: mx.array) -> mx.array:
 def hessian_2d_adj(H: mx.array) -> mx.array:
     """Adjoint of 2D Hessian operator.
 
-    Computes the adjoint of `hessian_2d`, satisfying:
-        <hessian_2d(f), H> = <f, hessian_2d_adj(H)>
-
     Args:
         H: Stacked Hessian array of shape (3, H, W).
 
     Returns:
         Array of shape (H, W).
-    """
-    H_yy = H[0]
-    H_xx = H[1]
-    H_xy = H[2]
 
+    See Also:
+        Hessian2D: Class-based interface with spectral norm.
+    """
+    H_yy, H_xx, H_xy = H[0], H[1], H[2]
     adj_yy = d2_adj(H_yy, axis=0)
     adj_xx = d2_adj(H_xx, axis=1)
     adj_xy = d1_cen_adj(d1_cen_adj(H_xy, axis=0), axis=1)
-
     return adj_yy + adj_xx + SQRT2 * adj_xy
 
 
 def hessian_3d(f: mx.array, r: float = 1.0) -> mx.array:
     """3D Hessian operator with anisotropic voxel spacing.
 
-    Computes all 6 unique components of the 3D Hessian matrix (symmetric),
-    with appropriate weighting for anisotropic voxels. Off-diagonal terms
-    are scaled by √2 for Frobenius norm consistency.
-
     Args:
         f: Input 3D array of shape (Z, Y, X).
         r: Ratio of lateral (XY) to axial (Z) pixel size. Default 1.0.
 
     Returns:
-        Stacked Hessian array of shape (6, Z, Y, X) where:
-            - [0]: r² * ∂²f/∂z² (H_zz, weighted)
-            - [1]: ∂²f/∂y² (H_yy)
-            - [2]: ∂²f/∂x² (H_xx)
-            - [3]: r√2 * ∂²f/∂y∂z (H_yz, weighted)
-            - [4]: r√2 * ∂²f/∂x∂z (H_xz, weighted)
-            - [5]: √2 * ∂²f/∂x∂y (H_xy)
+        Stacked Hessian array of shape (6, Z, Y, X).
 
-    Example:
-        # Confocal microscopy with anisotropic voxels
-        H = hessian_3d(volume, r=3.0)
-
-    Note:
-        The weighting by r ensures physically isotropic regularization.
-        Used for 3D Hessian-Schatten norm regularization.
-        The adjoint is `hessian_3d_adj(H, r)`.
+    See Also:
+        Hessian3D: Class-based interface with spectral norm.
     """
-    # Diagonal second derivatives
     H_zz = d2(f, axis=0)
     H_yy = d2(f, axis=1)
     H_xx = d2(f, axis=2)
 
-    # Mixed partials using centered differences
     Dz = d1_cen(f, axis=0)
     Dy = d1_cen(f, axis=1)
-
     H_xy = d1_cen(Dy, axis=2)
     H_xz = d1_cen(Dz, axis=2)
     H_yz = d1_cen(Dz, axis=1)
 
-    # Stack and apply weights vectorized
     H_stack = mx.stack([H_zz, H_yy, H_xx, H_yz, H_xz, H_xy], axis=0)
-
-    # Weights: [r², 1, 1, r√2, r√2, √2]
     weights = mx.array([r**2, 1.0, 1.0, r * SQRT2, r * SQRT2, SQRT2])
     weights = weights.reshape(6, 1, 1, 1)
-
     return H_stack * weights
 
 
 def hessian_3d_adj(H: mx.array, r: float = 1.0) -> mx.array:
     """Adjoint of 3D Hessian operator.
-
-    Computes the adjoint of `hessian_3d`, satisfying:
-        <hessian_3d(f, r), H> = <f, hessian_3d_adj(H, r)>
 
     Args:
         H: Stacked Hessian array of shape (6, Z, Y, X).
@@ -388,23 +632,21 @@ def hessian_3d_adj(H: mx.array, r: float = 1.0) -> mx.array:
 
     Returns:
         Array of shape (Z, Y, X).
+
+    See Also:
+        Hessian3D: Class-based interface with spectral norm.
     """
-    # Apply weights (same as forward, since weights are real and diagonal)
     weights = mx.array([r**2, 1.0, 1.0, r * SQRT2, r * SQRT2, SQRT2])
     weights = weights.reshape(6, 1, 1, 1)
     H_w = H * weights
 
-    # Unpack weighted components
     H_zz, H_yy, H_xx, H_yz, H_xz, H_xy = (
         H_w[0], H_w[1], H_w[2], H_w[3], H_w[4], H_w[5]
     )
 
-    # Apply adjoints of second derivatives (d2 is self-adjoint)
     adj_xx = d2_adj(H_xx, axis=2)
     adj_yy = d2_adj(H_yy, axis=1)
     adj_zz = d2_adj(H_zz, axis=0)
-
-    # Apply adjoints of mixed partials
     adj_xy = d1_cen_adj(d1_cen_adj(H_xy, axis=2), axis=1)
     adj_xz = d1_cen_adj(d1_cen_adj(H_xz, axis=2), axis=0)
     adj_yz = d1_cen_adj(d1_cen_adj(H_yz, axis=1), axis=0)
