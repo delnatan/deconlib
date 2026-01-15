@@ -326,6 +326,185 @@ def test_hessian_3d_adjoint():
     return all_passed
 
 
+def test_downsample_upsample_adjoint():
+    """Test downsample / upsample adjoint pair."""
+    from deconlib.deconvolution.operators_mlx import downsample, upsample
+
+    print("\n" + "="*60)
+    print("Testing downsample / upsample (sum-binning / replication)")
+    print("="*60)
+
+    all_passed = True
+
+    # Test cases: (highres_shape, factors, description)
+    test_cases = [
+        # 2D isotropic
+        ((16, 20), 2, "2D isotropic 2x"),
+        ((16, 20), 4, "2D isotropic 4x"),
+        # 2D anisotropic
+        ((16, 20), (2, 4), "2D anisotropic (2, 4)"),
+        ((16, 20), (1, 2), "2D anisotropic (1, 2) - no Y binning"),
+        # 3D isotropic
+        ((8, 12, 16), 2, "3D isotropic 2x"),
+        # 3D anisotropic (common for microscopy: bin XY but not Z)
+        ((8, 12, 16), (1, 2, 2), "3D anisotropic (1, 2, 2) - XY only"),
+        ((8, 12, 16), (2, 4, 4), "3D anisotropic (2, 4, 4)"),
+        # No binning case
+        ((8, 12), (1, 1), "2D no binning (1, 1)"),
+    ]
+
+    for highres_shape, factors, desc in test_cases:
+        # Compute lowres shape
+        if isinstance(factors, int):
+            lowres_shape = tuple(s // factors for s in highres_shape)
+        else:
+            lowres_shape = tuple(s // f for s, f in zip(highres_shape, factors))
+
+        x = mx.random.normal(highres_shape)
+        y = mx.random.normal(lowres_shape)
+
+        # downsample: highres -> lowres
+        Dx = downsample(x, factors)
+        # upsample: lowres -> highres
+        Uy = upsample(y, factors)
+
+        # Adjoint test: <Dx, y> = <x, Uy>
+        lhs = mx.sum(Dx * y).item()
+        rhs = mx.sum(x * Uy).item()
+
+        denom = max(abs(lhs), abs(rhs), 1e-10)
+        err = abs(lhs - rhs) / denom
+
+        passed = err < RTOL
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {desc}: <Dx,y>={lhs:.8f}, <x,Uy>={rhs:.8f}, err={err:.2e}")
+
+        # Verify shapes
+        shape_ok = Dx.shape == lowres_shape and Uy.shape == highres_shape
+        if not shape_ok:
+            print(f"       [FAIL] Shape mismatch: Dx={Dx.shape}, Uy={Uy.shape}")
+            passed = False
+
+        all_passed = all_passed and passed
+
+    return all_passed
+
+
+def test_fft_convolver_adjoint():
+    """Test make_fft_convolver forward/adjoint pair."""
+    from deconlib.deconvolution.operators_mlx import make_fft_convolver
+
+    print("\n" + "="*60)
+    print("Testing make_fft_convolver (FFT convolution / correlation)")
+    print("="*60)
+
+    all_passed = True
+
+    # Test cases: (shape, description)
+    test_cases = [
+        ((16, 20), "2D convolution"),
+        ((8, 12, 16), "3D convolution"),
+        ((32, 32), "2D square"),
+    ]
+
+    for shape, desc in test_cases:
+        # Create a simple Gaussian-like kernel (DC at corner for FFT)
+        kernel = mx.random.normal(shape)
+        kernel = mx.abs(kernel)  # Make positive
+        kernel = kernel / mx.sum(kernel)  # Normalize
+
+        C, C_adj = make_fft_convolver(kernel, normalize=False)
+
+        x = mx.random.normal(shape)
+        y = mx.random.normal(shape)
+
+        Cx = C(x)
+        C_adj_y = C_adj(y)
+
+        # Adjoint test: <Cx, y> = <x, C_adj(y)>
+        lhs = mx.sum(Cx * y).item()
+        rhs = mx.sum(x * C_adj_y).item()
+
+        denom = max(abs(lhs), abs(rhs), 1e-10)
+        err = abs(lhs - rhs) / denom
+
+        passed = err < RTOL
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {desc}: <Cx,y>={lhs:.8f}, <x,C*y>={rhs:.8f}, err={err:.2e}")
+
+        # Verify shapes preserved
+        shape_ok = Cx.shape == shape and C_adj_y.shape == shape
+        if not shape_ok:
+            print(f"       [FAIL] Shape mismatch: Cx={Cx.shape}, C*y={C_adj_y.shape}")
+            passed = False
+
+        all_passed = all_passed and passed
+
+    return all_passed
+
+
+def test_binned_convolver_adjoint():
+    """Test make_binned_convolver forward/adjoint pair."""
+    from deconlib.deconvolution.operators_mlx import make_binned_convolver
+
+    print("\n" + "="*60)
+    print("Testing make_binned_convolver (convolution + binning)")
+    print("="*60)
+
+    all_passed = True
+
+    # Test cases: (highres_shape, factors, description)
+    test_cases = [
+        ((16, 20), 2, "2D isotropic 2x binning"),
+        ((16, 20), (2, 4), "2D anisotropic (2, 4) binning"),
+        ((8, 12, 16), 2, "3D isotropic 2x binning"),
+        ((8, 12, 16), (1, 2, 2), "3D anisotropic (1, 2, 2) - XY only"),
+    ]
+
+    for highres_shape, factors, desc in test_cases:
+        # Compute lowres shape
+        if isinstance(factors, int):
+            lowres_shape = tuple(s // factors for s in highres_shape)
+        else:
+            lowres_shape = tuple(s // f for s, f in zip(highres_shape, factors))
+
+        # Create kernel
+        kernel = mx.random.normal(highres_shape)
+        kernel = mx.abs(kernel)
+        kernel = kernel / mx.sum(kernel)
+
+        A, A_adj, norm_sq = make_binned_convolver(kernel, factors, normalize=False)
+
+        # x lives on highres grid, y lives on lowres grid
+        x = mx.random.normal(highres_shape)
+        y = mx.random.normal(lowres_shape)
+
+        Ax = A(x)  # highres -> lowres
+        A_adj_y = A_adj(y)  # lowres -> highres
+
+        # Adjoint test: <Ax, y> = <x, A_adj(y)>
+        lhs = mx.sum(Ax * y).item()
+        rhs = mx.sum(x * A_adj_y).item()
+
+        denom = max(abs(lhs), abs(rhs), 1e-10)
+        err = abs(lhs - rhs) / denom
+
+        passed = err < RTOL
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {desc}: <Ax,y>={lhs:.8f}, <x,A*y>={rhs:.8f}, err={err:.2e}")
+        print(f"       norm_sq estimate: {norm_sq:.2f}")
+
+        # Verify shapes
+        shape_ok = Ax.shape == lowres_shape and A_adj_y.shape == highres_shape
+        if not shape_ok:
+            print(f"       [FAIL] Shape mismatch: Ax={Ax.shape}, A*y={A_adj_y.shape}")
+            passed = False
+
+        all_passed = all_passed and passed
+
+    return all_passed
+
+
 def main():
     print("="*60)
     print("   MLX Linear Operators - Adjoint Correctness Tests")
@@ -342,6 +521,9 @@ def main():
     results["hessian_2d/hessian_2d_adj"] = test_hessian_2d_adjoint()
     results["grad_3d/grad_3d_adj"] = test_grad_3d_adjoint()
     results["hessian_3d/hessian_3d_adj"] = test_hessian_3d_adjoint()
+    results["downsample/upsample"] = test_downsample_upsample_adjoint()
+    results["make_fft_convolver"] = test_fft_convolver_adjoint()
+    results["make_binned_convolver"] = test_binned_convolver_adjoint()
 
     # Summary
     print("\n" + "="*60)

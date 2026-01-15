@@ -1,9 +1,18 @@
 """
 Common linear operators implemented in Apple MLX framework
 
+This module provides:
+1. Derivative operators (forward/centered differences, gradients, Hessians)
+2. Sampling operators (sum-binning/replication with anisotropic support)
+3. FFT-based convolution operators for deconvolution
+
+All operators are implemented as forward/adjoint pairs satisfying <Lx, y> = <x, L*y>.
 """
 
+from typing import Callable, Tuple, Union
+
 import mlx.core as mx
+import numpy as np
 
 SQRT2 = mx.sqrt(2.0)
 
@@ -231,3 +240,298 @@ def hessian_3d_adj(H, r=1.0):
     adj_yz = d1_cen_adj(d1_cen_adj(H_yz, axis=1), axis=0)
 
     return adj_xx + adj_yy + adj_zz + adj_xy + adj_xz + adj_yz
+
+
+###############################################################################
+#                         SAMPLING OPERATORS                                   #
+###############################################################################
+
+
+def _normalize_factors(factors: Union[int, Tuple[int, ...]], ndim: int) -> Tuple[int, ...]:
+    """Normalize bin factors to a tuple matching the number of dimensions."""
+    if isinstance(factors, int):
+        return (factors,) * ndim
+    if len(factors) != ndim:
+        raise ValueError(
+            f"factors has length {len(factors)}, expected {ndim} for {ndim}D array"
+        )
+    return tuple(factors)
+
+
+def downsample(x: mx.array, factors: Union[int, Tuple[int, ...]]) -> mx.array:
+    """Sum-binning downsampling operator.
+
+    Reduces array dimensions by summing over blocks. For a factor k along
+    an axis, each k consecutive elements are summed to produce one output
+    element.
+
+    Args:
+        x: Input array (2D or 3D).
+        factors: Downsampling factor(s). Can be:
+            - int: same factor for all dimensions
+            - tuple: per-dimension factors, e.g., (factor_z, factor_y, factor_x)
+              Use 1 for dimensions that should not be downsampled.
+
+    Returns:
+        Downsampled array with shape (x.shape[i] // factors[i], ...).
+
+    Example:
+        # 3D with 2x2 binning in XY, no binning in Z
+        lowres = downsample(highres, factors=(1, 2, 2))
+
+        # Isotropic 2x binning
+        lowres = downsample(highres, factors=2)
+
+    Note:
+        The adjoint of sum-binning is replication (see `upsample`).
+        Together they satisfy: <downsample(x), y> = <x, upsample(y)>
+    """
+    ndim = x.ndim
+    factors = _normalize_factors(factors, ndim)
+
+    # Validate shape divisibility
+    for i, (s, f) in enumerate(zip(x.shape, factors)):
+        if f > 1 and s % f != 0:
+            raise ValueError(
+                f"Dimension {i} has size {s}, not divisible by factor {f}"
+            )
+
+    # Early exit if no downsampling needed
+    if all(f == 1 for f in factors):
+        return x
+
+    # Reshape to expose bins, then sum over bin axes
+    # E.g., for 2D with factors (2, 2): (H, W) -> (H//2, 2, W//2, 2) -> sum over (1, 3)
+    new_shape = []
+    sum_axes = []
+    for i, (s, f) in enumerate(zip(x.shape, factors)):
+        if f > 1:
+            new_shape.extend([s // f, f])
+            sum_axes.append(len(new_shape) - 1)
+        else:
+            new_shape.append(s)
+
+    reshaped = x.reshape(new_shape)
+    return mx.sum(reshaped, axis=sum_axes)
+
+
+def upsample(y: mx.array, factors: Union[int, Tuple[int, ...]]) -> mx.array:
+    """Replication upsampling operator (adjoint of sum-binning).
+
+    Expands array dimensions by replicating values. For a factor k along
+    an axis, each element is replicated k times.
+
+    Args:
+        y: Input array (2D or 3D).
+        factors: Upsampling factor(s). Can be:
+            - int: same factor for all dimensions
+            - tuple: per-dimension factors, e.g., (factor_z, factor_y, factor_x)
+              Use 1 for dimensions that should not be upsampled.
+
+    Returns:
+        Upsampled array with shape (y.shape[i] * factors[i], ...).
+
+    Example:
+        # 3D with 2x2 upsampling in XY, no upsampling in Z
+        highres = upsample(lowres, factors=(1, 2, 2))
+
+        # Isotropic 2x upsampling
+        highres = upsample(lowres, factors=2)
+
+    Note:
+        This is the adjoint of `downsample` (sum-binning).
+        The pair satisfies: <downsample(x), y> = <x, upsample(y)>
+    """
+    ndim = y.ndim
+    factors = _normalize_factors(factors, ndim)
+
+    # Early exit if no upsampling needed
+    if all(f == 1 for f in factors):
+        return y
+
+    # Use reshape + broadcast for efficient replication
+    # E.g., for 2D with factors (2, 2): (H, W) -> (H, 1, W, 1) -> broadcast -> (H, 2, W, 2) -> reshape
+    result = y
+    for axis in range(ndim):
+        f = factors[axis]
+        if f > 1:
+            # Expand dimension and tile
+            result = mx.expand_dims(result, axis=axis * 2 + 1)
+            # Build tile pattern: all 1s except f at the expanded axis
+            tile_pattern = [1] * result.ndim
+            tile_pattern[axis * 2 + 1] = f
+            result = mx.tile(result, tile_pattern)
+
+    # Reshape back to merged dimensions
+    output_shape = tuple(s * f for s, f in zip(y.shape, factors))
+    return result.reshape(output_shape)
+
+
+###############################################################################
+#                         FFT CONVOLUTION OPERATORS                            #
+###############################################################################
+
+
+def make_fft_convolver(
+    kernel: Union[np.ndarray, mx.array],
+    normalize: bool = True,
+) -> Tuple[Callable[[mx.array], mx.array], Callable[[mx.array], mx.array]]:
+    """Create FFT-based forward and adjoint convolution operators.
+
+    Given a kernel (PSF or point source map), creates efficient FFT-based
+    operators for convolution and its adjoint (correlation). Works with
+    2D and 3D data.
+
+    The operators implement:
+        - Forward: y = kernel ⊛ x (convolution)
+        - Adjoint: x = kernel* ⊛ y (correlation)
+
+    Uses rfftn/irfftn for efficiency with real-valued signals.
+
+    Args:
+        kernel: The convolution kernel (2D or 3D). Can be NumPy array or
+            MLX array. The kernel should have DC at corner (index [0, 0, ...])
+            as produced by pupil_to_psf or as expected by FFT operations.
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (C, C_adj) where:
+            - C(x): Forward operator, computes kernel ⊛ x (convolution)
+            - C_adj(y): Adjoint operator, computes kernel* ⊛ y (correlation)
+
+    Example:
+        # Create convolution operators from PSF
+        C, C_adj = make_fft_convolver(psf)
+
+        # Forward model: blur an image
+        blurred = C(image)
+
+        # Adjoint: correlation (used in iterative algorithms)
+        correlated = C_adj(blurred)
+
+    Note:
+        The adjoint of convolution with a kernel is correlation with that
+        kernel, which equals convolution with the spatially-flipped,
+        complex-conjugated kernel. In Fourier space: C_adj uses conj(OTF).
+    """
+    # Convert numpy to MLX array if needed
+    if isinstance(kernel, np.ndarray):
+        kernel_arr = mx.array(kernel)
+    else:
+        kernel_arr = kernel
+
+    shape = kernel_arr.shape
+
+    # Normalize if requested
+    if normalize:
+        kernel_arr = kernel_arr / mx.sum(kernel_arr)
+
+    # Compute OTF using rfftn
+    otf = mx.fft.rfftn(kernel_arr)
+    otf_conj = mx.conj(otf)
+
+    def forward(x: mx.array) -> mx.array:
+        """Apply forward convolution: y = kernel ⊛ x."""
+        x_ft = mx.fft.rfftn(x)
+        return mx.fft.irfftn(x_ft * otf, s=shape)
+
+    def adjoint(y: mx.array) -> mx.array:
+        """Apply adjoint (correlation): x = kernel* ⊛ y."""
+        y_ft = mx.fft.rfftn(y)
+        return mx.fft.irfftn(y_ft * otf_conj, s=shape)
+
+    return forward, adjoint
+
+
+def make_binned_convolver(
+    kernel: Union[np.ndarray, mx.array],
+    factors: Union[int, Tuple[int, ...]],
+    normalize: bool = True,
+) -> Tuple[
+    Callable[[mx.array], mx.array],
+    Callable[[mx.array], mx.array],
+    float,
+]:
+    """Create convolution + binning operators for continuous-to-discrete forward model.
+
+    Models the physical process where a continuous object is:
+    1. Blurred by the optical system (convolution with PSF)
+    2. Integrated by discrete camera pixels (sum-binning)
+
+    The forward model is: A = D ∘ C (convolve then downsample)
+    The adjoint is: A^T = C^T ∘ D^T (upsample then correlate)
+
+    Args:
+        kernel: High-resolution PSF kernel (2D or 3D). Shape must be divisible
+            by factors in corresponding dimensions.
+        factors: Downsampling factor(s). Can be:
+            - int: same factor for all dimensions
+            - tuple: per-dimension factors, e.g., (factor_z, factor_y, factor_x)
+              Use 1 for dimensions that should not be binned.
+        normalize: If True, normalize kernel to sum to 1. Default True.
+
+    Returns:
+        Tuple (A, A_adj, operator_norm_sq) where:
+            - A(x): Forward operator (convolve + bin), maps high-res to low-res
+            - A_adj(y): Adjoint operator (upsample + correlate), maps low-res to high-res
+            - operator_norm_sq: Estimate of ||A||² for step size selection
+
+    Example:
+        # High-resolution PSF with 2x2 binning in XY only
+        A, A_adj, norm_sq = make_binned_convolver(psf_highres, factors=(1, 2, 2))
+
+        # Forward model: object (D, H, W) -> observation (D, H/2, W/2)
+        observed = A(object_highres)
+    """
+    # Convert numpy to MLX array if needed
+    if isinstance(kernel, np.ndarray):
+        kernel_arr = mx.array(kernel)
+    else:
+        kernel_arr = kernel
+
+    ndim = kernel_arr.ndim
+    highres_shape = kernel_arr.shape
+    factors_tuple = _normalize_factors(factors, ndim)
+
+    # Validate shape divisibility
+    for i, (s, f) in enumerate(zip(highres_shape, factors_tuple)):
+        if f > 1 and s % f != 0:
+            raise ValueError(
+                f"Kernel dimension {i} has size {s}, not divisible by factor {f}"
+            )
+
+    # Normalize if requested
+    if normalize:
+        kernel_arr = kernel_arr / mx.sum(kernel_arr)
+
+    # Compute OTF for high-res convolution
+    otf = mx.fft.rfftn(kernel_arr)
+    otf_conj = mx.conj(otf)
+
+    # Operator norm estimate: ||D ∘ C||² ≤ ||D||² · ||C||²
+    # For normalized PSF: ||C|| ≤ 1
+    # For sum-binning: ||D|| = sqrt(prod of factors with f > 1)
+    # Conservative estimate
+    total_bin = 1
+    for f in factors_tuple:
+        if f > 1:
+            total_bin *= f
+    operator_norm_sq = float(total_bin)
+
+    def forward(x: mx.array) -> mx.array:
+        """Forward model: A = D ∘ C (convolve then downsample)."""
+        # Convolve with PSF
+        x_ft = mx.fft.rfftn(x)
+        convolved = mx.fft.irfftn(x_ft * otf, s=highres_shape)
+        # Downsample (sum-bin)
+        return downsample(convolved, factors_tuple)
+
+    def adjoint(y: mx.array) -> mx.array:
+        """Adjoint: A^T = C^T ∘ D^T (upsample then correlate)."""
+        # Upsample (replicate)
+        upsampled = upsample(y, factors_tuple)
+        # Correlate with PSF (adjoint of convolution)
+        y_ft = mx.fft.rfftn(upsampled)
+        return mx.fft.irfftn(y_ft * otf_conj, s=highres_shape)
+
+    return forward, adjoint, operator_norm_sq
