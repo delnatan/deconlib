@@ -95,7 +95,7 @@ def grad_2d_adj(g_list):
 def hessian_2d(f):
     """
     Computes 2D Hessian components
-    Returns list: [H_yy * f, H_yy * f, sqrt(2) * H_xy * f]
+    Returns list: [H_yy * f, H_xx * f, sqrt(2) * H_xy * f]
     """
     H_yy = d2(f, axis=0)
     H_xx = d2(f, axis=1)
