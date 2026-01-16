@@ -1,15 +1,17 @@
 """Widefield Point Spread Function computation."""
 
-from typing import Literal, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import numpy as np
 
-from .optics import Geometry, Optics
+from .optics import Geometry, Optics, make_geometry
+from .pupil import make_pupil
 
 __all__ = [
     "pupil_to_psf",
     "compute_otf",
     "pupil_to_vectorial_psf",
+    "compute_widefield_psf",
 ]
 
 
@@ -224,5 +226,119 @@ def pupil_to_vectorial_psf(
         total = psf.sum()
         if total > 0:
             psf = psf / total
+
+    return psf
+
+
+def compute_widefield_psf(
+    wavelength: float,
+    na: float,
+    ni: float = 1.515,
+    ns: float = None,
+    shape: Tuple[int, int] = None,
+    spacing: Union[float, Tuple[float, float]] = None,
+    z: np.ndarray = None,
+    normalize: bool = True,
+    aberrations: Optional[List["Aberration"]] = None,
+    vectorial: bool = False,
+) -> np.ndarray:
+    """Compute 3D widefield PSF with convenient defaults.
+
+    Convenience function that handles optics, geometry, and pupil creation
+    internally. For more control, use the lower-level pupil_to_psf or
+    pupil_to_vectorial_psf functions directly.
+
+    Args:
+        wavelength: Emission wavelength (μm).
+        na: Numerical aperture.
+        ni: Immersion medium refractive index. Default 1.515 (oil).
+        ns: Sample medium refractive index. Defaults to ni.
+        shape: Array shape (ny, nx). Default: (256, 256).
+        spacing: Pixel size in μm. Scalar or tuple (dy, dx).
+            Default: Nyquist spacing (λ / 4NA).
+        z: Axial positions (μm). Default: ±3.2 μm range at 0.1 μm steps.
+        normalize: If True, normalize PSF to sum to 1. Default True.
+        aberrations: Optional list of Aberration objects (e.g., IndexMismatch).
+        vectorial: If True, use vectorial diffraction model accounting for
+            polarization effects. Recommended for high-NA objectives with
+            refractive index mismatch. Default False.
+
+    Returns:
+        3D intensity PSF, shape (nz, ny, nx). DC at corner.
+
+    Example:
+        Basic usage with defaults:
+
+        >>> from deconlib.psf import compute_widefield_psf
+        >>> psf = compute_widefield_psf(wavelength=0.525, na=1.4)
+
+        With refractive index mismatch aberration:
+
+        >>> from deconlib.psf import compute_widefield_psf, IndexMismatch
+        >>> psf = compute_widefield_psf(
+        ...     wavelength=0.525,
+        ...     na=1.4,
+        ...     ni=1.515,
+        ...     ns=1.334,
+        ...     aberrations=[IndexMismatch(depth=10.0)],
+        ...     vectorial=True,
+        ... )
+
+        Custom z-positions and spacing:
+
+        >>> from deconlib.psf import compute_widefield_psf
+        >>> from deconlib.utils import fft_coords
+        >>> z = fft_coords(n=128, spacing=0.05)
+        >>> psf = compute_widefield_psf(
+        ...     wavelength=0.525,
+        ...     na=1.4,
+        ...     shape=(512, 512),
+        ...     spacing=0.04,
+        ...     z=z,
+        ... )
+    """
+    # Import here to avoid circular import
+    from .aberrations.base import Aberration, apply_aberrations
+
+    if ns is None:
+        ns = ni
+
+    # Default shape
+    if shape is None:
+        shape = (256, 256)
+
+    # Default spacing: Nyquist sampling
+    if spacing is None:
+        spacing = wavelength / (4 * na)
+
+    # Default z range
+    if z is None:
+        from ..utils.fourier import fft_coords
+
+        z = fft_coords(n=64, spacing=0.1)
+
+    z = np.atleast_1d(z)
+
+    # Create optics and geometry
+    optics = Optics(wavelength=wavelength, na=na, ni=ni, ns=ns)
+    geom = make_geometry(shape, spacing, optics)
+    pupil = make_pupil(geom)
+
+    # Apply aberrations if provided
+    if aberrations:
+        pupil = apply_aberrations(pupil, geom, optics, aberrations)
+
+    # Compute PSF
+    if vectorial:
+        psf = pupil_to_vectorial_psf(
+            pupil,
+            geom,
+            optics,
+            z,
+            dipole="isotropic",
+            normalize=normalize,
+        )
+    else:
+        psf = pupil_to_psf(pupil, geom, z, normalize=normalize)
 
     return psf

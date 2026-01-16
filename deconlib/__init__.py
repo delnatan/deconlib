@@ -30,52 +30,53 @@ __version__ = "0.4.0"
 # PSF Module - Core data structures and PSF computation
 # =============================================================================
 from .psf import (
+    # Aberrations
+    Aberration,
+    # Confocal/Spinning Disk PSF
+    ConfocalOptics,
+    Defocus,
+    Geometry,
+    IndexMismatch,
     # Core data structures
     Optics,
-    Geometry,
+    PhaseRetrievalResult,
+    ZernikeAberration,
+    ZernikeMode,
+    apply_aberrations,
+    apply_apodization,
+    compute_airy_radius,
+    compute_amplitude_correction,
+    compute_confocal_psf,
+    compute_fresnel_coefficients,
+    compute_otf,
+    compute_pinhole_function,
+    compute_spinning_disk_psf,
+    compute_vectorial_factors,
     make_geometry,
     # Pupil functions
     make_pupil,
-    apply_apodization,
-    compute_amplitude_correction,
-    compute_fresnel_coefficients,
-    compute_vectorial_factors,
     # Widefield PSF/OTF
     pupil_to_psf,
-    compute_otf,
     pupil_to_vectorial_psf,
-    # Confocal/Spinning Disk PSF
-    ConfocalOptics,
-    compute_pinhole_function,
-    compute_airy_radius,
-    compute_confocal_psf,
-    compute_spinning_disk_psf,
-    # Aberrations
-    Aberration,
-    apply_aberrations,
-    IndexMismatch,
-    Defocus,
-    ZernikeAberration,
-    ZernikeMode,
     # Phase retrieval
     retrieve_phase,
     retrieve_phase_vectorial,
-    PhaseRetrievalResult,
 )
 
 # =============================================================================
 # Utils Module - Mathematical utilities
 # =============================================================================
 from .utils import (
-    fft_coords,
-    fourier_meshgrid,
-    fftshift_1d,
-    imshift,
-    zernike_polynomial,
-    zernike_polynomials,
     ansi_to_nm,
+    fft_coords,
+    fftshift_1d,
+    fourier_meshgrid,
+    imshift,
     noll_to_ansi,
     pad_to_shape,
+    soft_pad,
+    zernike_polynomial,
+    zernike_polynomials,
 )
 
 # =============================================================================
@@ -128,4 +129,5 @@ __all__ = [
     "ansi_to_nm",
     "noll_to_ansi",
     "pad_to_shape",
+    "soft_pad",
 ]

@@ -36,6 +36,7 @@ from .widefield import (
     pupil_to_psf,
     compute_otf,
     pupil_to_vectorial_psf,
+    compute_widefield_psf,
 )
 
 # Confocal/Spinning Disk PSF
@@ -79,6 +80,7 @@ __all__ = [
     "pupil_to_psf",
     "compute_otf",
     "pupil_to_vectorial_psf",
+    "compute_widefield_psf",
     # Confocal/Spinning Disk PSF
     "ConfocalOptics",
     "compute_pinhole_function",

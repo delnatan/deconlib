@@ -1,20 +1,20 @@
 """Mathematical utilities for Fourier optics and image processing."""
 
 from .fourier import (
-    fftfreq,
-    rfftfreq,
     fft_coords,
-    fourier_meshgrid,
+    fftfreq,
     fftshift_1d,
+    fourier_meshgrid,
     imshift,
+    rfftfreq,
 )
+from .padding import pad_to_shape, soft_pad
 from .zernike import (
-    zernike_polynomial,
-    zernike_polynomials,
     ansi_to_nm,
     noll_to_ansi,
+    zernike_polynomial,
+    zernike_polynomials,
 )
-from .padding import pad_to_shape
 
 __all__ = [
     # Fourier utilities
@@ -31,4 +31,5 @@ __all__ = [
     "noll_to_ansi",
     # Padding
     "pad_to_shape",
+    "soft_pad",
 ]
