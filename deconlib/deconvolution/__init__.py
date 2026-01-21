@@ -1,8 +1,8 @@
-"""Image deconvolution algorithms using PyTorch.
+"""Image deconvolution algorithms using Apple MLX.
 
 This module provides deconvolution algorithms for restoring images
-degraded by known point spread functions. All algorithms use PyTorch
-for efficient GPU-accelerated computation.
+degraded by known point spread functions. All algorithms use Apple MLX
+for efficient GPU-accelerated computation on Apple Silicon.
 
 The deconvolution problem is formulated as:
     b = C(x) + noise
@@ -12,60 +12,55 @@ where:
     - x: unknown original image
     - C: forward operator (convolution with PSF)
 
-Each algorithm takes a Problem specification and returns a Result.
-
 Example:
-    >>> import torch
-    >>> from deconlib import Optics, make_geometry, make_pupil, pupil_to_psf, fft_coords
-    >>> from deconlib.deconvolution import make_fft_convolver, solve_rl
+    >>> import mlx.core as mx
+    >>> from deconlib.deconvolution import solve_pdhg_mlx, FFTConvolver
     >>>
-    >>> # Generate PSF
-    >>> optics = Optics(wavelength=0.525, na=1.4, ni=1.515)
-    >>> geom = make_geometry((256, 256), 0.1, optics)
-    >>> pupil = make_pupil(geom)
-    >>> psf = pupil_to_psf(pupil, geom, z=[0.0])[0]  # 2D PSF
-    >>>
-    >>> # Create convolution operators and deconvolve
-    >>> C, C_adj = make_fft_convolver(psf, device="cuda")
-    >>> observed = torch.from_numpy(blurred_image).to("cuda")
-    >>> restored = solve_rl(observed, C, C_adj, num_iter=50)
+    >>> # Create convolver and deconvolve
+    >>> convolver = FFTConvolver(psf)
+    >>> observed = mx.array(blurred_image)
+    >>> result = solve_pdhg_mlx(
+    ...     observed,
+    ...     psf=psf,
+    ...     alpha=0.001,
+    ...     regularization="hessian",
+    ...     num_iter=200,
+    ... )
 """
 
-from .base import (
-    DeconvolutionResult,
-    SICGConfig,
-    PDHGConfig,
+from .base import MLXDeconvolutionResult
+from .pdhg_mlx import (
+    solve_pdhg_mlx,
+    IdentityRegularizer,
+    GradientRegularizer,
+    HessianRegularizer,
 )
-from .operators import make_fft_convolver, make_binned_convolver, power_iteration_norm
-from .rl import (
-    solve_rl,
-)
-from .sicg import (
-    solve_sicg,
-)
-from .chambolle_pock import (
-    solve_chambolle_pock,
-)
-from .psf_extraction import (
-    extract_psf_rl,
-    extract_psf_sicg,
+from .linops_mlx import (
+    FFTConvolver,
+    BinnedConvolver,
+    Gradient1D,
+    Gradient2D,
+    Gradient3D,
+    Hessian1D,
+    Hessian2D,
+    Hessian3D,
 )
 
 __all__ = [
     # Result types
-    "DeconvolutionResult",
-    # Configuration
-    "SICGConfig",
-    "PDHGConfig",
-    # Operators
-    "make_fft_convolver",
-    "make_binned_convolver",
-    "power_iteration_norm",
-    # Algorithms
-    "solve_rl",
-    "solve_sicg",
-    "solve_chambolle_pock",
-    # PSF extraction
-    "extract_psf_rl",
-    "extract_psf_sicg",
+    "MLXDeconvolutionResult",
+    # MLX Algorithms
+    "solve_pdhg_mlx",
+    "IdentityRegularizer",
+    "GradientRegularizer",
+    "HessianRegularizer",
+    # MLX Linear Operators
+    "FFTConvolver",
+    "BinnedConvolver",
+    "Gradient1D",
+    "Gradient2D",
+    "Gradient3D",
+    "Hessian1D",
+    "Hessian2D",
+    "Hessian3D",
 ]

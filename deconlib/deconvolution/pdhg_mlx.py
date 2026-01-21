@@ -20,10 +20,12 @@ import numpy as np
 
 from .base import MLXDeconvolutionResult
 from .linops_mlx import (
-    FFTConvolver,
     BinnedConvolver,
+    FFTConvolver,
+    Gradient1D,
     Gradient2D,
     Gradient3D,
+    Hessian1D,
     Hessian2D,
     Hessian3D,
 )
@@ -219,26 +221,28 @@ class IdentityRegularizer:
 class GradientRegularizer:
     """Gradient operator for total variation regularization.
 
-    Wraps Gradient2D/3D with proximal operator for dual.
+    Wraps Gradient1D/2D/3D with proximal operator for dual.
 
     Attributes:
-        ndim: Number of spatial dimensions (2 or 3).
+        ndim: Number of spatial dimensions (1, 2, or 3).
         r: Anisotropic spacing ratio (lateral/axial for 3D).
         norm: Type of norm ("L1" for anisotropic TV, "L1_2" for isotropic TV).
-        output_components: Number of gradient components (2 or 3).
+        output_components: Number of gradient components (1, 2, or 3).
         operator_norm_sq: Squared operator norm.
     """
 
     def __init__(
         self, ndim: int, r: float = 1.0, norm: Literal["L1", "L1_2"] = "L1"
     ):
-        if ndim not in (2, 3):
-            raise ValueError(f"ndim must be 2 or 3, got {ndim}")
+        if ndim not in (1, 2, 3):
+            raise ValueError(f"ndim must be 1, 2, or 3, got {ndim}")
         self.ndim = ndim
         self.r = r
         self.norm = norm
 
-        if ndim == 2:
+        if ndim == 1:
+            self._op = Gradient1D()
+        elif ndim == 2:
             self._op = Gradient2D()
         else:
             self._op = Gradient3D(r=r)
@@ -253,10 +257,16 @@ class GradientRegularizer:
 
     def forward(self, x: mx.array) -> mx.array:
         """Compute gradient. Returns shape (ndim, *spatial)."""
+        if self.ndim == 1:
+            # Gradient1D returns (N,), wrap to (1, N) for consistency
+            return mx.expand_dims(self._op.forward(x), axis=0)
         return self._op.forward(x)
 
     def adjoint(self, y: mx.array) -> mx.array:
         """Compute negative divergence. Returns shape (*spatial)."""
+        if self.ndim == 1:
+            # Unwrap (1, N) to (N,) for Gradient1D
+            return self._op.adjoint(y[0])
         return self._op.adjoint(y)
 
     def prox_dual(self, y: mx.array, sigma: float, alpha: float) -> mx.array:
@@ -282,33 +292,37 @@ class GradientRegularizer:
 class HessianRegularizer:
     """Hessian operator for second-order regularization.
 
-    Wraps Hessian2D/3D with proximal operator for dual.
+    Wraps Hessian1D/2D/3D with proximal operator for dual.
     Promotes smooth gradients rather than piecewise constant images.
 
     Attributes:
-        ndim: Number of spatial dimensions (2 or 3).
+        ndim: Number of spatial dimensions (1, 2, or 3).
         r: Anisotropic spacing ratio (lateral/axial for 3D).
         norm: Type of norm ("L1" for anisotropic, "L1_2" for isotropic).
-        output_components: Number of Hessian components (3 for 2D, 6 for 3D).
+        output_components: Number of Hessian components (1 for 1D, 3 for 2D, 6 for 3D).
         operator_norm_sq: Squared operator norm.
     """
 
     def __init__(
         self, ndim: int, r: float = 1.0, norm: Literal["L1", "L1_2"] = "L1"
     ):
-        if ndim not in (2, 3):
-            raise ValueError(f"ndim must be 2 or 3, got {ndim}")
+        if ndim not in (1, 2, 3):
+            raise ValueError(f"ndim must be 1, 2, or 3, got {ndim}")
         self.ndim = ndim
         self.r = r
         self.norm = norm
 
-        if ndim == 2:
+        if ndim == 1:
+            self._op = Hessian1D()
+        elif ndim == 2:
             self._op = Hessian2D()
         else:
             self._op = Hessian3D(r=r)
 
     @property
     def output_components(self) -> int:
+        if self.ndim == 1:
+            return 1
         return 3 if self.ndim == 2 else 6
 
     @property
@@ -317,10 +331,16 @@ class HessianRegularizer:
 
     def forward(self, x: mx.array) -> mx.array:
         """Compute Hessian. Returns shape (ncomp, *spatial)."""
+        if self.ndim == 1:
+            # Hessian1D returns (N,), wrap to (1, N) for consistency
+            return mx.expand_dims(self._op.forward(x), axis=0)
         return self._op.forward(x)
 
     def adjoint(self, y: mx.array) -> mx.array:
         """Compute adjoint of Hessian. Returns shape (*spatial)."""
+        if self.ndim == 1:
+            # Unwrap (1, N) to (N,) for Hessian1D
+            return self._op.adjoint(y[0])
         return self._op.adjoint(y)
 
     def prox_dual(self, y: mx.array, sigma: float, alpha: float) -> mx.array:
@@ -348,21 +368,25 @@ class HessianRegularizer:
 # -----------------------------------------------------------------------------
 
 
-def _compute_spacing_ratio(spacing: Optional[Tuple[float, ...]], ndim: int) -> float:
+def _compute_spacing_ratio(
+    spacing: Optional[Tuple[float, ...]], ndim: int
+) -> float:
     """Compute lateral-to-axial spacing ratio for anisotropic regularization.
 
     Args:
-        spacing: Physical spacing (dz, dy, dx) for 3D or (dy, dx) for 2D.
+        spacing: Physical spacing (dz, dy, dx) for 3D, (dy, dx) for 2D, or (dx,) for 1D.
         ndim: Number of dimensions.
 
     Returns:
-        Ratio r = lateral/axial for 3D, or 1.0 for 2D.
+        Ratio r = lateral/axial for 3D, or 1.0 for 1D/2D.
     """
-    if spacing is None or ndim == 2:
+    if spacing is None or ndim in (1, 2):
         return 1.0
 
     if len(spacing) != ndim:
-        raise ValueError(f"spacing must have {ndim} elements, got {len(spacing)}")
+        raise ValueError(
+            f"spacing must have {ndim} elements, got {len(spacing)}"
+        )
 
     # For 3D: spacing = (dz, dy, dx), use average lateral / axial
     dz = spacing[0]
@@ -495,7 +519,8 @@ def solve_pdhg_mlx(
     else:
         if bin_factors is not None:
             # Upsample observed for initialization
-            from .linops_mlx import upsample, _normalize_factors
+            from .linops_mlx import _normalize_factors, upsample
+
             factors = _normalize_factors(bin_factors, ndim)
             x = upsample(observed, factors)
         else:
@@ -511,9 +536,18 @@ def solve_pdhg_mlx(
     # Initialize overrelaxed primal
     x_bar = x
 
-    # Initial step sizes
-    tau = 1.0
-    sigma = 1.0
+    # Initial step sizes based on operator norms
+    # For PDHG convergence, need tau * sigma * ||K||^2 < 1
+    # where K = [A; L] is the stacked operator
+    # ||K||^2 = ||A||^2 + ||L||^2
+    blur_norm_sq = blur_op.operator_norm_sq
+    reg_norm_sq = reg_op.operator_norm_sq
+    K_norm_sq = blur_norm_sq + reg_norm_sq
+
+    # Initialize with tau = sigma = 0.99 / ||K|| for safety margin
+    step_scale = 0.99 / (K_norm_sq**0.5)
+    tau = step_scale
+    sigma = step_scale
     theta = 1.0
 
     # History tracking
@@ -575,8 +609,7 @@ def solve_pdhg_mlx(
         # New tau based on Malitsky-Pock rule
         ratio = dx_norm_sq / (2.0 * sigma * dKx_norm_sq_safe)
         tau_candidate = mx.minimum(
-            mx.sqrt(1.0 + theta) * tau,
-            delta * mx.sqrt(ratio)
+            mx.sqrt(1.0 + theta) * tau, delta * mx.sqrt(ratio)
         )
 
         # Backtracking: ensure tau * sigma * ||dKx||^2 <= delta * ||dx||^2
@@ -586,16 +619,25 @@ def solve_pdhg_mlx(
 
         # Reduce tau if needed
         tau_new = mx.where(
-            condition > threshold,
-            eta * tau_candidate,
-            tau_candidate
+            condition > threshold, eta * tau_candidate, tau_candidate
         )
 
-        # Ensure tau doesn't become too small
-        tau_new = mx.maximum(tau_new, 1e-8)
+        # Ensure tau doesn't become too small (relative to initial scale)
+        tau_min = step_scale * 1e-4
+        tau_new = mx.maximum(tau_new, tau_min)
 
         # Compute theta for overrelaxation
         theta_new = tau_new / tau
+
+        # Update sigma inversely to tau to maintain tau * sigma ≈ constant
+        # sigma_new = sigma * tau / tau_new = sigma / theta_new
+        # Bound theta to prevent sigma from exploding when tau decreases rapidly
+        theta_safe = mx.maximum(theta_new, 0.1)
+        sigma_new = sigma / theta_safe
+        # Bound sigma to reasonable range relative to initial scale
+        sigma_min = step_scale * 1e-4
+        sigma_max = step_scale * 1e4
+        sigma_new = mx.clip(sigma_new, sigma_min, sigma_max)
 
         # =====================================================================
         # Overrelaxation
@@ -612,6 +654,7 @@ def solve_pdhg_mlx(
         y1 = y1_new
         y2 = y2_new
         tau = float(tau_new)
+        sigma = float(sigma_new)
         theta = float(theta_new)
 
         # Record history
@@ -624,8 +667,17 @@ def solve_pdhg_mlx(
             Ax = blur_op.forward(x)
             forward_model = Ax + bg
             # Avoid log(0)
-            forward_model_safe = mx.maximum(forward_model, 1e-12)
-            poisson_loss = mx.sum(forward_model - data * mx.log(forward_model_safe))
+            forward_model_safe = mx.maximum(forward_model, 1e-6)
+            # poisson_loss = mx.sum(
+            #     forward_model
+            #     - data * mx.log(forward_model_safe)
+            #     - (data - forward_model_safe)
+            # )
+            # express complete loss
+            poisson_loss = mx.sum(
+                data * mx.log((data + 1e-6) / forward_model_safe)
+                - (data - forward_model)
+            )
 
             # Regularization term
             Lx = reg_op.forward(x)
@@ -638,6 +690,7 @@ def solve_pdhg_mlx(
                 )
 
             loss = float(poisson_loss + reg_loss)
+            chi2 = mx.mean((data - forward_model) ** 2 / forward_model_safe)
             loss_history.append(loss)
 
             if callback is not None:
@@ -645,8 +698,9 @@ def solve_pdhg_mlx(
 
         if verbose and (k + 1) % eval_interval == 0:
             print(
-                f"Iter {k + 1:4d}: loss={loss_history[-1]:.6e}, "
-                f"tau={tau:.6e}, sigma={sigma:.6e}"
+                f"Iter {k + 1:4d}: loss={loss_history[-1]:.4e}, "
+                f" chi-sq = {chi2:.4f}, "
+                f"tau={tau:.4e}, sigma={sigma:.4e}"
             )
 
         # Periodic evaluation to prevent graph explosion

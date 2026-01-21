@@ -41,3 +41,6 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Personal notes
+notes/

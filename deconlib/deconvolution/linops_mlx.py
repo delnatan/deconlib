@@ -10,23 +10,60 @@ from typing import Tuple, Union
 import mlx.core as mx
 import numpy as np
 
-from .linops_core_mlx import (
-    SQRT2,
-    d1_cen,
-    d1_cen_adj,
-    d1_fwd,
-    d1_fwd_adj,
-    d2,
-    d2_adj,
-    downsample,
-    upsample,
-    _normalize_factors,
-)
+try:
+    from .linops_core_mlx import (
+        SQRT2,
+        d1_cen,
+        d1_cen_adj,
+        d1_fwd,
+        d1_fwd_adj,
+        d2,
+        d2_adj,
+        downsample,
+        upsample,
+        _normalize_factors,
+    )
+except ImportError:
+    from linops_core_mlx import (
+        SQRT2,
+        d1_cen,
+        d1_cen_adj,
+        d1_fwd,
+        d1_fwd_adj,
+        d2,
+        d2_adj,
+        downsample,
+        upsample,
+        _normalize_factors,
+    )
 
 
 # -----------------------------------------------------------------------------
 # Gradient operators
 # -----------------------------------------------------------------------------
+
+
+class Gradient1D:
+    """1D gradient operator for total variation regularization.
+
+    Computes df/dx using forward differences with Neumann BC.
+
+    Attributes:
+        operator_norm_sq: Spectral norm squared ||D||^2 = 4.
+    """
+
+    operator_norm_sq = 4.0
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute gradient. Returns shape (N,)."""
+        return d1_fwd(f, axis=0)
+
+    def adjoint(self, g: mx.array) -> mx.array:
+        """Compute negative divergence. Returns shape (N,)."""
+        return d1_fwd_adj(g, axis=0)
+
+    def __call__(self, f: mx.array) -> mx.array:
+        return self.forward(f)
 
 
 class Gradient2D:
@@ -88,6 +125,29 @@ class Gradient3D:
 # -----------------------------------------------------------------------------
 # Hessian operators
 # -----------------------------------------------------------------------------
+
+
+class Hessian1D:
+    """1D Hessian (second derivative) operator.
+
+    Computes d²f/dx² using central differences with Neumann BC.
+
+    Attributes:
+        operator_norm_sq: Spectral norm squared ||D²||^2 = 16.
+    """
+
+    operator_norm_sq = 16.0
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute second derivative. Returns shape (N,)."""
+        return d2(f, axis=0)
+
+    def adjoint(self, g: mx.array) -> mx.array:
+        """Compute adjoint (self-adjoint). Returns shape (N,)."""
+        return d2_adj(g, axis=0)
+
+    def __call__(self, f: mx.array) -> mx.array:
+        return self.forward(f)
 
 
 class Hessian2D:
@@ -269,6 +329,7 @@ class FFTConvolver:
     Attributes:
         otf: Precomputed optical transfer function.
         shape: Spatial shape of kernel/signal.
+        operator_norm_sq: Squared spectral norm ||A||^2 = max|OTF|^2.
     """
 
     def __init__(
@@ -286,6 +347,10 @@ class FFTConvolver:
             kernel = kernel / mx.sum(kernel)
 
         self.otf = mx.fft.rfftn(kernel)
+
+        # Operator norm = max singular value = max|OTF| for circulant convolution
+        # For normalized PSF, this is typically 1.0 (DC component)
+        self.operator_norm_sq = float(mx.max(mx.abs(self.otf) ** 2))
 
     @property
     def otf_conj(self) -> mx.array:

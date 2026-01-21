@@ -33,13 +33,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+    "mlx>=0.30.3",
     "numpy>=1.21",
 ]
 
 [project.optional-dependencies]
-deconv = [
-    "torch>=2.0",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
@@ -50,7 +48,6 @@ docs = [
     "mkdocstrings[python]>=0.24",
 ]
 all = [
-    "torch>=2.0",
     "pytest>=7.0",
     "pytest-cov",
     "mkdocs>=1.5",
