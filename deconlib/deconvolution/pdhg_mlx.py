@@ -432,6 +432,9 @@ def solve_pdhg_mlx(
     delta: float = 0.99,
     eta: float = 0.5,
     eval_interval: int = 10,
+    tol: float = 1e-5,
+    min_iter: int = 20,
+    patience: int = 5,
 ) -> MLXDeconvolutionResult:
     """Solve Poisson deconvolution using Malitsky-Pock adaptive PDHG.
 
@@ -465,6 +468,14 @@ def solve_pdhg_mlx(
         delta: Safety factor for step size adaptation (0 < delta < 1).
         eta: Backtracking reduction factor (0 < eta < 1).
         eval_interval: Interval for mx.eval() to prevent graph explosion.
+        tol: Convergence tolerance for relative primal change. The algorithm
+            stops when ||x^{k+1} - x^k|| / ||x^k|| < tol for `patience`
+            consecutive iterations after `min_iter`.
+        min_iter: Minimum number of iterations before checking convergence.
+            Helps avoid premature termination on noisy initial iterates.
+        patience: Number of consecutive iterations the convergence criterion
+            must be satisfied before stopping. Provides robustness against
+            temporary stagnation.
 
     Returns:
         MLXDeconvolutionResult with restored image and convergence info.
@@ -555,6 +566,11 @@ def solve_pdhg_mlx(
     tau_history: List[float] = []
     sigma_history: List[float] = []
 
+    # Convergence tracking
+    converged = False
+    converge_count = 0  # consecutive iterations meeting tolerance
+    final_iter = num_iter
+
     # Cache observed as float32
     data = observed.astype(mx.float32)
     bg = float(background)
@@ -640,6 +656,44 @@ def solve_pdhg_mlx(
         sigma_new = mx.clip(sigma_new, sigma_min, sigma_max)
 
         # =====================================================================
+        # Convergence check (relative primal change)
+        # =====================================================================
+
+        # Compute relative primal change: ||dx|| / ||x||
+        # Use max(||x||, ||x_new||) for numerical stability
+        x_norm_sq = mx.sum(x * x)
+        x_new_norm_sq = mx.sum(x_new * x_new)
+        max_norm_sq = mx.maximum(x_norm_sq, x_new_norm_sq)
+        # Avoid division by zero
+        rel_change = mx.sqrt(dx_norm_sq / (max_norm_sq + 1e-12))
+        rel_change_val = float(rel_change)
+
+        # Check convergence after minimum iterations
+        if k >= min_iter:
+            if rel_change_val < tol:
+                converge_count += 1
+                if converge_count >= patience:
+                    converged = True
+                    final_iter = k + 1
+                    if verbose:
+                        print(
+                            f"Converged at iteration {final_iter}: "
+                            f"rel_change={rel_change_val:.2e} < tol={tol:.2e} "
+                            f"for {patience} consecutive iterations"
+                        )
+                    # Ensure final evaluation before breaking
+                    mx.eval(x_new, y1_new, y2_new)
+                    # Update variables before break for correct return
+                    x = x_new
+                    y1 = y1_new
+                    y2 = y2_new
+                    tau_history.append(float(tau_new))
+                    sigma_history.append(float(sigma_new))
+                    break
+            else:
+                converge_count = 0
+
+        # =====================================================================
         # Overrelaxation
         # =====================================================================
 
@@ -709,9 +763,9 @@ def solve_pdhg_mlx(
 
     return MLXDeconvolutionResult(
         restored=x,
-        iterations=num_iter,
+        iterations=final_iter,
         loss_history=loss_history,
-        converged=True,  # No convergence check implemented
+        converged=converged,
         tau_history=tau_history,
         sigma_history=sigma_history,
         metadata={
@@ -720,5 +774,8 @@ def solve_pdhg_mlx(
             "norm": norm,
             "alpha": alpha,
             "background": background,
+            "tol": tol,
+            "min_iter": min_iter,
+            "patience": patience,
         },
     )

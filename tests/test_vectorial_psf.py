@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from deconlib import (
     Optics,
     fft_coords,
@@ -157,7 +156,9 @@ class TestVectorialPSF:
     def test_isotropic_psf_rotationally_symmetric(self, setup):
         """Isotropic PSF should be approximately rotationally symmetric."""
         pupil, geom, optics, z = setup
-        psf = pupil_to_vectorial_psf(pupil, geom, optics, z, dipole="isotropic")
+        psf = pupil_to_vectorial_psf(
+            pupil, geom, optics, z, dipole="isotropic"
+        )
         psf_centered = np.fft.fftshift(psf, axes=(-2, -1))
 
         # At in-focus plane, check symmetry
@@ -239,7 +240,9 @@ class TestVectorialPSF:
         val_minus_x = psf_tilted[defocus_idx, center, center - 8]
 
         # Tilted dipole should show significant asymmetry (>10% difference)
-        asymmetry = np.abs(val_plus_x - val_minus_x) / (val_plus_x + val_minus_x + 1e-10)
+        asymmetry = np.abs(val_plus_x - val_minus_x) / (
+            val_plus_x + val_minus_x + 1e-10
+        )
         assert asymmetry > 0.1, f"Expected asymmetry >10%, got {asymmetry:.1%}"
 
         # Also verify tilted is different from both pure z and pure x
@@ -351,9 +354,7 @@ class TestVectorialPhaseRetrieval:
         pupil, geom, optics, z = setup
         psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
 
-        result = retrieve_phase_vectorial(
-            psf, z, geom, optics, max_iter=20
-        )
+        result = retrieve_phase_vectorial(psf, z, geom, optics, max_iter=20)
 
         assert hasattr(result, "pupil")
         assert hasattr(result, "mse_history")
@@ -387,9 +388,7 @@ class TestVectorialPhaseRetrieval:
         pupil, geom, optics, z = setup
         psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
 
-        result = retrieve_phase_vectorial(
-            psf, z, geom, optics, max_iter=30
-        )
+        result = retrieve_phase_vectorial(psf, z, geom, optics, max_iter=30)
 
         # Outside mask should be zero
         assert np.allclose(result.pupil[~geom.mask], 0.0)

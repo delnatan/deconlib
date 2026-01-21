@@ -49,9 +49,9 @@ def test_d1_fwd_adjoint():
     """Test d1_fwd / d1_fwd_adj pair."""
     from deconlib.deconvolution.operators_mlx import d1_fwd, d1_fwd_adj
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing d1_fwd / d1_fwd_adj")
-    print("="*60)
+    print("=" * 60)
 
     # Test for different shapes and axes
     test_cases = [
@@ -68,11 +68,15 @@ def test_d1_fwd_adjoint():
         lhs, rhs, err = dot_product_test(
             lambda x, ax=axis: d1_fwd(x, axis=ax),
             lambda y, ax=axis: d1_fwd_adj(y, axis=ax),
-            shape, shape, f"d1_fwd (axis={axis})"
+            shape,
+            shape,
+            f"d1_fwd (axis={axis})",
         )
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}"
+        )
         all_passed = all_passed and passed
 
     return all_passed
@@ -82,9 +86,9 @@ def test_d2_self_adjoint():
     """Test that d2 is self-adjoint."""
     from deconlib.deconvolution.operators_mlx import d2, d2_adj
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing d2 self-adjoint property (d2 == d2_adj)")
-    print("="*60)
+    print("=" * 60)
 
     test_cases = [
         ((10,), -1, "1D array, axis=-1"),
@@ -100,11 +104,15 @@ def test_d2_self_adjoint():
         lhs, rhs, err = dot_product_test(
             lambda x, ax=axis: d2(x, axis=ax),
             lambda y, ax=axis: d2_adj(y, axis=ax),
-            shape, shape, f"d2 (axis={axis})"
+            shape,
+            shape,
+            f"d2 (axis={axis})",
         )
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}"
+        )
         all_passed = all_passed and passed
 
     return all_passed
@@ -114,9 +122,9 @@ def test_d1_cen_adjoint():
     """Test d1_cen / d1_cen_adj pair."""
     from deconlib.deconvolution.operators_mlx import d1_cen, d1_cen_adj
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing d1_cen / d1_cen_adj")
-    print("="*60)
+    print("=" * 60)
 
     test_cases = [
         ((10,), -1, "1D array, axis=-1"),
@@ -132,11 +140,15 @@ def test_d1_cen_adjoint():
         lhs, rhs, err = dot_product_test(
             lambda x, ax=axis: d1_cen(x, axis=ax),
             lambda y, ax=axis: d1_cen_adj(y, axis=ax),
-            shape, shape, f"d1_cen (axis={axis})"
+            shape,
+            shape,
+            f"d1_cen (axis={axis})",
         )
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] {desc}: <Lx,y>={lhs:.8f}, <x,L*y>={rhs:.8f}, err={err:.2e}"
+        )
         all_passed = all_passed and passed
 
     return all_passed
@@ -144,11 +156,15 @@ def test_d1_cen_adjoint():
 
 def test_grad_2d_adjoint():
     """Test Gradient2D class and grad_2d / grad_2d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import Gradient2D, grad_2d, grad_2d_adj
+    from deconlib.deconvolution.operators_mlx import (
+        Gradient2D,
+        grad_2d,
+        grad_2d_adj,
+    )
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing Gradient2D (class and functions)")
-    print("="*60)
+    print("=" * 60)
 
     # Input shape (Y, X), output shape (2, Y, X)
     input_shape = (16, 20)
@@ -172,7 +188,9 @@ def test_grad_2d_adjoint():
 
     passed = err < RTOL
     status = "PASS" if passed else "FAIL"
-    print(f"  [{status}] Class: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}")
+    print(
+        f"  [{status}] Class: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}"
+    )
 
     # Verify shapes
     shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
@@ -183,8 +201,13 @@ def test_grad_2d_adjoint():
     # Test function interface matches class
     Lx_func = grad_2d(x)
     Lstar_y_func = grad_2d_adj(y)
-    func_match = mx.allclose(Lx, Lx_func).item() and mx.allclose(Lstar_y, Lstar_y_func).item()
-    print(f"  [{'PASS' if func_match else 'FAIL'}] Function interface matches class")
+    func_match = (
+        mx.allclose(Lx, Lx_func).item()
+        and mx.allclose(Lstar_y, Lstar_y_func).item()
+    )
+    print(
+        f"  [{'PASS' if func_match else 'FAIL'}] Function interface matches class"
+    )
     passed = passed and func_match
 
     return passed
@@ -192,11 +215,15 @@ def test_grad_2d_adjoint():
 
 def test_hessian_2d_adjoint():
     """Test Hessian2D class and hessian_2d / hessian_2d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import Hessian2D, hessian_2d, hessian_2d_adj
+    from deconlib.deconvolution.operators_mlx import (
+        Hessian2D,
+        hessian_2d,
+        hessian_2d_adj,
+    )
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing Hessian2D (class and functions)")
-    print("="*60)
+    print("=" * 60)
 
     # Input shape (Y, X), output shape (3, Y, X)
     input_shape = (16, 20)
@@ -220,7 +247,9 @@ def test_hessian_2d_adjoint():
 
     passed = err < RTOL
     status = "PASS" if passed else "FAIL"
-    print(f"  [{status}] Class: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}")
+    print(
+        f"  [{status}] Class: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}"
+    )
 
     shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
     if not shape_ok:
@@ -232,11 +261,15 @@ def test_hessian_2d_adjoint():
 
 def test_grad_3d_adjoint():
     """Test Gradient3D class and grad_3d / grad_3d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import Gradient3D, grad_3d, grad_3d_adj
+    from deconlib.deconvolution.operators_mlx import (
+        Gradient3D,
+        grad_3d,
+        grad_3d_adj,
+    )
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing Gradient3D (class and functions)")
-    print("="*60)
+    print("=" * 60)
 
     # Input shape (Z, Y, X), output shape (3, Z, Y, X)
     input_shape = (8, 12, 16)
@@ -263,7 +296,9 @@ def test_grad_3d_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] r={r}: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] r={r}: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}"
+        )
         all_passed = all_passed and passed
 
     # Verify shapes
@@ -280,11 +315,15 @@ def test_grad_3d_adjoint():
 
 def test_hessian_3d_adjoint():
     """Test Hessian3D class and hessian_3d / hessian_3d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import Hessian3D, hessian_3d, hessian_3d_adj
+    from deconlib.deconvolution.operators_mlx import (
+        Hessian3D,
+        hessian_3d,
+        hessian_3d_adj,
+    )
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing Hessian3D (class and functions)")
-    print("="*60)
+    print("=" * 60)
 
     # Input shape (Z, Y, X), output shape (6, Z, Y, X)
     input_shape = (8, 12, 16)
@@ -311,7 +350,9 @@ def test_hessian_3d_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] r={r}: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] r={r}: <Hx,y>={lhs:.8f}, <x,H*y>={rhs:.8f}, err={err:.2e}"
+        )
         all_passed = all_passed and passed
 
     # Verify shapes
@@ -330,9 +371,9 @@ def test_downsample_upsample_adjoint():
     """Test downsample / upsample adjoint pair."""
     from deconlib.deconvolution.operators_mlx import downsample, upsample
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing downsample / upsample (sum-binning / replication)")
-    print("="*60)
+    print("=" * 60)
 
     all_passed = True
 
@@ -358,7 +399,9 @@ def test_downsample_upsample_adjoint():
         if isinstance(factors, int):
             lowres_shape = tuple(s // factors for s in highres_shape)
         else:
-            lowres_shape = tuple(s // f for s, f in zip(highres_shape, factors))
+            lowres_shape = tuple(
+                s // f for s, f in zip(highres_shape, factors)
+            )
 
         x = mx.random.normal(highres_shape)
         y = mx.random.normal(lowres_shape)
@@ -377,12 +420,16 @@ def test_downsample_upsample_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Dx,y>={lhs:.8f}, <x,Uy>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] {desc}: <Dx,y>={lhs:.8f}, <x,Uy>={rhs:.8f}, err={err:.2e}"
+        )
 
         # Verify shapes
         shape_ok = Dx.shape == lowres_shape and Uy.shape == highres_shape
         if not shape_ok:
-            print(f"       [FAIL] Shape mismatch: Dx={Dx.shape}, Uy={Uy.shape}")
+            print(
+                f"       [FAIL] Shape mismatch: Dx={Dx.shape}, Uy={Uy.shape}"
+            )
             passed = False
 
         all_passed = all_passed and passed
@@ -394,9 +441,9 @@ def test_fft_convolver_adjoint():
     """Test FFTConvolver forward/adjoint pair."""
     from deconlib.deconvolution.operators_mlx import FFTConvolver
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing FFTConvolver (FFT convolution / correlation)")
-    print("="*60)
+    print("=" * 60)
 
     all_passed = True
 
@@ -432,12 +479,16 @@ def test_fft_convolver_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Cx,y>={lhs:.8f}, <x,C*y>={rhs:.8f}, err={err:.2e}")
+        print(
+            f"  [{status}] {desc}: <Cx,y>={lhs:.8f}, <x,C*y>={rhs:.8f}, err={err:.2e}"
+        )
 
         # Verify shapes preserved
         shape_ok = Cx.shape == shape and C_adj_y.shape == shape
         if not shape_ok:
-            print(f"       [FAIL] Shape mismatch: Cx={Cx.shape}, C*y={C_adj_y.shape}")
+            print(
+                f"       [FAIL] Shape mismatch: Cx={Cx.shape}, C*y={C_adj_y.shape}"
+            )
             passed = False
 
         # Verify OTF is stored
@@ -454,9 +505,9 @@ def test_binned_convolver_adjoint():
     """Test BinnedConvolver forward/adjoint pair."""
     from deconlib.deconvolution.operators_mlx import BinnedConvolver
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Testing BinnedConvolver (convolution + binning)")
-    print("="*60)
+    print("=" * 60)
 
     all_passed = True
 
@@ -473,7 +524,9 @@ def test_binned_convolver_adjoint():
         if isinstance(factors, int):
             lowres_shape = tuple(s // factors for s in highres_shape)
         else:
-            lowres_shape = tuple(s // f for s, f in zip(highres_shape, factors))
+            lowres_shape = tuple(
+                s // f for s, f in zip(highres_shape, factors)
+            )
 
         # Create kernel
         kernel = mx.random.normal(highres_shape)
@@ -500,13 +553,19 @@ def test_binned_convolver_adjoint():
 
         passed = err < RTOL
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {desc}: <Ax,y>={lhs:.8f}, <x,A*y>={rhs:.8f}, err={err:.2e}")
-        print(f"       norm_sq: {A.operator_norm_sq:.2f}, shapes: {A.highres_shape} -> {A.lowres_shape}")
+        print(
+            f"  [{status}] {desc}: <Ax,y>={lhs:.8f}, <x,A*y>={rhs:.8f}, err={err:.2e}"
+        )
+        print(
+            f"       norm_sq: {A.operator_norm_sq:.2f}, shapes: {A.highres_shape} -> {A.lowres_shape}"
+        )
 
         # Verify shapes
         shape_ok = Ax.shape == lowres_shape and A_adj_y.shape == highres_shape
         if not shape_ok:
-            print(f"       [FAIL] Shape mismatch: Ax={Ax.shape}, A*y={A_adj_y.shape}")
+            print(
+                f"       [FAIL] Shape mismatch: Ax={Ax.shape}, A*y={A_adj_y.shape}"
+            )
             passed = False
 
         # Verify stored shapes match
@@ -520,10 +579,10 @@ def test_binned_convolver_adjoint():
 
 
 def main():
-    print("="*60)
+    print("=" * 60)
     print("   MLX Linear Operators - Adjoint Correctness Tests")
     print("   Using dot-product test: <Lx, y> == <x, L*y>")
-    print("="*60)
+    print("=" * 60)
 
     results = {}
 
@@ -540,9 +599,9 @@ def main():
     results["BinnedConvolver"] = test_binned_convolver_adjoint()
 
     # Summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("   SUMMARY")
-    print("="*60)
+    print("=" * 60)
 
     all_passed = True
     for name, passed in results.items():
@@ -550,17 +609,18 @@ def main():
         print(f"  [{status}] {name}")
         all_passed = all_passed and passed
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     if all_passed:
         print("   ALL TESTS PASSED")
     else:
         print("   SOME TESTS FAILED")
-    print("="*60)
+    print("=" * 60)
 
     return all_passed
 
 
 if __name__ == "__main__":
     import sys
+
     success = main()
     sys.exit(0 if success else 1)
