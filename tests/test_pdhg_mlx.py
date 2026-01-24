@@ -170,6 +170,44 @@ def test_prox_poisson_dual():
     return passed
 
 
+def test_prox_gaussian_dual():
+    """Test prox_gaussian_dual satisfies optimality conditions."""
+    from deconlib.deconvolution.pdhg_mlx import prox_gaussian_dual
+
+    print("\n" + "=" * 60)
+    print("Testing prox_gaussian_dual (Gaussian/L2 dual proximal)")
+    print("=" * 60)
+
+    # Test case: verify the formula is correct
+    # prox_{sigma*F*}(y) = (y - sigma*(D - b)) / (1 + sigma)
+    sigma = 0.1
+    data = mx.array([10.0, 100.0, 1.0])
+    background = 5.0
+    y_input = mx.array([0.5, 0.2, -0.3])
+
+    result = prox_gaussian_dual(y_input, sigma, data, background)
+
+    # Verify the formula directly
+    expected = (y_input - sigma * (data - background)) / (1.0 + sigma)
+    formula_correct = mx.allclose(result, expected, atol=1e-6).item()
+
+    # Verify the optimality condition for dual proximal:
+    # prox_{sigma*F*}(y) = argmin_v { sigma*F*(v) + (1/2)||v - y||^2 }
+    # For F*(v) = (1/2)||v||^2 + <v, D-b>, the optimality is:
+    # sigma*v + sigma*(D-b) + (v - y) = 0
+    # v*(1 + sigma) = y - sigma*(D-b)
+    # v = (y - sigma*(D-b)) / (1 + sigma)
+    residual = (1.0 + sigma) * result - (y_input - sigma * (data - background))
+    residual_small = mx.all(mx.abs(residual) < 1e-6).item()
+
+    passed = formula_correct and residual_small
+    status = "PASS" if passed else "FAIL"
+    print(f"  [{status}] prox_gaussian_dual: formula_correct={formula_correct}")
+    print(f"           optimality residual max = {mx.max(mx.abs(residual)).item():.2e}")
+
+    return passed
+
+
 def test_prox_poisson_dual_numerical_stability():
     """Test prox_poisson_dual is numerically stable for edge cases."""
     from deconlib.deconvolution.pdhg_mlx import prox_poisson_dual
@@ -460,6 +498,73 @@ def test_solve_pdhg_mlx_convergence():
     return passed
 
 
+def test_solve_pdhg_mlx_gaussian_loss():
+    """Test solve_pdhg_mlx with Gaussian (L2) loss."""
+    from deconlib.deconvolution.pdhg_mlx import solve_pdhg_mlx
+
+    print("\n" + "=" * 60)
+    print("Testing solve_pdhg_mlx with Gaussian loss")
+    print("=" * 60)
+
+    # Create test data with Gaussian noise
+    shape = (64, 64)
+
+    # Gaussian PSF
+    y, x = np.ogrid[-shape[0] // 2 : shape[0] // 2, -shape[1] // 2 : shape[1] // 2]
+    psf = np.exp(-(x**2 + y**2) / (2 * 2**2))
+    psf = np.fft.ifftshift(psf)
+    psf = psf / psf.sum()
+
+    # Ground truth - sparse signal
+    ground_truth = np.zeros(shape)
+    ground_truth[32, 32] = 100.0
+    ground_truth[20, 40] = 50.0
+
+    # Convolve and add Gaussian noise
+    from scipy.ndimage import convolve
+
+    blurred = convolve(ground_truth, psf, mode="wrap")
+    noise_std = 0.5
+    observed = blurred + noise_std * np.random.randn(*shape)
+    observed = observed.astype(np.float32)
+
+    # Run with Gaussian loss
+    result = solve_pdhg_mlx(
+        observed=mx.array(observed),
+        psf=psf,
+        alpha=0.01,
+        regularization="gradient",
+        norm="L1_2",
+        loss_type="gaussian",
+        num_iter=50,
+        background=0.0,
+        verbose=True,
+        eval_interval=10,
+    )
+
+    # Check result is valid
+    is_finite = mx.all(mx.isfinite(result.restored)).item()
+    is_nonneg = mx.all(result.restored >= 0).item()
+    correct_shape = result.restored.shape == shape
+
+    # Check metadata includes loss_type
+    has_loss_type = result.metadata.get("loss_type") == "gaussian"
+
+    # Check loss decreased
+    loss_decreased = True
+    if len(result.loss_history) >= 2:
+        loss_decreased = result.loss_history[-1] < result.loss_history[0]
+        print(f"\n  Initial loss: {result.loss_history[0]:.4f}")
+        print(f"  Final loss: {result.loss_history[-1]:.4f}")
+
+    passed = is_finite and is_nonneg and correct_shape and has_loss_type and loss_decreased
+    status = "PASS" if passed else "FAIL"
+    print(f"\n  [{status}] Gaussian loss test: finite={is_finite}, nonneg={is_nonneg}, "
+          f"shape_ok={correct_shape}, metadata_ok={has_loss_type}, loss_decreased={loss_decreased}")
+
+    return passed
+
+
 def test_solve_pdhg_mlx_3d():
     """Test solve_pdhg_mlx on 3D data."""
     from deconlib.deconvolution.pdhg_mlx import solve_pdhg_mlx
@@ -530,6 +635,7 @@ def main():
     results["prox_l1_dual"] = test_prox_l1_dual()
     results["prox_l1_2_dual"] = test_prox_l1_2_dual()
     results["prox_poisson_dual"] = test_prox_poisson_dual()
+    results["prox_gaussian_dual"] = test_prox_gaussian_dual()
     results["prox_poisson_dual stability"] = test_prox_poisson_dual_numerical_stability()
 
     # Regularizer adjoint tests
@@ -540,6 +646,7 @@ def main():
     # Algorithm tests
     results["solve_pdhg_mlx runs"] = test_solve_pdhg_mlx_runs()
     results["solve_pdhg_mlx convergence"] = test_solve_pdhg_mlx_convergence()
+    results["solve_pdhg_mlx gaussian loss"] = test_solve_pdhg_mlx_gaussian_loss()
     results["solve_pdhg_mlx 3D"] = test_solve_pdhg_mlx_3d()
 
     # Summary

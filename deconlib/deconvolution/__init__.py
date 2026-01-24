@@ -31,13 +31,23 @@ Example:
 from .base import MLXDeconvolutionResult
 from .pdhg_mlx import (
     solve_pdhg_mlx,
+    solve_pdhg_with_operator,
     IdentityRegularizer,
     GradientRegularizer,
     HessianRegularizer,
 )
+from .rl_mlx import (
+    richardson_lucy,
+    richardson_lucy_accelerated,
+    richardson_lucy_tv,
+    RLResult,
+)
 from .linops_mlx import (
     FFTConvolver,
     BinnedConvolver,
+    FiniteDetector,
+    MatrixOperator,
+    compute_detector_padding,
     Gradient1D,
     Gradient2D,
     Gradient3D,
@@ -49,14 +59,23 @@ from .linops_mlx import (
 __all__ = [
     # Result types
     "MLXDeconvolutionResult",
-    # MLX Algorithms
+    "RLResult",
+    # MLX Algorithms - PDHG
     "solve_pdhg_mlx",
+    "solve_pdhg_with_operator",
     "IdentityRegularizer",
     "GradientRegularizer",
     "HessianRegularizer",
+    # MLX Algorithms - Richardson-Lucy
+    "richardson_lucy",
+    "richardson_lucy_accelerated",
+    "richardson_lucy_tv",
     # MLX Linear Operators
     "FFTConvolver",
     "BinnedConvolver",
+    "FiniteDetector",
+    "MatrixOperator",
+    "compute_detector_padding",
     "Gradient1D",
     "Gradient2D",
     "Gradient3D",

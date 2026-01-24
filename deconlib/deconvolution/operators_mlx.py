@@ -21,6 +21,7 @@ from .linops_core_mlx import (
 # High-level operator classes
 from .linops_mlx import (
     # Gradient operators
+    Gradient1D,
     Gradient2D,
     Gradient3D,
     grad_2d,
@@ -37,6 +38,9 @@ from .linops_mlx import (
     # Convolution operators
     FFTConvolver,
     BinnedConvolver,
+    # Finite detector operator
+    FiniteDetector,
+    compute_detector_padding,
 )
 
 __all__ = [
@@ -53,6 +57,7 @@ __all__ = [
     "downsample",
     "upsample",
     # Gradient operators
+    "Gradient1D",
     "Gradient2D",
     "Gradient3D",
     "grad_2d",
@@ -69,4 +74,7 @@ __all__ = [
     # Convolution operators
     "FFTConvolver",
     "BinnedConvolver",
+    # Finite detector operator
+    "FiniteDetector",
+    "compute_detector_padding",
 ]

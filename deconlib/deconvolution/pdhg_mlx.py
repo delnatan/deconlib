@@ -1,11 +1,12 @@
 """
-Malitsky-Pock Adaptive PDHG for Poisson deconvolution using Apple MLX.
+Malitsky-Pock Adaptive PDHG for deconvolution using Apple MLX.
 
 This module implements the adaptive Chambolle-Pock algorithm with backtracking
 step sizes, eliminating the need to estimate operator norms upfront.
 
 The algorithm solves:
-    min_{x>=0}  sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
+    Poisson: min_{x>=0}  sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
+    Gaussian: min_{x>=0}  (1/2)||Ax + b - D||^2 + alpha * ||Lx||_{1 or 1,2}
 
 where:
     - A is the blur operator (FFTConvolver or BinnedConvolver)
@@ -32,10 +33,12 @@ from .linops_mlx import (
 
 __all__ = [
     "solve_pdhg_mlx",
+    "solve_pdhg_with_operator",
     "IdentityRegularizer",
     "GradientRegularizer",
     "HessianRegularizer",
     "prox_poisson_dual",
+    "prox_gaussian_dual",
     "prox_nonneg",
     "prox_l1_dual",
     "prox_l1_2_dual",
@@ -99,6 +102,29 @@ def prox_poisson_dual(
     z = mx.maximum(z, eps)
 
     return 1.0 - z
+
+
+def prox_gaussian_dual(
+    y: mx.array, sigma: float, data: mx.array, background: float
+) -> mx.array:
+    """Proximal operator for Gaussian dual (L2 loss).
+
+    For F(u) = (1/2)||u + b - D||^2 where u = Ax, the dual conjugate is:
+        F*(v) = (1/2)||v||^2 + <v, D - b>
+
+    The proximal operator is:
+        prox_{sigma*F*}(y) = (y - sigma*(D - b)) / (1 + sigma)
+
+    Args:
+        y: Dual variable.
+        sigma: Dual step size.
+        data: Observed data D.
+        background: Background constant b.
+
+    Returns:
+        Proximal of the Gaussian dual conjugate.
+    """
+    return (y - sigma * (data - background)) / (1.0 + sigma)
 
 
 def prox_nonneg(x: mx.array) -> mx.array:
@@ -422,6 +448,7 @@ def solve_pdhg_mlx(
     alpha: float = 0.01,
     regularization: Literal["identity", "gradient", "hessian"] = "hessian",
     norm: Literal["L1", "L1_2"] = "L1",
+    loss_type: Literal["poisson", "gaussian"] = "poisson",
     num_iter: int = 200,
     background: float = 0.0,
     spacing: Optional[Tuple[float, ...]] = None,
@@ -436,10 +463,11 @@ def solve_pdhg_mlx(
     min_iter: int = 20,
     patience: int = 5,
 ) -> MLXDeconvolutionResult:
-    """Solve Poisson deconvolution using Malitsky-Pock adaptive PDHG.
+    """Solve deconvolution using Malitsky-Pock adaptive PDHG.
 
-    Minimizes:
-        sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
+    Minimizes (depending on loss_type):
+        Poisson: sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
+        Gaussian: (1/2)||Ax + b - D||^2 + alpha * ||Lx||_{1 or 1,2}
     subject to x >= 0.
 
     The algorithm uses adaptive step sizes with backtracking, eliminating
@@ -456,6 +484,9 @@ def solve_pdhg_mlx(
         norm: Type of norm for regularization:
             - "L1": Anisotropic, soft-thresholds each component independently
             - "L1_2": Isotropic, joint thresholding across components per pixel
+        loss_type: Type of data fidelity loss:
+            - "poisson": Poisson negative log-likelihood (photon counting)
+            - "gaussian": Gaussian/L2 least-squares (additive Gaussian noise)
         num_iter: Maximum number of iterations.
         background: Constant background value in forward model.
         spacing: Physical spacing (dz, dy, dx) or (dy, dx) for anisotropic
@@ -580,11 +611,13 @@ def solve_pdhg_mlx(
         # Dual updates
         # =====================================================================
 
-        # y1 update: Poisson dual
-        # y1_new = prox_poisson_dual(y1 + sigma * (A(x_bar) + bg), sigma, D, bg)
+        # y1 update: Data fidelity dual
         Ax_bar = blur_op.forward(x_bar)
         y1_arg = y1 + sigma * Ax_bar
-        y1_new = prox_poisson_dual(y1_arg, sigma, data, bg)
+        if loss_type == "poisson":
+            y1_new = prox_poisson_dual(y1_arg, sigma, data, bg)
+        else:  # gaussian
+            y1_new = prox_gaussian_dual(y1_arg, sigma, data, bg)
 
         # y2 update: Regularization dual
         # y2_new = prox_reg_dual(y2 + sigma * L(x_bar), sigma, alpha)
@@ -717,21 +750,19 @@ def solve_pdhg_mlx(
 
         # Compute loss (optional, for monitoring)
         if verbose or callback is not None:
-            # Poisson NLL: sum(Ax + bg - D*log(Ax + bg))
             Ax = blur_op.forward(x)
             forward_model = Ax + bg
-            # Avoid log(0)
+            # Avoid log(0) for Poisson
             forward_model_safe = mx.maximum(forward_model, 1e-6)
-            # poisson_loss = mx.sum(
-            #     forward_model
-            #     - data * mx.log(forward_model_safe)
-            #     - (data - forward_model_safe)
-            # )
-            # express complete loss
-            poisson_loss = mx.sum(
-                data * mx.log((data + 1e-6) / forward_model_safe)
-                - (data - forward_model)
-            )
+
+            # Data fidelity term
+            if loss_type == "poisson":
+                data_loss = mx.sum(
+                    data * mx.log((data + 1e-6) / forward_model_safe)
+                    - (data - forward_model)
+                )
+            else:  # gaussian
+                data_loss = 0.5 * mx.sum((data - forward_model) ** 2)
 
             # Regularization term
             Lx = reg_op.forward(x)
@@ -743,7 +774,7 @@ def solve_pdhg_mlx(
                     mx.sqrt(mx.sum(Lx * Lx, axis=0) + 1e-12)
                 )
 
-            loss = float(poisson_loss + reg_loss)
+            loss = float(data_loss + reg_loss)
             chi2 = mx.mean((data - forward_model) ** 2 / forward_model_safe)
             loss_history.append(loss)
 
@@ -772,10 +803,329 @@ def solve_pdhg_mlx(
             "algorithm": "malitsky_pock_pdhg",
             "regularization": regularization,
             "norm": norm,
+            "loss_type": loss_type,
             "alpha": alpha,
             "background": background,
             "tol": tol,
             "min_iter": min_iter,
             "patience": patience,
+        },
+    )
+
+
+# -----------------------------------------------------------------------------
+# Generic Operator PDHG Solver
+# -----------------------------------------------------------------------------
+
+
+def solve_pdhg_with_operator(
+    observed: mx.array,
+    blur_op,
+    alpha: float = 0.01,
+    regularization: Literal["identity", "gradient", "hessian"] = "identity",
+    norm: Literal["L1", "L1_2"] = "L1",
+    loss_type: Literal["poisson", "gaussian"] = "poisson",
+    num_iter: int = 200,
+    background: float = 0.0,
+    init: Optional[mx.array] = None,
+    verbose: bool = False,
+    callback: Optional[Callable[[int, mx.array, float], None]] = None,
+    delta: float = 0.99,
+    eta: float = 0.5,
+    eval_interval: int = 10,
+    tol: float = 1e-5,
+    min_iter: int = 20,
+    patience: int = 5,
+) -> MLXDeconvolutionResult:
+    """PDHG solver accepting a pre-built linear operator.
+
+    Unlike solve_pdhg_mlx which constructs FFTConvolver from a PSF,
+    this version accepts any operator with forward/adjoint/operator_norm_sq
+    interface. This enables solving problems with non-convolutional forward
+    models such as Fredholm integral equations.
+
+    Minimizes (depending on loss_type):
+        Poisson: sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
+        Gaussian: (1/2)||Ax + b - D||^2 + alpha * ||Lx||_{1 or 1,2}
+    subject to x >= 0.
+
+    Args:
+        observed: Observed data, shape (m,) for 1D or (m, ...) for higher dims.
+        blur_op: Linear operator with forward(), adjoint(), and operator_norm_sq.
+            For MatrixOperator with shape (m, n), observed should have shape (m,)
+            and the solution will have shape (n,).
+        alpha: Regularization weight. Larger = smoother result.
+        regularization: Type of regularization operator L:
+            - "identity": L=I, sparsity directly on x
+            - "gradient": First-order derivatives (TV)
+            - "hessian": Second-order derivatives
+        norm: Type of norm for regularization:
+            - "L1": Anisotropic, soft-thresholds each component independently
+            - "L1_2": Isotropic, joint thresholding across components per pixel
+        loss_type: Type of data fidelity loss:
+            - "poisson": Poisson negative log-likelihood
+            - "gaussian": Gaussian/L2 least-squares
+        num_iter: Maximum number of iterations.
+        background: Constant background value in forward model.
+        init: Initial guess for x. If None, initializes as zeros with
+            appropriate shape inferred from the operator.
+        verbose: If True, print progress every eval_interval iterations.
+        callback: Optional function called each iteration with (iter, x, loss).
+        delta: Safety factor for step size adaptation (0 < delta < 1).
+        eta: Backtracking reduction factor (0 < eta < 1).
+        eval_interval: Interval for mx.eval() to prevent graph explosion.
+        tol: Convergence tolerance for relative primal change.
+        min_iter: Minimum iterations before checking convergence.
+        patience: Consecutive iterations meeting tolerance before stopping.
+
+    Returns:
+        MLXDeconvolutionResult with restored signal and convergence info.
+
+    Example:
+        >>> import mlx.core as mx
+        >>> from deconlib.deconvolution import MatrixOperator, solve_pdhg_with_operator
+        >>>
+        >>> # Create a matrix operator for a Fredholm integral equation
+        >>> A = MatrixOperator(kernel_matrix)
+        >>> result = solve_pdhg_with_operator(
+        ...     observed=mx.array(data),
+        ...     blur_op=A,
+        ...     alpha=0.01,
+        ...     regularization="identity",
+        ...     num_iter=500,
+        ... )
+    """
+    # Infer solution shape from operator
+    # For MatrixOperator with shape (m, n): solution has shape (n,)
+    if hasattr(blur_op, "shape") and len(blur_op.shape) == 2:
+        # Matrix operator: shape is (m, n)
+        solution_shape = (blur_op.shape[1],)
+        ndim = 1
+    else:
+        # Assume solution shape matches observed shape (e.g., FFTConvolver)
+        solution_shape = observed.shape
+        ndim = observed.ndim
+
+    # Create regularizer
+    # Note: For matrix operators, we typically use 1D regularizers
+    reg_op = _create_regularizer(regularization, ndim, r=1.0, norm=norm)
+
+    # Initialize primal variable
+    if init is not None:
+        x = init
+    else:
+        # For matrix operators, initialize with zeros or small positive values
+        x = mx.ones(solution_shape) * 0.01
+
+    x = mx.maximum(x, 0.0)
+
+    # Initialize dual variables
+    # y1: dual for data term, shape = observed.shape
+    y1 = mx.zeros(observed.shape)
+    # y2: dual for regularization, shape = (ncomp, *solution_shape)
+    y2 = mx.zeros((reg_op.output_components,) + solution_shape)
+
+    # Initialize overrelaxed primal
+    x_bar = x
+
+    # Initial step sizes based on operator norms
+    blur_norm_sq = blur_op.operator_norm_sq
+    reg_norm_sq = reg_op.operator_norm_sq
+    K_norm_sq = blur_norm_sq + reg_norm_sq
+
+    step_scale = 0.99 / (K_norm_sq**0.5)
+    tau = step_scale
+    sigma = step_scale
+    theta = 1.0
+
+    # History tracking
+    loss_history: List[float] = []
+    tau_history: List[float] = []
+    sigma_history: List[float] = []
+
+    # Convergence tracking
+    converged = False
+    converge_count = 0
+    final_iter = num_iter
+
+    # Cache observed as float32
+    data = observed.astype(mx.float32)
+    bg = float(background)
+
+    for k in range(num_iter):
+        # =====================================================================
+        # Dual updates
+        # =====================================================================
+
+        # y1 update: Data fidelity dual
+        Ax_bar = blur_op.forward(x_bar)
+        y1_arg = y1 + sigma * Ax_bar
+        if loss_type == "poisson":
+            y1_new = prox_poisson_dual(y1_arg, sigma, data, bg)
+        else:  # gaussian
+            y1_new = prox_gaussian_dual(y1_arg, sigma, data, bg)
+
+        # y2 update: Regularization dual
+        Lx_bar = reg_op.forward(x_bar)
+        y2_arg = y2 + sigma * Lx_bar
+        y2_new = reg_op.prox_dual(y2_arg, sigma, alpha)
+
+        # =====================================================================
+        # Primal update
+        # =====================================================================
+
+        grad_x = blur_op.adjoint(y1_new) + reg_op.adjoint(y2_new)
+        x_new = prox_nonneg(x - tau * grad_x)
+
+        # =====================================================================
+        # Adaptive step size (Malitsky-Pock)
+        # =====================================================================
+
+        dx = x_new - x
+        dx_norm_sq = mx.sum(dx * dx)
+
+        Ax_new = blur_op.forward(x_new)
+        Lx_new = reg_op.forward(x_new)
+
+        dAx = Ax_new - blur_op.forward(x)
+        dLx = Lx_new - reg_op.forward(x)
+
+        dKx_norm_sq = mx.sum(dAx * dAx) + mx.sum(dLx * dLx)
+
+        dKx_norm_sq_safe = mx.maximum(dKx_norm_sq, 1e-12)
+
+        ratio = dx_norm_sq / (2.0 * sigma * dKx_norm_sq_safe)
+        tau_candidate = mx.minimum(
+            mx.sqrt(1.0 + theta) * tau, delta * mx.sqrt(ratio)
+        )
+
+        condition = tau_candidate * sigma * dKx_norm_sq
+        threshold = delta * dx_norm_sq
+
+        tau_new = mx.where(
+            condition > threshold, eta * tau_candidate, tau_candidate
+        )
+
+        tau_min = step_scale * 1e-4
+        tau_new = mx.maximum(tau_new, tau_min)
+
+        theta_new = tau_new / tau
+
+        theta_safe = mx.maximum(theta_new, 0.1)
+        sigma_new = sigma / theta_safe
+        sigma_min = step_scale * 1e-4
+        sigma_max = step_scale * 1e4
+        sigma_new = mx.clip(sigma_new, sigma_min, sigma_max)
+
+        # =====================================================================
+        # Convergence check
+        # =====================================================================
+
+        x_norm_sq = mx.sum(x * x)
+        x_new_norm_sq = mx.sum(x_new * x_new)
+        max_norm_sq = mx.maximum(x_norm_sq, x_new_norm_sq)
+        rel_change = mx.sqrt(dx_norm_sq / (max_norm_sq + 1e-12))
+        rel_change_val = float(rel_change)
+
+        if k >= min_iter:
+            if rel_change_val < tol:
+                converge_count += 1
+                if converge_count >= patience:
+                    converged = True
+                    final_iter = k + 1
+                    if verbose:
+                        print(
+                            f"Converged at iteration {final_iter}: "
+                            f"rel_change={rel_change_val:.2e} < tol={tol:.2e} "
+                            f"for {patience} consecutive iterations"
+                        )
+                    mx.eval(x_new, y1_new, y2_new)
+                    x = x_new
+                    y1 = y1_new
+                    y2 = y2_new
+                    tau_history.append(float(tau_new))
+                    sigma_history.append(float(sigma_new))
+                    break
+            else:
+                converge_count = 0
+
+        # =====================================================================
+        # Overrelaxation
+        # =====================================================================
+
+        x_bar_new = x_new + theta_new * (x_new - x)
+
+        # =====================================================================
+        # Update variables
+        # =====================================================================
+
+        x = x_new
+        x_bar = x_bar_new
+        y1 = y1_new
+        y2 = y2_new
+        tau = float(tau_new)
+        sigma = float(sigma_new)
+        theta = float(theta_new)
+
+        tau_history.append(tau)
+        sigma_history.append(sigma)
+
+        # Compute loss (optional, for monitoring)
+        if verbose or callback is not None:
+            Ax = blur_op.forward(x)
+            forward_model = Ax + bg
+            forward_model_safe = mx.maximum(forward_model, 1e-6)
+
+            if loss_type == "poisson":
+                data_loss = mx.sum(
+                    data * mx.log((data + 1e-6) / forward_model_safe)
+                    - (data - forward_model)
+                )
+            else:  # gaussian
+                data_loss = 0.5 * mx.sum((data - forward_model) ** 2)
+
+            Lx = reg_op.forward(x)
+            if norm == "L1":
+                reg_loss = alpha * mx.sum(mx.abs(Lx))
+            else:  # L1_2
+                reg_loss = alpha * mx.sum(
+                    mx.sqrt(mx.sum(Lx * Lx, axis=0) + 1e-12)
+                )
+
+            loss = float(data_loss + reg_loss)
+            chi2 = mx.mean((data - forward_model) ** 2 / forward_model_safe)
+            loss_history.append(loss)
+
+            if callback is not None:
+                callback(k, x, loss)
+
+        if verbose and (k + 1) % eval_interval == 0:
+            print(
+                f"Iter {k + 1:4d}: loss={loss_history[-1]:.4e}, "
+                f" chi-sq = {chi2:.4f}, "
+                f"tau={tau:.4e}, sigma={sigma:.4e}"
+            )
+
+        if (k + 1) % eval_interval == 0:
+            mx.eval(x, x_bar, y1, y2)
+
+    return MLXDeconvolutionResult(
+        restored=x,
+        iterations=final_iter,
+        loss_history=loss_history,
+        converged=converged,
+        tau_history=tau_history,
+        sigma_history=sigma_history,
+        metadata={
+            "algorithm": "malitsky_pock_pdhg",
+            "regularization": regularization,
+            "norm": norm,
+            "loss_type": loss_type,
+            "alpha": alpha,
+            "background": background,
+            "tol": tol,
+            "min_iter": min_iter,
+            "patience": patience,
+            "operator_type": "generic",
         },
     )

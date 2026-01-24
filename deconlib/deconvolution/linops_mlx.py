@@ -5,7 +5,7 @@ Provides class-based gradient, Hessian, and convolution operators with
 precomputed spectral norms for use in optimization algorithms.
 """
 
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -441,4 +441,204 @@ class BinnedConvolver:
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
 
+
+# -----------------------------------------------------------------------------
+# Finite detector (cropping) operator
+# -----------------------------------------------------------------------------
+
+
+def compute_detector_padding(
+    kernel_shape: Tuple[int, ...],
+) -> Tuple[Tuple[int, int], ...]:
+    """Compute padding amounts from kernel shape.
+
+    For kernel size M along each axis, padding is M//2 on each side.
+
+    Args:
+        kernel_shape: Shape of the convolution kernel.
+
+    Returns:
+        Tuple of (before, after) padding for each axis.
+    """
+    return tuple((m // 2, m // 2) for m in kernel_shape)
+
+
+class MatrixOperator:
+    """Linear operator defined by explicit matrix multiplication.
+
+    For non-convolutional operators like Fredholm integral equations
+    where FFT-based computation is not possible.
+
+    Forward: y = A @ x
+    Adjoint: x = A.T @ y
+
+    Attributes:
+        shape: (m, n) shape of the matrix.
+        operator_norm_sq: Squared spectral norm ||A||^2 = sigma_max^2.
+    """
+
+    def __init__(self, matrix: Union[np.ndarray, mx.array]):
+        """Initialize MatrixOperator.
+
+        Args:
+            matrix: (m, n) matrix defining the linear operator.
+        """
+        if isinstance(matrix, mx.array):
+            matrix_np = np.array(matrix)
+        else:
+            matrix_np = matrix.astype(np.float32)
+
+        self._matrix = mx.array(matrix_np.astype(np.float32))
+
+        # Compute spectral norm squared (largest singular value squared)
+        # For small matrices, use SVD; for large, this is still reasonable
+        U, S, Vt = np.linalg.svd(matrix_np, full_matrices=False)
+        self._operator_norm_sq = float(S[0] ** 2)
+
+    @property
+    def operator_norm_sq(self) -> float:
+        """Squared spectral norm ||A||^2."""
+        return self._operator_norm_sq
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """Shape (m, n) of the matrix."""
+        return self._matrix.shape
+
+    def forward(self, x: mx.array) -> mx.array:
+        """Apply forward operator: y = A @ x."""
+        return self._matrix @ x
+
+    def adjoint(self, y: mx.array) -> mx.array:
+        """Apply adjoint operator: x = A.T @ y."""
+        return self._matrix.T @ y
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
+class FiniteDetector:
+    """Finite detector (crop/zero-pad) operator.
+
+    Models the finite extent of a camera sensor. Crops reconstruction to
+    detector size (forward) or embeds detector data into larger space (adjoint).
+
+    This enables accurate image reconstruction by accounting for signal from
+    outside the detector region that contributes to edge pixels due to blur
+    (PSF convolution).
+
+    Physical model:
+        Object (larger than detector) -> Blur (convolution) -> Bin -> **Clip**
+
+    Attributes:
+        detector_shape: Shape of observed data (camera chip).
+        padded_shape: Shape of reconstruction with padding.
+        padding: Padding amounts per axis as tuple of (before, after) tuples.
+        operator_norm_sq: Squared spectral norm (= 1.0 for projection).
+
+    Example:
+        >>> P = FiniteDetector((64, 64), kernel_shape=(15, 15))
+        >>> print(P.padded_shape)  # (78, 78)
+        >>> x_padded = mx.random.normal((78, 78))
+        >>> y_detector = P.forward(x_padded)  # (64, 64)
+        >>> x_back = P.adjoint(y_detector)  # (78, 78)
+    """
+
+    operator_norm_sq = 1.0  # Projection operator: ||P|| = 1
+
+    def __init__(
+        self,
+        detector_shape: Tuple[int, ...],
+        kernel_shape: Optional[Tuple[int, ...]] = None,
+        padding: Optional[
+            Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]
+        ] = None,
+    ):
+        """Initialize FiniteDetector operator.
+
+        Args:
+            detector_shape: Shape of observed data (camera chip).
+            kernel_shape: Shape of convolution kernel. Used to compute padding
+                as M//2 per side per axis. Mutually exclusive with `padding`.
+            padding: Explicit padding specification. Can be:
+                - Tuple of ints: symmetric padding per axis, e.g. (10, 10)
+                - Tuple of (before, after) tuples, e.g. ((10, 10), (5, 5))
+                Mutually exclusive with `kernel_shape`.
+
+        Raises:
+            ValueError: If neither or both of kernel_shape/padding are provided.
+        """
+        # Validate: exactly one of kernel_shape or padding must be provided
+        if (kernel_shape is None) == (padding is None):
+            raise ValueError(
+                "Exactly one of 'kernel_shape' or 'padding' must be provided"
+            )
+
+        self.detector_shape = detector_shape
+        ndim = len(detector_shape)
+
+        # Compute padding from kernel_shape if provided
+        if kernel_shape is not None:
+            if len(kernel_shape) != ndim:
+                raise ValueError(
+                    f"kernel_shape has {len(kernel_shape)} dims, "
+                    f"detector_shape has {ndim}"
+                )
+            self.padding = compute_detector_padding(kernel_shape)
+        else:
+            # Normalize padding to (before, after) tuples
+            # Handle integer shorthand: (10, 10) -> ((10, 10), (10, 10))
+            if isinstance(padding[0], int):
+                if len(padding) != ndim:
+                    raise ValueError(
+                        f"padding has {len(padding)} elements, "
+                        f"detector_shape has {ndim} dims"
+                    )
+                self.padding = tuple((p, p) for p in padding)
+            else:
+                if len(padding) != ndim:
+                    raise ValueError(
+                        f"padding has {len(padding)} elements, "
+                        f"detector_shape has {ndim} dims"
+                    )
+                self.padding = tuple(
+                    tuple(p) if not isinstance(p, tuple) else p
+                    for p in padding
+                )
+
+        # Compute padded_shape = detector_shape + padding
+        self.padded_shape = tuple(
+            d + pb + pa for d, (pb, pa) in zip(detector_shape, self.padding)
+        )
+
+        # Precompute slice objects for efficient cropping
+        self._slices = tuple(
+            slice(pb, pb + d)
+            for d, (pb, pa) in zip(detector_shape, self.padding)
+        )
+
+    def forward(self, x: mx.array) -> mx.array:
+        """Crop padded array to detector size.
+
+        Args:
+            x: Array with shape matching padded_shape.
+
+        Returns:
+            Cropped array with shape matching detector_shape.
+        """
+        return x[self._slices]
+
+    def adjoint(self, y: mx.array) -> mx.array:
+        """Zero-pad detector array to padded size.
+
+        Args:
+            y: Array with shape matching detector_shape.
+
+        Returns:
+            Zero-padded array with shape matching padded_shape.
+        """
+        return mx.pad(y, list(self.padding), mode="constant", constant_values=0)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
 
