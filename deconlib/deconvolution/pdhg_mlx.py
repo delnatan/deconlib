@@ -9,9 +9,13 @@ The algorithm solves:
     Gaussian: min_{x>=0}  (1/2)||Ax + b - D||^2 + alpha * ||Lx||_{1 or 1,2}
 
 where:
-    - A is the blur operator (FFTConvolver or BinnedConvolver)
-    - L is the regularization operator (Identity, Gradient, or Hessian)
-    - D is observed data, b is background
+    - A is any object satisfying the :class:`LinearOperator` protocol
+      (``forward``, ``adjoint``, ``operator_norm_sq``). ``solve_pdhg_mlx``
+      builds A from a PSF (and optional detector integration); ``solve_pdhg_with_operator``
+      takes A directly, so composed forward models like
+      ``Compose(FiniteDetector, IntegratedDetectorConvolver)`` work transparently.
+    - L is the regularization operator (Identity, Gradient, or Hessian).
+    - D is observed data, b is background.
 """
 
 from typing import Callable, List, Literal, Optional, Tuple, Union
@@ -21,7 +25,6 @@ import numpy as np
 
 from .base import MLXDeconvolutionResult
 from .linops_mlx import (
-    BinnedConvolver,
     FFTConvolver,
     Gradient1D,
     Gradient2D,
@@ -29,6 +32,7 @@ from .linops_mlx import (
     Hessian1D,
     Hessian2D,
     Hessian3D,
+    IntegratedDetectorConvolver,
 )
 
 __all__ = [
@@ -48,6 +52,61 @@ __all__ = [
 # -----------------------------------------------------------------------------
 # Proximal Operators
 # -----------------------------------------------------------------------------
+
+
+def _normalize_sampling_factors(
+    factors: Union[float, Tuple[float, ...]], ndim: int
+) -> Tuple[float, ...]:
+    """Normalize super-sampling factors to one float per spatial axis."""
+    if isinstance(factors, (int, float)):
+        factors = (float(factors),) * ndim
+    elif len(factors) != ndim:
+        raise ValueError(
+            f"sampling_factors has length {len(factors)}, expected {ndim}"
+        )
+    else:
+        factors = tuple(float(f) for f in factors)
+
+    if any(f <= 0 for f in factors):
+        raise ValueError("sampling_factors must all be positive")
+    return factors
+
+
+def _normalize_bin_factors(
+    factors: Union[int, Tuple[int, ...]], ndim: int
+) -> Tuple[int, ...]:
+    if isinstance(factors, int):
+        factors = (factors,) * ndim
+    elif len(factors) != ndim:
+        raise ValueError(f"bin_factors has length {len(factors)}, expected {ndim}")
+    else:
+        factors = tuple(int(f) for f in factors)
+
+    if any(f <= 0 for f in factors):
+        raise ValueError("bin_factors must all be positive")
+    return factors
+
+
+def _shape_from_sampling_factors(
+    observed_shape: Tuple[int, ...],
+    sampling_factors: Tuple[float, ...],
+) -> Tuple[int, ...]:
+    return tuple(
+        max(1, int(round(n * f)))
+        for n, f in zip(observed_shape, sampling_factors)
+    )
+
+
+def _shape_from_bin_factors(
+    highres_shape: Tuple[int, ...],
+    factors: Tuple[int, ...],
+) -> Tuple[int, ...]:
+    for i, (n, f) in enumerate(zip(highres_shape, factors)):
+        if n % f != 0:
+            raise ValueError(
+                f"PSF dim {i} size {n} is not divisible by bin factor {f}"
+            )
+    return tuple(n // f for n, f in zip(highres_shape, factors))
 
 
 def prox_poisson_dual(
@@ -453,9 +512,12 @@ def solve_pdhg_mlx(
     background: float = 0.0,
     spacing: Optional[Tuple[float, ...]] = None,
     bin_factors: Optional[Union[int, Tuple[int, ...]]] = None,
+    sampling_factors: Optional[Union[float, Tuple[float, ...]]] = None,
+    icf_sigmas: Optional[Tuple[float, ...]] = None,
+    icf_spacings: Optional[Tuple[float, ...]] = None,
     init: Optional[mx.array] = None,
     verbose: bool = False,
-    callback: Optional[Callable[[int, mx.array, float], None]] = None,
+    callback: Optional[Callable[[int, mx.array], Optional[bool]]] = None,
     delta: float = 0.99,
     eta: float = 0.5,
     eval_interval: int = 10,
@@ -492,10 +554,21 @@ def solve_pdhg_mlx(
         spacing: Physical spacing (dz, dy, dx) or (dy, dx) for anisotropic
             regularization weighting. If None, assumes isotropic spacing.
         bin_factors: Binning factors for super-resolution mode. If provided,
-            PSF is assumed to be at high resolution and observed at low res.
+            uses integer block-sum binning. PSF is assumed to be at high
+            resolution and observed at low resolution.
+        sampling_factors: Non-integer or anisotropic super-sampling factors for
+            Fourier-domain detector resampling. For example, ``(1.5, 2, 2)``
+            reconstructs on a grid that is approximately 1.5x finer in Z and
+            2x finer laterally. Mutually exclusive with ``bin_factors``.
+        icf_sigmas: Optional Gaussian intrinsic correlation sigmas on the
+            reconstruction grid. When provided with a binned model, the ICF is
+            folded into the forward OTF instead of applied as a separate FFT.
+        icf_spacings: Physical spacings corresponding to ``icf_sigmas``.
+            Defaults to unit spacing on the reconstruction grid.
         init: Initial guess for x. If None, initializes from observed data.
         verbose: If True, print progress every eval_interval iterations.
-        callback: Optional function called each iteration with (iter, x, loss).
+        callback: Optional function called each iteration with (iter, x).
+            Return a truthy value to stop early; ``None``/``False`` continues.
         delta: Safety factor for step size adaptation (0 < delta < 1).
         eta: Backtracking reduction factor (0 < eta < 1).
         eval_interval: Interval for mx.eval() to prevent graph explosion.
@@ -542,11 +615,41 @@ def solve_pdhg_mlx(
         psf = mx.array(psf)
 
     ndim = observed.ndim
+    if bin_factors is not None and sampling_factors is not None:
+        raise ValueError("bin_factors and sampling_factors are mutually exclusive")
 
     # Create blur operator
-    if bin_factors is not None:
-        blur_op = BinnedConvolver(psf, factors=bin_factors, normalize=True)
-        highres_shape = blur_op.highres_shape
+    if sampling_factors is not None:
+        factors = _normalize_sampling_factors(sampling_factors, ndim)
+        highres_shape = _shape_from_sampling_factors(tuple(observed.shape), factors)
+        if tuple(psf.shape) != highres_shape:
+            raise ValueError(
+                "For sampling_factors, psf.shape must match the reconstructed "
+                f"high-resolution shape {highres_shape}; got {tuple(psf.shape)}"
+            )
+        blur_op = IntegratedDetectorConvolver(
+            psf,
+            output_shape=tuple(observed.shape),
+            normalize=True,
+            icf_sigmas=icf_sigmas,
+            icf_spacings=icf_spacings,
+        )
+    elif bin_factors is not None:
+        factors = _normalize_bin_factors(bin_factors, ndim)
+        highres_shape = tuple(psf.shape)
+        lowres_shape = _shape_from_bin_factors(highres_shape, factors)
+        if tuple(observed.shape) != lowres_shape:
+            raise ValueError(
+                "For bin_factors, observed.shape must match psf.shape divided "
+                f"by bin_factors; expected {lowres_shape}, got {tuple(observed.shape)}"
+            )
+        blur_op = IntegratedDetectorConvolver(
+            psf,
+            output_shape=lowres_shape,
+            normalize=True,
+            icf_sigmas=icf_sigmas,
+            icf_spacings=icf_spacings,
+        )
     else:
         blur_op = FFTConvolver(psf, normalize=True)
         highres_shape = observed.shape
@@ -559,12 +662,10 @@ def solve_pdhg_mlx(
     if init is not None:
         x = init
     else:
-        if bin_factors is not None:
-            # Upsample observed for initialization
-            from .linops_mlx import _normalize_factors, upsample
-
-            factors = _normalize_factors(bin_factors, ndim)
-            x = upsample(observed, factors)
+        if sampling_factors is not None:
+            x = blur_op.adjoint(observed)
+        elif bin_factors is not None:
+            x = blur_op.adjoint(observed)
         else:
             x = observed.astype(mx.float32)
         x = mx.maximum(x, 0.0)
@@ -748,49 +849,48 @@ def solve_pdhg_mlx(
         tau_history.append(tau)
         sigma_history.append(sigma)
 
-        # Compute loss (optional, for monitoring)
-        if verbose or callback is not None:
+        # Periodic loss bookkeeping (every eval_interval, like RL)
+        if (k + 1) % eval_interval == 0:
             Ax = blur_op.forward(x)
             forward_model = Ax + bg
-            # Avoid log(0) for Poisson
             forward_model_safe = mx.maximum(forward_model, 1e-6)
 
-            # Data fidelity term
             if loss_type == "poisson":
                 data_loss = mx.sum(
                     data * mx.log((data + 1e-6) / forward_model_safe)
                     - (data - forward_model)
                 )
-            else:  # gaussian
+            else:
                 data_loss = 0.5 * mx.sum((data - forward_model) ** 2)
 
-            # Regularization term
             Lx = reg_op.forward(x)
             if norm == "L1":
                 reg_loss = alpha * mx.sum(mx.abs(Lx))
-            else:  # L1_2
-                # ||Lx||_{1,2} = sum_i ||Lx_i||_2
+            else:
                 reg_loss = alpha * mx.sum(
                     mx.sqrt(mx.sum(Lx * Lx, axis=0) + 1e-12)
                 )
 
             loss = float(data_loss + reg_loss)
-            chi2 = mx.mean((data - forward_model) ** 2 / forward_model_safe)
             loss_history.append(loss)
 
-            if callback is not None:
-                callback(k, x, loss)
+            if verbose:
+                chi2 = mx.mean(
+                    (data - forward_model) ** 2 / forward_model_safe
+                )
+                print(
+                    f"Iter {k + 1:4d}: loss={loss:.4e}, "
+                    f" chi-sq = {float(chi2):.4f}, "
+                    f"tau={tau:.4e}, sigma={sigma:.4e}"
+                )
 
-        if verbose and (k + 1) % eval_interval == 0:
-            print(
-                f"Iter {k + 1:4d}: loss={loss_history[-1]:.4e}, "
-                f" chi-sq = {chi2:.4f}, "
-                f"tau={tau:.4e}, sigma={sigma:.4e}"
-            )
-
-        # Periodic evaluation to prevent graph explosion
-        if (k + 1) % eval_interval == 0:
+            # Periodic evaluation to prevent graph explosion
             mx.eval(x, x_bar, y1, y2)
+
+        # Live-feedback callback (every iteration; user gates internally)
+        if callback is not None and callback(k, x):
+            final_iter = k + 1
+            break
 
     return MLXDeconvolutionResult(
         restored=x,
@@ -829,7 +929,7 @@ def solve_pdhg_with_operator(
     background: float = 0.0,
     init: Optional[mx.array] = None,
     verbose: bool = False,
-    callback: Optional[Callable[[int, mx.array, float], None]] = None,
+    callback: Optional[Callable[[int, mx.array], Optional[bool]]] = None,
     delta: float = 0.99,
     eta: float = 0.5,
     eval_interval: int = 10,
@@ -839,10 +939,12 @@ def solve_pdhg_with_operator(
 ) -> MLXDeconvolutionResult:
     """PDHG solver accepting a pre-built linear operator.
 
-    Unlike solve_pdhg_mlx which constructs FFTConvolver from a PSF,
-    this version accepts any operator with forward/adjoint/operator_norm_sq
-    interface. This enables solving problems with non-convolutional forward
-    models such as Fredholm integral equations.
+    Unlike ``solve_pdhg_mlx`` which builds an ``FFTConvolver`` from a PSF,
+    this version accepts any object satisfying the :class:`LinearOperator`
+    protocol (``forward``, ``adjoint``, ``operator_norm_sq``). Use this with
+    composed forward models (``Compose(FiniteDetector, IntegratedDetectorConvolver)``,
+    etc.) or non-convolutional operators such as ``MatrixOperator`` for
+    Fredholm integral equations.
 
     Minimizes (depending on loss_type):
         Poisson: sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
@@ -851,9 +953,12 @@ def solve_pdhg_with_operator(
 
     Args:
         observed: Observed data, shape (m,) for 1D or (m, ...) for higher dims.
-        blur_op: Linear operator with forward(), adjoint(), and operator_norm_sq.
-            For MatrixOperator with shape (m, n), observed should have shape (m,)
-            and the solution will have shape (n,).
+        blur_op: Any :class:`LinearOperator` (``forward``, ``adjoint``,
+            ``operator_norm_sq``). For ``MatrixOperator`` with shape (m, n),
+            ``observed`` should have shape (m,) and the solution will have
+            shape (n,). For composed operators
+            (``Compose(FiniteDetector, FFTConvolver)``), ``observed`` and the
+            solution shape are inferred from ``observed.shape``.
         alpha: Regularization weight. Larger = smoother result.
         regularization: Type of regularization operator L:
             - "identity": L=I, sparsity directly on x
@@ -870,7 +975,8 @@ def solve_pdhg_with_operator(
         init: Initial guess for x. If None, initializes as zeros with
             appropriate shape inferred from the operator.
         verbose: If True, print progress every eval_interval iterations.
-        callback: Optional function called each iteration with (iter, x, loss).
+        callback: Optional function called each iteration with (iter, x).
+            Return a truthy value to stop early; ``None``/``False`` continues.
         delta: Safety factor for step size adaptation (0 < delta < 1).
         eta: Backtracking reduction factor (0 < eta < 1).
         eval_interval: Interval for mx.eval() to prevent graph explosion.

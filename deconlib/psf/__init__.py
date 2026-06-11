@@ -63,6 +63,26 @@ from .retrieval import (
     retrieve_phase,
     retrieve_phase_vectorial,
     PhaseRetrievalResult,
+    make_pupil_real_filter,
+)
+
+# PSF distillation from bead data
+from .distillation import (
+    BeadDetectionResult,
+    PsfDistillationResult,
+    detect_beads,
+    distill_psf,
+    find_bead_positions,
+    extract_bead_crops,
+    distill_single_bead,
+    stack_psfs,
+    make_otf_mask,
+    make_measurement_otf,
+    project_psf,
+    matched_filter_amplitudes,
+    fft_convolve,
+    fft_correlate,
+    poisson_reduced_chi_squared,
 )
 
 __all__ = [
@@ -98,4 +118,34 @@ __all__ = [
     "retrieve_phase",
     "retrieve_phase_vectorial",
     "PhaseRetrievalResult",
+    "make_pupil_real_filter",
+    "MLXRetrievalConfig",
+    "retrieve_phase_vectorial_mlx",
+    # PSF distillation
+    "BeadDetectionResult",
+    "PsfDistillationResult",
+    "detect_beads",
+    "distill_psf",
+    "find_bead_positions",
+    "extract_bead_crops",
+    "distill_single_bead",
+    "stack_psfs",
+    "make_otf_mask",
+    "make_measurement_otf",
+    "project_psf",
+    "matched_filter_amplitudes",
+    "fft_convolve",
+    "fft_correlate",
+    "poisson_reduced_chi_squared",
 ]
+
+
+def __getattr__(name):
+    """Lazily import optional MLX-backed phase retrieval."""
+    if name in {"MLXRetrievalConfig", "retrieve_phase_vectorial_mlx"}:
+        from .retrieval_mlx import MLXRetrievalConfig, retrieve_phase_vectorial_mlx
+
+        globals()["MLXRetrievalConfig"] = MLXRetrievalConfig
+        globals()["retrieve_phase_vectorial_mlx"] = retrieve_phase_vectorial_mlx
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

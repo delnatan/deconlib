@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deconlib"
-version = "0.3.0"
+version = "0.4.0"
 description = "Optical microscopy PSF computation and deconvolution library"
 readme = "README.md"
 license = "MIT"
@@ -33,10 +33,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "mlx>=0.30.3",
+    "mlx",
     "numpy>=1.21",
-    "pytest>=9.0.2",
+    "scipy>=1.10",
+    "h5py>=3.0",
+    "pytest",
+    "memsolve",
 ]
+
+[tool.uv.sources]
+memsolve = { path = "/Users/delnatan/Projects/github/memsolve", editable = true }
 
 [project.optional-dependencies]
 dev = [

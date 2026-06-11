@@ -6,6 +6,7 @@ from .optics import Geometry, Optics
 
 __all__ = [
     "make_pupil",
+    "aplanatic_apodization",
     "apply_apodization",
     "compute_amplitude_correction",
     "compute_fresnel_coefficients",
@@ -16,6 +17,10 @@ __all__ = [
 def make_pupil(geom: Geometry, apodize: bool = False) -> np.ndarray:
     """Create uniform complex pupil function.
 
+    Uses the anti-aliased `support_weight` so the pupil amplitude smoothly
+    drops from 1 inside the NA to 0 outside, eliminating the staircase
+    boundary that a binary mask would impose on a Cartesian grid.
+
     Args:
         geom: Precomputed geometry from make_geometry().
         apodize: If True, apply aplanatic apodization factor (1/sqrt(cos θ)).
@@ -23,7 +28,8 @@ def make_pupil(geom: Geometry, apodize: bool = False) -> np.ndarray:
             high-NA systems. Default is False.
 
     Returns:
-        Complex pupil array of shape (ny, nx), unity inside NA, zero outside.
+        Complex pupil array of shape (ny, nx), unity deep inside NA,
+        fractional across the boundary, zero outside.
 
     Example:
         ```python
@@ -31,7 +37,7 @@ def make_pupil(geom: Geometry, apodize: bool = False) -> np.ndarray:
         pupil_apodized = make_pupil(geom, apodize=True)
         ```
     """
-    pupil = geom.mask.astype(np.complex128)
+    pupil = geom.support_weight.astype(np.complex128)
 
     if apodize:
         pupil = apply_apodization(pupil, geom)
@@ -39,12 +45,45 @@ def make_pupil(geom: Geometry, apodize: bool = False) -> np.ndarray:
     return pupil
 
 
+def aplanatic_apodization(geom: Geometry, eps: float | None = None) -> np.ndarray:
+    """Return the forward-model aplanatic apodization factor.
+
+    Convention:
+        The pupil function P(kx, ky) is defined on a flat Cartesian k-plane.
+        The vectorial forward model applies the aplanatic factor
+        1/sqrt(cos(theta)) inside the NA support.
+
+    The factor is multiplied by the BINARY `geom.mask` for clean numerical
+    zeroing outside the NA disc. The soft anti-aliased boundary belongs to
+    the pupil itself (via `geom.support_weight`), not to this physical
+    factor — applying `support_weight` here in addition to the pupil would
+    multiply the NA-edge attenuation, suppressing the marginal rays that
+    carry the highest kz and producing axial blur.
+
+    Args:
+        geom: Precomputed geometry.
+        eps: Optional floor for cos(theta) before reciprocal square root.
+            Defaults to machine epsilon.
+
+    Returns:
+        Real apodization array, zero strictly outside the NA disc.
+    """
+    if eps is None:
+        eps = np.finfo(np.float64).eps
+
+    cos_theta = np.maximum(geom.cos_theta, eps)
+    apod = 1.0 / np.sqrt(cos_theta)
+    return apod * geom.mask.astype(np.float64)
+
+
 def apply_apodization(pupil: np.ndarray, geom: Geometry) -> np.ndarray:
     """Apply aplanatic apodization to pupil.
 
     The apodization factor 1/sqrt(cos θ) accounts for the angular
     distribution of intensity in high-NA objectives satisfying the
-    sine condition (Abbe sine condition).
+    sine condition (Abbe sine condition). `aplanatic_apodization`
+    already folds in the anti-aliased `support_weight`, so no extra
+    masking is required here.
 
     Args:
         pupil: Complex pupil array.
@@ -53,12 +92,8 @@ def apply_apodization(pupil: np.ndarray, geom: Geometry) -> np.ndarray:
     Returns:
         Apodized pupil array.
     """
-    # Apodization factor: 1 / sqrt(cos θ)
-    # Use safe sqrt to avoid issues at cos_theta = 0 (edge of pupil)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        apod = np.where(geom.cos_theta > 0, 1.0 / np.sqrt(geom.cos_theta), 0.0)
-
-    return pupil * apod * geom.mask
+    apod = aplanatic_apodization(geom)
+    return pupil * apod
 
 
 def compute_amplitude_correction(geom: Geometry, optics: Optics) -> np.ndarray:
@@ -154,9 +189,15 @@ def compute_fresnel_coefficients(
     t_s = numerator / np.maximum(denom_s, eps)
     t_p = numerator / np.maximum(denom_p, eps)
 
-    # Zero outside pupil
-    t_s = np.where(geom.mask, t_s, 0.0)
-    t_p = np.where(geom.mask, t_p, 0.0)
+    # Clean numerical cutoff outside NA via the binary mask. The soft
+    # anti-aliased boundary belongs to the pupil itself (via
+    # `geom.support_weight`); applying it here in addition would multiply
+    # the NA-edge attenuation (sw² with apod also tapered, sw³ with the
+    # pupil's own sw), over-suppressing high-NA rays and producing axial
+    # blur in the resynthesized PSF.
+    mask = geom.mask.astype(np.float64)
+    t_s = t_s * mask
+    t_p = t_p * mask
 
     return t_s, t_p
 

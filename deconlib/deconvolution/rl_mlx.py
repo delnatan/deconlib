@@ -9,22 +9,24 @@ Update rule:
     x_{k+1} = x_k * A^T(y / (A x_k + b))
 
 Where:
-    - A: Forward operator (convolution, optionally with binning/cropping)
+    - A: Explicit forward operator supplied by the caller
     - A^T: Adjoint operator (correlation)
     - y: Observed data
     - b: Background
     - *: Element-wise multiplication
 
 The algorithm preserves non-negativity and flux (sum of signal).
+
+The optional ``callback`` argument follows the same ``(k, x) -> Optional[bool]``
+contract as the PDHG solvers — return a truthy value to stop early, ``None``
+or ``False`` to continue.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Literal, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
-
-from .linops_mlx import BinnedConvolver, FFTConvolver, FiniteDetector
 
 
 @dataclass
@@ -34,20 +36,59 @@ class RLResult:
     Attributes:
         restored: Deconvolved image.
         iterations: Number of iterations performed.
-        loss_history: Poisson negative log-likelihood at each eval_interval.
+        loss_history: Mean Poisson I-divergence at each eval_interval.
+        full_shape: Shape of the internal reconstruction before any output crop.
+        valid_slices: Slices used to crop the internal reconstruction, if any.
     """
 
     restored: mx.array
     iterations: int
     loss_history: list
+    full_shape: Optional[Tuple[int, ...]] = None
+    valid_slices: Optional[Tuple[slice, ...]] = None
 
 
-def poisson_nll(
+def _finite_detector_valid_slices(op) -> Optional[Tuple[slice, ...]]:
+    """Infer fine-grid valid slices for FiniteDetector after binned convolution."""
+    outer = getattr(op, "outer", None)
+    inner = getattr(op, "inner", None)
+    if outer is None or inner is None:
+        return None
+
+    if not all(
+        hasattr(outer, attr)
+        for attr in ("detector_shape", "padding", "padded_shape")
+    ):
+        return None
+    if not all(hasattr(inner, attr) for attr in ("highres_shape", "output_shape")):
+        return None
+    if tuple(inner.output_shape) != tuple(outer.padded_shape):
+        return None
+
+    valid_slices = []
+    for detector_n, (pad_before, _), low_n, high_n in zip(
+        outer.detector_shape,
+        outer.padding,
+        inner.output_shape,
+        inner.highres_shape,
+    ):
+        low_start = pad_before
+        low_stop = pad_before + detector_n
+        scale = high_n / low_n
+        start = max(0, min(high_n, int(round(low_start * scale))))
+        stop = max(start, min(high_n, int(round(low_stop * scale))))
+        valid_slices.append(slice(start, stop))
+    return tuple(valid_slices)
+
+
+def poisson_i_divergence(
     observed: mx.array, model: mx.array, eps: float = 1e-6
 ) -> float:
-    """Compute Poisson negative log-likelihood.
+    """Compute mean Poisson I-divergence.
 
-    NLL = sum(data * log(data/model) - (data - model))
+    I(data || model) = data * log(data / model) - data + model.
+    This is the Poisson negative log-likelihood up to constants independent of
+    the model, reported as a mean per element for scale-independent logging.
 
     Args:
         observed: Observed data.
@@ -55,263 +96,106 @@ def poisson_nll(
         eps: Small constant for numerical stability.
 
     Returns:
-        Negative log-likelihood value.
+        Mean I-divergence per element.
     """
+    observed_safe = mx.maximum(observed, eps)
     model_safe = mx.maximum(model, eps)
-    nll = mx.sum(
-        observed * mx.log(observed / model_safe) - (observed - model_safe)
+    div = mx.mean(
+        observed * mx.log(observed_safe / model_safe) - (observed - model_safe)
     )
-    return float(nll)
+    return float(div)
 
 
-def richardson_lucy(
+def richardson_lucy_with_operator(
     observed: Union[np.ndarray, mx.array],
-    psf: Union[np.ndarray, mx.array],
+    blur_op,
     num_iter: int = 50,
     background: float = 0.0,
     init: Optional[Union[np.ndarray, mx.array]] = None,
     callback: Optional[Callable[[int, mx.array], bool]] = None,
     eval_interval: int = 10,
     verbose: bool = False,
+    return_region: Literal["full", "valid"] = "full",
 ) -> RLResult:
-    """Richardson-Lucy deconvolution for Poisson noise.
+    """Richardson-Lucy deconvolution with a pre-built positive operator.
+
+    Use this for composed forward models such as
+    ``compose(FiniteDetector(...), IntegratedDetectorConvolver(...))``. The RL
+    sensitivity is computed as ``A^T 1`` on the full reconstruction domain, so
+    object support outside the measured detector can remain active where it can
+    contribute to edge pixels.
 
     Args:
-        observed: Observed image with Poisson noise.
-        psf: Point spread function (DC at corner for FFT).
-        num_iter: Number of iterations.
+        observed: Observed detector image.
+        blur_op: Positive forward operator with ``forward`` and ``adjoint``.
+        num_iter: Number of RL iterations.
         background: Constant background level.
-        init: Initial estimate. If None, uses observed - background.
-        callback: Optional function called each iteration with (iter, x).
-            Return True to stop early.
-        eval_interval: Interval for computing and storing loss.
+        init: Optional initial estimate on the full reconstruction domain.
+        callback: Optional function called each iteration with ``(iter, x)``.
+        eval_interval: Interval for computing and storing mean I-divergence.
         verbose: Print progress.
-
-    Returns:
-        RLResult with restored image, iterations, and loss history.
-
-    Example:
-        >>> result = richardson_lucy(observed, psf, num_iter=100, background=10.0)
-        >>> restored = result.restored
+        return_region: ``"full"`` returns the internal reconstruction domain.
+            ``"valid"`` crops the final result to the measured detector field
+            mapped onto the fine grid. Currently this is inferred for
+            ``compose(FiniteDetector, IntegratedDetectorConvolver)``.
     """
-    # Convert inputs
+    if return_region not in ("full", "valid"):
+        raise ValueError("return_region must be 'full' or 'valid'")
+
     if isinstance(observed, np.ndarray):
         observed = mx.array(observed.astype(np.float32))
-    if isinstance(psf, np.ndarray):
-        psf = mx.array(psf.astype(np.float32))
     if init is not None and isinstance(init, np.ndarray):
         init = mx.array(init.astype(np.float32))
 
-    # Create convolver
-    convolver = FFTConvolver(psf, normalize=True)
-
-    # Initialize estimate
+    eps = 1e-10
+    data_minus_bg = mx.maximum(observed - background, 1e-6)
     if init is None:
-        x = mx.maximum(observed - background, 1e-6)
+        x = mx.maximum(blur_op.adjoint(data_minus_bg), 1e-6)
     else:
         x = mx.maximum(init, 1e-6)
 
+    sensitivity_raw = blur_op.adjoint(mx.ones_like(observed))
+    sensitivity_floor = mx.maximum(mx.max(sensitivity_raw) * 1e-6, eps)
+    active_support = sensitivity_raw > sensitivity_floor
+    sensitivity = mx.where(active_support, sensitivity_raw, 1.0)
+    x = mx.where(active_support, x, 0.0)
     loss_history = []
-    eps = 1e-10
 
     for k in range(num_iter):
-        # Forward model: A @ x + background
-        model = convolver.forward(x) + background
-
-        # Compute ratio: y / model
+        model = blur_op.forward(x) + background
         ratio = observed / mx.maximum(model, eps)
+        correction = mx.where(active_support, blur_op.adjoint(ratio) / sensitivity, 0.0)
+        x = mx.maximum(x * correction, eps)
 
-        # Backproject ratio: A^T @ ratio
-        correction = convolver.adjoint(ratio)
-
-        # Update: x = x * correction
-        x = x * correction
-
-        # Ensure non-negativity
-        x = mx.maximum(x, eps)
-
-        # Evaluate periodically
         if k % eval_interval == 0 or k == num_iter - 1:
             mx.eval(x)
-            loss = poisson_nll(observed, model)
+            loss = poisson_i_divergence(observed, model)
             loss_history.append(loss)
-
             if verbose:
-                print(f"  Iter {k:4d}: NLL = {loss:.4f}")
+                print(f"  Iter {k:4d}: mean I-div = {loss:.6g}")
 
-        # Callback for early stopping
         if callback is not None:
             if callback(k, x):
                 break
 
     mx.eval(x)
+    full_shape = tuple(x.shape)
+    valid_slices = None
+    restored = x
+    if return_region == "valid":
+        valid_slices = _finite_detector_valid_slices(blur_op)
+        if valid_slices is None:
+            raise ValueError(
+                "return_region='valid' requires a forward operator shaped like "
+                "compose(FiniteDetector, IntegratedDetectorConvolver)"
+            )
+        restored = x[valid_slices]
+        mx.eval(restored)
 
     return RLResult(
-        restored=x,
+        restored=restored,
         iterations=k + 1,
         loss_history=loss_history,
-    )
-
-
-def richardson_lucy_accelerated(
-    observed: Union[np.ndarray, mx.array],
-    psf: Union[np.ndarray, mx.array],
-    num_iter: int = 50,
-    background: float = 0.0,
-    acceleration: float = 1.5,
-    init: Optional[Union[np.ndarray, mx.array]] = None,
-    eval_interval: int = 10,
-    verbose: bool = False,
-) -> RLResult:
-    """Accelerated Richardson-Lucy using multiplicative relaxation.
-
-    Uses the acceleration scheme from Biggs & Andrews (1997):
-        x_{k+1} = x_k * (A^T(y / (A x_k + b)))^acceleration
-
-    Args:
-        observed: Observed image with Poisson noise.
-        psf: Point spread function.
-        num_iter: Number of iterations.
-        background: Constant background level.
-        acceleration: Acceleration parameter (1.0 = standard RL, >1 = faster).
-            Typical values: 1.3-1.8. Higher values may cause instability.
-        init: Initial estimate.
-        eval_interval: Interval for computing loss.
-        verbose: Print progress.
-
-    Returns:
-        RLResult with restored image.
-    """
-    if isinstance(observed, np.ndarray):
-        observed = mx.array(observed.astype(np.float32))
-    if isinstance(psf, np.ndarray):
-        psf = mx.array(psf.astype(np.float32))
-    if init is not None and isinstance(init, np.ndarray):
-        init = mx.array(init.astype(np.float32))
-
-    convolver = FFTConvolver(psf, normalize=True)
-
-    if init is None:
-        x = mx.maximum(observed - background, 1e-6)
-    else:
-        x = mx.maximum(init, 1e-6)
-
-    loss_history = []
-    eps = 1e-10
-
-    for k in range(num_iter):
-        model = convolver.forward(x) + background
-        ratio = observed / mx.maximum(model, eps)
-        correction = convolver.adjoint(ratio)
-
-        # Accelerated update
-        x = x * mx.power(mx.maximum(correction, eps), acceleration)
-        x = mx.maximum(x, eps)
-
-        if k % eval_interval == 0 or k == num_iter - 1:
-            mx.eval(x)
-            loss = poisson_nll(observed, model)
-            loss_history.append(loss)
-
-            if verbose:
-                print(f"  Iter {k:4d}: NLL = {loss:.4f}")
-
-    mx.eval(x)
-
-    return RLResult(
-        restored=x,
-        iterations=num_iter,
-        loss_history=loss_history,
-    )
-
-
-def richardson_lucy_tv(
-    observed: Union[np.ndarray, mx.array],
-    psf: Union[np.ndarray, mx.array],
-    num_iter: int = 50,
-    background: float = 0.0,
-    tv_lambda: float = 0.001,
-    init: Optional[Union[np.ndarray, mx.array]] = None,
-    eval_interval: int = 10,
-    verbose: bool = False,
-) -> RLResult:
-    """Richardson-Lucy with Total Variation regularization.
-
-    Adds TV regularization to suppress noise while preserving edges.
-    Uses a simple gradient descent step for the TV term.
-
-    Args:
-        observed: Observed image with Poisson noise.
-        psf: Point spread function.
-        num_iter: Number of iterations.
-        background: Constant background level.
-        tv_lambda: TV regularization strength.
-        init: Initial estimate.
-        eval_interval: Interval for computing loss.
-        verbose: Print progress.
-
-    Returns:
-        RLResult with restored image.
-    """
-    from .linops_mlx import Gradient1D, Gradient2D, Gradient3D
-
-    if isinstance(observed, np.ndarray):
-        observed = mx.array(observed.astype(np.float32))
-    if isinstance(psf, np.ndarray):
-        psf = mx.array(psf.astype(np.float32))
-    if init is not None and isinstance(init, np.ndarray):
-        init = mx.array(init.astype(np.float32))
-
-    convolver = FFTConvolver(psf, normalize=True)
-
-    # Select gradient operator based on dimensionality
-    ndim = observed.ndim
-    if ndim == 1:
-        grad_op = Gradient1D()
-    elif ndim == 2:
-        grad_op = Gradient2D()
-    else:
-        grad_op = Gradient3D()
-
-    if init is None:
-        x = mx.maximum(observed - background, 1e-6)
-    else:
-        x = mx.maximum(init, 1e-6)
-
-    loss_history = []
-    eps = 1e-10
-
-    for k in range(num_iter):
-        # Standard RL update
-        model = convolver.forward(x) + background
-        ratio = observed / mx.maximum(model, eps)
-        correction = convolver.adjoint(ratio)
-
-        # TV regularization gradient: -div(grad(x) / |grad(x)|)
-        grad_x = grad_op.forward(x)
-        if ndim == 1:
-            grad_norm = mx.abs(grad_x) + eps
-            tv_grad = -grad_op.adjoint(grad_x / grad_norm)
-        else:
-            grad_norm = mx.sqrt(mx.sum(grad_x**2, axis=0, keepdims=True)) + eps
-            tv_grad = -grad_op.adjoint(grad_x / grad_norm)
-
-        # Combined update: multiplicative RL + additive TV
-        x = x * correction - tv_lambda * tv_grad
-        x = mx.maximum(x, eps)
-
-        if k % eval_interval == 0 or k == num_iter - 1:
-            mx.eval(x)
-            loss = poisson_nll(observed, model)
-            loss_history.append(loss)
-
-            if verbose:
-                print(f"  Iter {k:4d}: NLL = {loss:.4f}")
-
-    mx.eval(x)
-
-    return RLResult(
-        restored=x,
-        iterations=num_iter,
-        loss_history=loss_history,
+        full_shape=full_shape,
+        valid_slices=valid_slices,
     )

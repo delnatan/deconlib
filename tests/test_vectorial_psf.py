@@ -41,13 +41,15 @@ class TestFresnelCoefficients:
         geom, optics = matched_index_setup
         t_s, t_p = compute_fresnel_coefficients(geom, optics)
 
-        # Inside pupil, should be 1.0
-        assert np.allclose(t_s[geom.mask], 1.0)
-        assert np.allclose(t_p[geom.mask], 1.0)
+        # Strictly interior (away from the anti-aliased boundary) should be 1.0
+        interior = geom.support_weight >= 1.0
+        assert np.allclose(t_s[interior], 1.0)
+        assert np.allclose(t_p[interior], 1.0)
 
-        # Outside pupil, should be 0.0
-        assert np.allclose(t_s[~geom.mask], 0.0)
-        assert np.allclose(t_p[~geom.mask], 0.0)
+        # Outside the soft support (no pixel-area overlap with NA disc): 0.0
+        outside = geom.support_weight == 0.0
+        assert np.allclose(t_s[outside], 0.0)
+        assert np.allclose(t_p[outside], 0.0)
 
     def test_normal_incidence_fresnel(self, mismatched_index_setup):
         """At normal incidence, t_s == t_p == 2*ns/(ns+ni)."""
@@ -92,13 +94,14 @@ class TestVectorialFactors:
         assert factors.shape == (3, 2, 64, 64)
 
     def test_factors_zero_outside_pupil(self, setup):
-        """Factors should be zero outside pupil."""
+        """Factors should be zero outside the soft pupil support."""
         geom, optics = setup
         factors = compute_vectorial_factors(geom, optics)
 
+        outside = geom.support_weight == 0.0
         for dipole in range(3):
             for field in range(2):
-                assert np.allclose(factors[dipole, field, ~geom.mask], 0.0)
+                assert np.allclose(factors[dipole, field, outside], 0.0)
 
     def test_z_dipole_radial_symmetry(self, setup):
         """Z-dipole factors should have radial symmetry."""
@@ -329,8 +332,10 @@ class TestVectorialPhaseRetrieval:
             psf, z, geom, optics, max_iter=50, method="GS"
         )
 
-        # MSE should decrease
-        assert result.mse_history[-1] < result.mse_history[0]
+        # MSE should be at (or below) the machine-precision noise floor.
+        # The ideal-pupil initial estimate already matches the truth up to a
+        # global phase, so we check convergence rather than strict decrease.
+        assert result.mse_history[-1] < 1e-20
 
         # Retrieved pupil should be non-zero inside mask
         assert np.sum(np.abs(result.pupil[geom.mask]) ** 2) > 0
@@ -384,14 +389,15 @@ class TestVectorialPhaseRetrieval:
         assert callback_count[0] == 15
 
     def test_pupil_support_respected(self, setup):
-        """Test that retrieved pupil is zero outside NA support."""
+        """Test that retrieved pupil is zero outside the soft NA support."""
         pupil, geom, optics, z = setup
         psf = pupil_to_vectorial_psf(pupil, geom, optics, z, normalize=False)
 
         result = retrieve_phase_vectorial(psf, z, geom, optics, max_iter=30)
 
-        # Outside mask should be zero
-        assert np.allclose(result.pupil[~geom.mask], 0.0)
+        # Outside the soft support (no overlap with NA disc), pupil is zero.
+        outside = geom.support_weight == 0.0
+        assert np.allclose(result.pupil[outside], 0.0)
 
     def test_z_planes_mismatch_error(self, setup):
         """Test that mismatched z-planes raises error."""

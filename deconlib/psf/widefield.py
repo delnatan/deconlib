@@ -5,7 +5,7 @@ from typing import List, Literal, Optional, Tuple, Union
 import numpy as np
 
 from .optics import Geometry, Optics, make_geometry
-from .pupil import make_pupil
+from .pupil import aplanatic_apodization, make_pupil
 
 __all__ = [
     "pupil_to_psf",
@@ -140,6 +140,11 @@ def pupil_to_vectorial_psf(
         For each dipole orientation μ, the detected intensity is:
         I_μ = |Ex_μ|² + |Ey_μ|²
 
+        Convention:
+        - Pupil P(kx, ky) is defined on a flat Cartesian k-grid.
+        - Defocus phase is exp(+i 2π kz z) with ifft2 pupil->PSF mapping.
+        - Aplanatic factor 1/sqrt(cos(theta)) is applied in the forward map.
+
         For isotropic emitters (random orientations), intensities add incoherently:
         I = (1/3) × (I_x + I_y + I_z)
 
@@ -164,9 +169,8 @@ def pupil_to_vectorial_psf(
     # factors[dipole_idx, field_idx, :, :]
     factors = compute_vectorial_factors(geom, optics)
 
-    # Aplanatic apodization: sqrt(cos θ) for emission
-    apod = np.sqrt(np.where(geom.cos_theta > 0, geom.cos_theta, 0.0))
-    apod = apod * geom.mask
+    # Aplanatic apodization (Hanser / Richards-Wolf convention)
+    apod = aplanatic_apodization(geom)
 
     # Apply apodization to pupil
     pupil_apod = pupil * apod

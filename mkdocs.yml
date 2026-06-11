@@ -91,6 +91,7 @@ nav:
       - Aberrations: guide/aberrations.md
       - Phase Retrieval: guide/phase-retrieval.md
       - Confocal PSF: guide/confocal.md
+      - PSF Distillation: guide/distillation.md
       - Deconvolution: guide/deconvolution.md
   - API Reference:
       - Overview: api/index.md
@@ -100,5 +101,6 @@ nav:
           - Confocal: api/psf/confocal.md
           - Aberrations: api/psf/aberrations.md
           - Phase Retrieval: api/psf/retrieval.md
+          - Distillation: api/psf/distillation.md
       - Deconvolution: api/deconvolution.md
       - Utilities: api/utils.md

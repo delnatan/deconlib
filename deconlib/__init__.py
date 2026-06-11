@@ -6,7 +6,7 @@ functions (OTF), and performing image deconvolution for optical microscopy.
 The library is organized into three main modules:
 
 - **psf**: NumPy-based PSF/OTF computation for widefield and confocal microscopy
-- **deconvolution**: PyTorch-based image restoration algorithms
+- **deconvolution**: Apple MLX-based image restoration algorithms (PDHG, Richardson-Lucy)
 - **utils**: Shared mathematical utilities (Fourier, Zernike, etc.)
 
 Example:
@@ -38,8 +38,10 @@ from .psf import (
     Geometry,
     IndexMismatch,
     # Core data structures
+    BeadDetectionResult,
     Optics,
     PhaseRetrievalResult,
+    PsfDistillationResult,
     ZernikeAberration,
     ZernikeMode,
     apply_aberrations,
@@ -52,15 +54,70 @@ from .psf import (
     compute_pinhole_function,
     compute_spinning_disk_psf,
     compute_vectorial_factors,
+    compute_widefield_psf,
+    # PSF distillation
+    detect_beads,
+    distill_psf,
+    distill_single_bead,
+    extract_bead_crops,
+    fft_convolve,
+    fft_correlate,
+    find_bead_positions,
     make_geometry,
+    make_otf_mask,
     # Pupil functions
     make_pupil,
+    make_pupil_real_filter,
+    matched_filter_amplitudes,
+    poisson_reduced_chi_squared,
+    project_psf,
     # Widefield PSF/OTF
     pupil_to_psf,
     pupil_to_vectorial_psf,
     # Phase retrieval
     retrieve_phase,
     retrieve_phase_vectorial,
+    stack_psfs,
+)
+
+# =============================================================================
+# I/O Module - HDF5 round-trip for Pupil/Psf artifacts
+# =============================================================================
+from .io import (
+    Pupil,
+    Psf,
+    load_psf,
+    load_pupil,
+    save_psf,
+    save_pupil,
+)
+from .memsolve_io import (
+    RECIPE_REGISTRY,
+    BundleGeometry,
+    BundleMask,
+    ForwardRecipe,
+    MemsolveBundle,
+    OperatorFactoryArgs,
+    build_problem_from_recipe,
+    load_memsolve_bundle,
+    peek_bundle_algorithm,
+    register_recipe,
+    resume_inference,
+    save_memsolve_bundle,
+)
+from .workflow import (
+    IcfScanRow,
+    IcfSweep,
+    RichardsonLucyBundle,
+    RichardsonLucyConfig,
+    RichardsonLucyResult,
+    WorkflowCancelled,
+    WorkflowProgress,
+    WorkflowResult,
+    load_richardson_lucy_bundle,
+    run_deconvolution_workflow,
+    run_richardson_lucy,
+    save_richardson_lucy_bundle,
 )
 
 # =============================================================================
@@ -80,10 +137,12 @@ from .utils import (
 )
 
 # =============================================================================
-# Deconvolution Module - Import conditionally (requires PyTorch)
+# Deconvolution Module - import explicitly (requires MLX)
 # =============================================================================
-# Note: deconvolution module requires PyTorch, import explicitly:
-#   from deconlib.deconvolution import make_fft_convolver, solve_rl, solve_mem
+# from deconlib.deconvolution import (
+#     solve_pdhg_mlx, richardson_lucy_with_operator,
+#     FFTConvolver, FiniteDetector, Compose, as_numpy_op,
+# )
 
 __all__ = [
     # Version
@@ -102,6 +161,7 @@ __all__ = [
     "pupil_to_psf",
     "compute_otf",
     "pupil_to_vectorial_psf",
+    "compute_widefield_psf",
     # Confocal/Spinning Disk PSF
     "ConfocalOptics",
     "compute_pinhole_function",
@@ -119,6 +179,56 @@ __all__ = [
     "retrieve_phase",
     "retrieve_phase_vectorial",
     "PhaseRetrievalResult",
+    "make_pupil_real_filter",
+    # PSF distillation
+    "BeadDetectionResult",
+    "PsfDistillationResult",
+    "detect_beads",
+    "distill_psf",
+    "distill_single_bead",
+    "extract_bead_crops",
+    "find_bead_positions",
+    "stack_psfs",
+    "make_otf_mask",
+    "project_psf",
+    "matched_filter_amplitudes",
+    "fft_convolve",
+    "fft_correlate",
+    "poisson_reduced_chi_squared",
+    # I/O
+    "Pupil",
+    "Psf",
+    "save_pupil",
+    "load_pupil",
+    "save_psf",
+    "load_psf",
+    # memsolve bundle I/O
+    "BundleGeometry",
+    "BundleMask",
+    "ForwardRecipe",
+    "MemsolveBundle",
+    "OperatorFactoryArgs",
+    "RECIPE_REGISTRY",
+    "register_recipe",
+    "build_problem_from_recipe",
+    "save_memsolve_bundle",
+    "load_memsolve_bundle",
+    "peek_bundle_algorithm",
+    "resume_inference",
+    # Workflow driver
+    "IcfSweep",
+    "IcfScanRow",
+    "WorkflowCancelled",
+    "WorkflowProgress",
+    "WorkflowResult",
+    "run_deconvolution_workflow",
+    # Richardson-Lucy
+    "RichardsonLucyConfig",
+    "RichardsonLucyResult",
+    "RichardsonLucyBundle",
+    "run_richardson_lucy",
+    "save_richardson_lucy_bundle",
+    "load_richardson_lucy_bundle",
     # Math utilities
     "fft_coords",
     "fourier_meshgrid",

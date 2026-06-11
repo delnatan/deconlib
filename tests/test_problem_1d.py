@@ -103,7 +103,7 @@ def make_1d_test_problem(
 def test_1d_operators():
     """Test that 1D operators work correctly with test problem."""
     import mlx.core as mx
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         FFTConvolver,
         FiniteDetector,
         Gradient1D,
@@ -195,7 +195,7 @@ def test_1d_operators():
 def test_1d_forward_model():
     """Test the complete 1D forward model with FiniteDetector."""
     import mlx.core as mx
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         FFTConvolver,
         FiniteDetector,
     )
@@ -411,11 +411,7 @@ def run_rl_comparison(
         dict with reconstruction results for each method.
     """
     import mlx.core as mx
-    from deconlib.deconvolution.rl_mlx import (
-        richardson_lucy,
-        richardson_lucy_accelerated,
-        richardson_lucy_tv,
-    )
+    from deconlib.deconvolution import FFTConvolver, richardson_lucy_with_operator
     from deconlib.deconvolution.pdhg_mlx import solve_pdhg_mlx
 
     print("\n" + "=" * 60)
@@ -438,11 +434,12 @@ def run_rl_comparison(
 
     results = {}
 
-    # 1. Standard Richardson-Lucy
+    # 1. Operator-based Richardson-Lucy
     print("\n  Running Richardson-Lucy...")
-    rl_result = richardson_lucy(
+    forward_op = FFTConvolver(kernel)
+    rl_result = richardson_lucy_with_operator(
         observed=observed_mx,
-        psf=kernel,
+        blur_op=forward_op,
         num_iter=num_iter,
         background=background,
         verbose=False,
@@ -458,49 +455,7 @@ def run_rl_comparison(
     }
     print(f"    RMSE: {rmse:.3f}, Correlation: {corr:.4f}")
 
-    # 2. Accelerated Richardson-Lucy
-    print("\n  Running Accelerated RL (1.5x)...")
-    rl_acc_result = richardson_lucy_accelerated(
-        observed=observed_mx,
-        psf=kernel,
-        num_iter=num_iter,
-        background=background,
-        acceleration=1.5,
-        verbose=False,
-    )
-    restored = np.array(rl_acc_result.restored)
-    rmse = np.sqrt(np.mean((restored - ground_truth) ** 2))
-    corr = np.corrcoef(restored, ground_truth)[0, 1]
-    results["RL_acc"] = {
-        "restored": restored,
-        "rmse": rmse,
-        "correlation": corr,
-        "label": "RL Accelerated",
-    }
-    print(f"    RMSE: {rmse:.3f}, Correlation: {corr:.4f}")
-
-    # 3. Richardson-Lucy with TV
-    print("\n  Running RL + TV...")
-    rl_tv_result = richardson_lucy_tv(
-        observed=observed_mx,
-        psf=kernel,
-        num_iter=num_iter,
-        background=background,
-        tv_lambda=0.01,
-        verbose=False,
-    )
-    restored = np.array(rl_tv_result.restored)
-    rmse = np.sqrt(np.mean((restored - ground_truth) ** 2))
-    corr = np.corrcoef(restored, ground_truth)[0, 1]
-    results["RL_TV"] = {
-        "restored": restored,
-        "rmse": rmse,
-        "correlation": corr,
-        "label": "RL + TV",
-    }
-    print(f"    RMSE: {rmse:.3f}, Correlation: {corr:.4f}")
-
-    # 4. PDHG with Hessian regularization (for comparison)
+    # 2. PDHG with Hessian regularization (for comparison)
     print("\n  Running PDHG (Hessian)...")
     pdhg_result = solve_pdhg_mlx(
         observed=observed_mx,

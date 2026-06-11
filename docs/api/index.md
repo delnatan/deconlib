@@ -13,13 +13,11 @@ deconlib/
 │   ├── confocal.py         # Confocal and spinning disk
 │   ├── retrieval.py        # Phase retrieval algorithms
 │   └── aberrations/        # Aberration classes
-├── deconvolution/          # Image restoration (PyTorch)
-│   ├── base.py             # Result and config dataclasses
-│   ├── operators.py        # FFT convolution operators
-│   ├── rl.py               # Richardson-Lucy
-│   ├── sicg.py             # SI-CG (Conjugate Gradient)
-│   ├── chambolle_pock.py   # Chambolle-Pock (PDHG)
-│   └── psf_extraction.py   # PSF extraction from beads
+├── deconvolution/          # Image restoration (MLX)
+│   ├── base.py             # Result dataclasses
+│   ├── linops_mlx.py       # Linear operators
+│   ├── rl_mlx.py           # Richardson-Lucy
+│   └── pdhg_mlx.py         # PDHG (Chambolle-Pock)
 └── utils/                  # Mathematical utilities
     ├── fourier.py          # FFT utilities
     ├── zernike.py          # Zernike polynomials
@@ -46,19 +44,25 @@ deconlib/
 | [`retrieve_phase`](psf/retrieval.md) | Phase retrieval |
 | [`apply_aberrations`](psf/aberrations.md) | Apply aberrations to pupil |
 
+### PSF Distillation
+
+| Function | Description |
+|----------|-------------|
+| [`distill_psf`](psf/distillation.md) | Distill PSF from a sparse bead image (alternating RL + NNLS) |
+| [`detect_beads`](psf/distillation.md) | Detect beads only — cheap preview for GUI threshold tuning |
+| [`find_bead_positions`](psf/distillation.md) | Lower-level matched-filter detector |
+| [`distill_single_bead`](psf/distillation.md) | RL PSF from a single isolated bead crop |
+
 ### Deconvolution
 
 | Function | Description |
 |----------|-------------|
-| [`solve_rl`](deconvolution.md) | Richardson-Lucy deconvolution |
-| [`solve_sicg`](deconvolution.md) | SI-CG regularized deconvolution |
-| [`solve_chambolle_pock`](deconvolution.md) | Chambolle-Pock (PDHG) deconvolution |
-| [`extract_psf_rl`](deconvolution.md) | PSF extraction (Richardson-Lucy) |
-| [`extract_psf_sicg`](deconvolution.md) | PSF extraction (SI-CG) |
-| [`make_fft_convolver`](deconvolution.md) | Create FFT convolution operators |
-| [`make_binned_convolver`](deconvolution.md) | Create binned convolver for super-resolution |
-| [`SICGConfig`](deconvolution.md) | Configuration for SI-CG solver |
-| [`PDHGConfig`](deconvolution.md) | Configuration for Chambolle-Pock solver |
+| [`richardson_lucy_with_operator`](deconvolution.md) | Richardson-Lucy with explicit forward operator |
+| [`solve_pdhg_mlx`](deconvolution.md) | PDHG deconvolution |
+| [`solve_pdhg_with_operator`](deconvolution.md) | PDHG with custom operator |
+| [`FFTConvolver`](deconvolution.md) | FFT convolution operator |
+| [`IntegratedDetectorConvolver`](deconvolution.md) | Positive fractional pixel integration |
+| [`MatrixOperator`](deconvolution.md) | Matrix-based linear operator |
 
 ### Utilities
 

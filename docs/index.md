@@ -1,14 +1,14 @@
 # deconlib
 
-A pure NumPy library for computing point spread functions (PSF), optical transfer functions (OTF), and performing phase retrieval for optical microscopy applications.
+A library for computing point spread functions (PSF), optical transfer functions (OTF), performing phase retrieval, and image deconvolution for optical microscopy applications.
 
 ## Features
 
-- **PSF/OTF Computation**: Scalar and vectorial PSF calculations for widefield microscopy
+- **PSF/OTF Computation**: Scalar and vectorial PSF calculations for widefield microscopy (NumPy)
 - **Aberrations**: Composable aberration system (Zernike polynomials, index mismatch, defocus)
 - **Phase Retrieval**: Gerchberg-Saxton and Hybrid Input-Output algorithms
 - **Confocal PSF**: Support for confocal and spinning disk microscopy
-- **Deconvolution**: Richardson-Lucy deconvolution with PyTorch backend
+- **Deconvolution**: Richardson-Lucy and PDHG algorithms with Apple MLX backend (GPU-accelerated on Apple Silicon)
 
 ## Quick Example
 
@@ -41,10 +41,9 @@ print(f"PSF shape: {psf.shape}")  # (64, 256, 256)
 
 ```bash
 pip install deconlib
-
-# With deconvolution support (requires PyTorch)
-pip install deconlib[deconv]
 ```
+
+Deconvolution requires [Apple MLX](https://github.com/ml-explore/mlx) which is included as a dependency and works on Apple Silicon Macs.
 
 See the [Installation Guide](getting-started/installation.md) for more options.
 

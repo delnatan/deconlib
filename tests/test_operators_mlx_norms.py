@@ -8,13 +8,13 @@ classes match empirically computed values via power iteration.
 import mlx.core as mx
 import pytest
 
-from deconlib.deconvolution.operators_mlx import (
+from deconlib.deconvolution.linops_mlx import (
     Gradient2D,
     Gradient3D,
     Hessian2D,
     Hessian3D,
     FFTConvolver,
-    BinnedConvolver,
+    IntegratedDetectorConvolver,
 )
 
 
@@ -144,25 +144,25 @@ class TestConvolverNorms:
         # Normalized convolution should have norm <= 1
         assert computed <= 1.1  # allow small tolerance
 
-    def test_binned_convolver_norm(self):
-        """Verify BinnedConvolver operator_norm_sq is an upper bound."""
+    def test_integrated_detector_convolver_norm(self):
+        """Verify IntegratedDetectorConvolver operator_norm_sq is an upper bound."""
         shape = (64, 64)
-        factors = 2
+        output_shape = (32, 32)
         kernel = mx.abs(mx.random.normal(shape))
 
-        A = BinnedConvolver(kernel, factors, normalize=True)
+        A = IntegratedDetectorConvolver(kernel, output_shape, normalize=True)
         computed = power_iteration_norm(A.forward, A.adjoint, shape)
 
         # Estimate should be an upper bound
         assert computed <= A.operator_norm_sq * 1.1
 
-    def test_binned_convolver_3d_anisotropic(self):
-        """Verify BinnedConvolver with anisotropic binning."""
+    def test_integrated_detector_convolver_3d_anisotropic(self):
+        """Verify IntegratedDetectorConvolver with anisotropic integer binning."""
         shape = (32, 64, 64)
-        factors = (1, 2, 2)  # no Z binning, 2x2 in XY
+        output_shape = (32, 32, 32)
         kernel = mx.abs(mx.random.normal(shape))
 
-        A = BinnedConvolver(kernel, factors, normalize=True)
+        A = IntegratedDetectorConvolver(kernel, output_shape, normalize=True)
         computed = power_iteration_norm(A.forward, A.adjoint, shape)
 
         # Expected norm_sq = 2 * 2 = 4

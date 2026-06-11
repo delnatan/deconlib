@@ -33,6 +33,7 @@ venv/
 .vscode/
 *.swp
 *.swo
+.DS_Store
 
 # Testing
 .pytest_cache/
@@ -44,3 +45,14 @@ htmlcov/
 
 # Personal notes
 notes/
+
+# Local prototyping workspace (real-world data, not for remote)
+sandbox/
+examples/sample_data/
+examples/output/
+
+# Generated documentation
+site/
+
+# Local uv cache used by ad-hoc environment checks
+.uv-cache/

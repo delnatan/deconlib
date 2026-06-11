@@ -1,49 +1,88 @@
 # Deconvolution
 
-Image restoration algorithms including Richardson-Lucy, SI-CG, Chambolle-Pock (PDHG),
-and PSF extraction.
+Image restoration algorithms using Apple MLX for GPU-accelerated computation.
 
-!!! note "Requires PyTorch"
-    This module requires PyTorch. Install with `pip install deconlib[deconv]`.
+!!! note "Apple Silicon Required"
+    This module requires Apple MLX and an Apple Silicon Mac (M1/M2/M3/M4).
 
 ## Richardson-Lucy
 
-::: deconlib.deconvolution.solve_rl
+::: deconlib.deconvolution.richardson_lucy_with_operator
 
-## SI-CG (Conjugate Gradient)
+## PDHG (Chambolle-Pock)
 
-::: deconlib.deconvolution.solve_sicg
+::: deconlib.deconvolution.solve_pdhg_mlx
 
-## Chambolle-Pock (PDHG)
+::: deconlib.deconvolution.solve_pdhg_with_operator
 
-::: deconlib.deconvolution.solve_chambolle_pock
+## Regularizers
 
-## PSF Extraction
-
-::: deconlib.deconvolution.extract_psf_rl
-
-::: deconlib.deconvolution.extract_psf_sicg
-
-## Operators
-
-::: deconlib.deconvolution.make_fft_convolver
-
-::: deconlib.deconvolution.make_binned_convolver
-
-::: deconlib.deconvolution.power_iteration_norm
-
-## Configuration Classes
-
-::: deconlib.deconvolution.SICGConfig
+::: deconlib.deconvolution.IdentityRegularizer
     options:
       show_source: false
 
-::: deconlib.deconvolution.PDHGConfig
+::: deconlib.deconvolution.GradientRegularizer
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.HessianRegularizer
+    options:
+      show_source: false
+
+## Convolution Operators
+
+::: deconlib.deconvolution.FFTConvolver
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.IntegratedDetectorConvolver
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.MatrixOperator
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.FiniteDetector
+    options:
+      show_source: false
+
+## Differential Operators
+
+::: deconlib.deconvolution.Gradient1D
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.Gradient2D
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.Gradient3D
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.Hessian1D
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.Hessian2D
+    options:
+      show_source: false
+
+::: deconlib.deconvolution.Hessian3D
     options:
       show_source: false
 
 ## Result Classes
 
-::: deconlib.deconvolution.DeconvolutionResult
+::: deconlib.deconvolution.RLResult
     options:
       show_source: false
+
+::: deconlib.deconvolution.MLXDeconvolutionResult
+    options:
+      show_source: false
+
+## Utilities
+
+::: deconlib.deconvolution.compute_detector_padding

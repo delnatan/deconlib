@@ -1,412 +1,310 @@
 # Deconvolution
 
-Image deconvolution algorithms with PyTorch backend, including Richardson-Lucy,
-SI-CG (conjugate gradient), Chambolle-Pock (PDHG), and PSF extraction.
+Image deconvolution algorithms using Apple MLX for GPU-accelerated computation on Apple Silicon.
 
-!!! note "Optional Dependency"
-    Deconvolution requires PyTorch. Install with:
-    ```bash
-    pip install deconlib[deconv]
-    ```
+!!! note "Apple Silicon Required"
+    Deconvolution uses Apple MLX and requires an Apple Silicon Mac (M1/M2/M3/M4).
 
 ## Basic Usage
 
 ```python
-import torch
 import numpy as np
-from deconlib.deconvolution import make_fft_convolver, solve_rl
+from deconlib.deconvolution import FFTConvolver, richardson_lucy_with_operator
 
 # Load your image and PSF (as numpy arrays)
 # observed: (H, W) or (D, H, W)
 # psf: same dimensions as observed
 
-# Create convolution operators from PSF
-C, C_adj = make_fft_convolver(psf, device="cuda")
-
-# Convert observed image to tensor
-observed_tensor = torch.from_numpy(observed).to("cuda", dtype=torch.float32)
-
 # Run Richardson-Lucy deconvolution
-result = solve_rl(observed_tensor, C, C_adj, num_iter=50)
+forward_op = FFTConvolver(psf)
+result = richardson_lucy_with_operator(
+    observed,
+    forward_op,
+    num_iter=50,
+    background=100.0,
+)
 
 # Get result as numpy array
-restored = result.restored.cpu().numpy()
-```
-
-## The Convolution Operator
-
-The `make_fft_convolver` function creates FFT-based forward and adjoint operators
-from a kernel. It handles both 2D and 3D data automatically, and accepts either
-NumPy arrays or PyTorch tensors.
-
-```python
-C, C_adj = make_fft_convolver(kernel, device="cuda", normalize=True)
-```
-
-| Parameter | Description |
-|-----------|-------------|
-| `kernel` | NumPy array or PyTorch tensor (2D or 3D) |
-| `device` | PyTorch device for OTF and operations (only for NumPy input) |
-| `dtype` | PyTorch dtype for OTF (only for NumPy input) |
-| `normalize` | Normalize kernel to sum to 1 (default: True) |
-
-The operators implement:
-
-- **Forward** `C(x)`: Convolution with kernel → `kernel ⊛ x`
-- **Adjoint** `C_adj(y)`: Correlation with kernel → `kernel* ⊛ y`
-
-### Use Cases
-
-The same function serves two complementary use cases:
-
-**1. Standard deconvolution** (kernel = PSF, solve for image):
-```python
-# PSF from optical model or calibration
-C, C_adj = make_fft_convolver(psf, device="cuda")
-result = solve_rl(observed, C, C_adj, num_iter=50)
-restored_image = result.restored
-```
-
-**2. PSF extraction** (kernel = point sources, solve for PSF):
-```python
-# Point source map with known bead locations
-C, C_adj = make_fft_convolver(point_sources, device="cuda")
-result = solve_rl(observed, C, C_adj, num_iter=50)
-extracted_psf = result.restored
-```
-
-Both cases use the same mathematical formulation:
-`observed = kernel ⊛ unknown + noise`. The only difference is what you call
-"kernel" and what you solve for.
-
-## Result Object
-
-The `DeconvolutionResult` contains:
-
-| Attribute | Description |
-|-----------|-------------|
-| `restored` | Deconvolved image (torch.Tensor) |
-| `iterations` | Number of iterations performed |
-| `loss_history` | Relative change at each iteration |
-| `converged` | Convergence status |
-
-## GPU Acceleration
-
-For large images, use GPU acceleration:
-
-```python
-import torch
-print(f"CUDA available: {torch.cuda.is_available()}")
-
-# Use GPU
-C, C_adj = make_fft_convolver(psf, device="cuda")
-
-# Use specific GPU
-C, C_adj = make_fft_convolver(psf, device="cuda:1")
-```
-
-## 3D Deconvolution
-
-The same `make_fft_convolver` works for 3D data - it automatically detects dimensionality:
-
-```python
-from deconlib.deconvolution import make_fft_convolver, solve_rl
-
-# psf_3d: shape (D, H, W)
-C, C_adj = make_fft_convolver(psf_3d, device="cuda")
-
-observed_3d = torch.from_numpy(stack).to("cuda", dtype=torch.float32)
-result = solve_rl(observed_3d, C, C_adj, num_iter=50)
+restored = np.array(result.restored)
 ```
 
 ## Richardson-Lucy Algorithm
 
-The Richardson-Lucy algorithm iteratively refines an estimate:
+The Richardson-Lucy algorithm iteratively refines an estimate assuming Poisson noise:
 
-\[
-x_{k+1} = x_k \cdot C^T\left(\frac{b}{C(x_k)}\right)
-\]
+$$
+x_{k+1} = x_k \cdot A^T\left(\frac{b}{A(x_k) + \text{bg}}\right)
+$$
 
 Where:
 
-- \(x\) is the estimated object
-- \(b\) is the observed image
-- \(C\) is the forward convolution operator
-- \(C^T\) is the adjoint (correlation) operator
+- $x$ is the estimated object
+- $b$ is the observed image
+- $A$ is the forward convolution operator
+- $A^T$ is the adjoint (correlation) operator
+
+### Operator-Based Richardson-Lucy
+
+```python
+from deconlib.deconvolution import FFTConvolver, richardson_lucy_with_operator
+
+forward_op = FFTConvolver(psf)
+result = richardson_lucy_with_operator(
+    observed,            # Observed (blurred) image
+    forward_op,          # Explicit image-formation operator
+    num_iter=50,         # Number of iterations
+    background=0.0,      # Constant background level
+    verbose=True,        # Print progress
+)
+
+restored = np.array(result.restored)
+print(f"Iterations: {result.iterations}")
+```
+
+### Finite-Detector Super-Resolution RL
+
+For detector-aware super-resolution, model the padded object domain explicitly
+and return only the detector-valid fine-grid region:
+
+```python
+from deconlib.deconvolution import (
+    FiniteDetector,
+    IntegratedDetectorConvolver,
+    compose,
+    richardson_lucy_with_operator,
+)
+
+detector = FiniteDetector(observed.shape, padding=((0, 0), (16, 16), (16, 16)))
+forward_op = compose(
+    detector,
+    IntegratedDetectorConvolver(
+        psf_fine,
+        output_shape=detector.padded_shape,
+        normalize=True,
+    ),
+)
+
+result = richardson_lucy_with_operator(
+    observed,
+    forward_op,
+    num_iter=50,
+    background=0.0,
+    return_region="valid",
+)
+```
+
+The padded region remains part of the unknown during the RL updates, so edge
+photons are handled by the sensitivity term. The final `restored` array is
+cropped only after convergence.
+
+## PDHG (Chambolle-Pock) Algorithm
+
+The PDHG algorithm solves regularized deconvolution using primal-dual optimization:
+
+$$
+\min_{x \geq 0} \text{KL}(b \,||\, Ax + \text{bg}) + \alpha \cdot R(Lx)
+$$
+
+where KL is the Kullback-Leibler divergence and $R$ is a regularization term.
+
+```python
+from deconlib.deconvolution import solve_pdhg_mlx
+
+result = solve_pdhg_mlx(
+    observed,
+    psf,
+    alpha=0.001,                # Regularization weight
+    regularization="hessian",   # "identity", "gradient", or "hessian"
+    norm="L1_2",                # "L1" (anisotropic) or "L1_2" (isotropic)
+    num_iter=200,
+    background=50.0,
+    verbose=True,
+)
+
+restored = np.array(result.restored)
+```
+
+### Regularization Options
+
+| Regularization | Description | Use Case |
+|----------------|-------------|----------|
+| `"identity"` | Sparsity on $x$ directly | Sparse signals |
+| `"gradient"` | Total variation (first derivatives) | Piecewise constant images |
+| `"hessian"` | Second derivatives | Smooth gradients, natural images |
+
+### Norm Options
+
+| Norm | Description | Effect |
+|------|-------------|--------|
+| `"L1"` | Anisotropic | Soft-thresholds each component independently |
+| `"L1_2"` | Isotropic | Joint thresholding, avoids blocky artifacts |
+
+### 3D Deconvolution with Anisotropic Spacing
+
+For volumetric data with non-isotropic voxels:
+
+```python
+result = solve_pdhg_mlx(
+    volume,                     # Shape (Z, Y, X)
+    psf_3d,
+    alpha=0.0005,
+    regularization="hessian",
+    norm="L1_2",
+    spacing=(0.3, 0.1, 0.1),    # Physical spacing (dz, dy, dx) in microns
+    num_iter=300,
+)
+```
+
+### Convergence Control
+
+The PDHG solver includes adaptive step sizes and automatic convergence detection:
+
+```python
+result = solve_pdhg_mlx(
+    observed,
+    psf,
+    alpha=0.001,
+    num_iter=500,               # Maximum iterations
+    tol=1e-5,                   # Convergence tolerance
+    min_iter=20,                # Minimum iterations before checking
+    patience=5,                 # Consecutive converged iterations to stop
+    verbose=True,
+)
+
+print(f"Converged: {result.converged}")
+print(f"Iterations: {result.iterations}")
+```
+
+## Result Objects
+
+### RLResult
+
+Returned by Richardson-Lucy functions:
+
+| Attribute | Description |
+|-----------|-------------|
+| `restored` | Deconvolved image (mx.array) |
+| `iterations` | Number of iterations performed |
+| `loss_history` | Mean Poisson I-divergence at each eval_interval |
+| `full_shape` | Internal reconstruction shape before any output crop |
+| `valid_slices` | Crop slices used when `return_region="valid"` |
+
+### MLXDeconvolutionResult
+
+Returned by PDHG functions:
+
+| Attribute | Description |
+|-----------|-------------|
+| `restored` | Deconvolved image (mx.array) |
+| `iterations` | Number of iterations performed |
+| `loss_history` | Loss/objective at each iteration |
+| `converged` | Whether the algorithm converged |
+| `tau_history` | Primal step size history |
+| `sigma_history` | Dual step size history |
+| `metadata` | Algorithm-specific metadata |
+
+## Linear Operators
+
+### FFTConvolver
+
+FFT-based convolution for standard deconvolution:
+
+```python
+from deconlib.deconvolution import FFTConvolver
+
+convolver = FFTConvolver(psf, normalize=True)
+
+# Apply convolution
+blurred = convolver.forward(image)
+
+# Apply correlation (adjoint)
+correlated = convolver.adjoint(image)
+```
+
+### IntegratedDetectorConvolver
+
+For super-resolution with finite pixel area integration:
+
+```python
+from deconlib.deconvolution import IntegratedDetectorConvolver
+
+# PSF at high resolution, observed at low resolution
+convolver = IntegratedDetectorConvolver(
+    psf_fine,
+    output_shape=observed_lowres.shape,
+    normalize=True,
+)
+
+result = solve_pdhg_mlx(
+    observed_lowres,
+    psf_fine,
+    bin_factors=2,
+    alpha=0.001,
+    num_iter=200,
+)
+```
+
+The same operator handles integer, non-integer, and anisotropic detector
+sampling with nonnegative area-overlap weights:
+
+```python
+from deconlib.deconvolution import solve_pdhg_mlx
+
+result = solve_pdhg_mlx(
+    observed,
+    psf_fine,
+    sampling_factors=(1.5, 2.0, 2.0),  # finer Z/Y/X reconstruction grid
+    alpha=0.001,
+    spacing=(0.2, 0.05, 0.05),         # spacing on the reconstruction grid
+    num_iter=300,
+)
+```
+
+### MatrixOperator
+
+For non-convolutional forward models (e.g., Fredholm integral equations):
+
+```python
+from deconlib.deconvolution import MatrixOperator, solve_pdhg_with_operator
+
+# Create operator from kernel matrix
+A = MatrixOperator(kernel_matrix)
+
+result = solve_pdhg_with_operator(
+    observed,
+    blur_op=A,
+    alpha=0.01,
+    regularization="identity",
+    num_iter=500,
+)
+```
 
 ## Tips
 
 !!! tip "Iteration Count"
-    - Start with 20-50 iterations
-    - More iterations = sharper but noisier
+    - Start with 20-50 iterations for Richardson-Lucy
+    - Start with 100-300 iterations for PDHG
+    - More iterations = sharper but potentially noisier
     - Monitor `loss_history` to check convergence
 
-!!! tip "PSF Normalization"
-    The PSF is automatically normalized (sum to 1) by `make_fft_convolver`.
+!!! tip "Regularization Strength"
+    - Start with `alpha=0.001` and adjust
+    - Higher α = smoother/sparser result
+    - Lower α = sharper but potentially noisier
 
 !!! warning "Noise Amplification"
-    Richardson-Lucy can amplify noise. For noisy images:
+    Deconvolution can amplify noise. For noisy images:
 
+    - Use PDHG with regularization
     - Use fewer iterations
-    - Consider regularized variants (like SI-CG below)
-    - Denoise before deconvolution
+    - Pre-denoise the image
 
-## SI-CG Algorithm
-
-The SI-CG (Spatially Invariant Conjugate Gradient) algorithm provides regularized
-deconvolution using square-root parametrization to ensure non-negativity.
-
-```python
-from deconlib.deconvolution import make_fft_convolver, solve_sicg
-
-# Create operators
-C, C_adj = make_fft_convolver(psf, device="cuda")
-observed = torch.from_numpy(image).to("cuda", dtype=torch.float32)
-
-# Run SI-CG with regularization
-result = solve_sicg(
-    observed, C, C_adj,
-    num_iter=100,
-    beta=0.001,        # Regularization weight
-    verbose=True       # Show iteration progress
-)
-restored = result.restored.cpu().numpy()
-```
-
-### Key Parameters
-
-| Parameter | Description | Typical Values |
-|-----------|-------------|----------------|
-| `beta` | Regularization weight. Higher = smoother | 0.0001 - 0.01 |
-| `background` | Constant background to subtract | 0.0 or measured value |
-| `restart_interval` | CG restart frequency | 5 (default) |
-
-### Verbose Output
-
-With `verbose=True`, SI-CG displays iteration progress:
-
-```
-SI-CG Deconvolution
-  Iterations: 100, Beta: 0.001, Background: 0.0
-  Initial objective: 1.2340e+06
-
- Iter     Objective  Normalized        Step        |E'|         E"
-----------------------------------------------------------------------
-    1    1.1000e+06    0.891534   1.23e-02   3.45e+03   1.23e+06
-    2    9.5000e+05    0.769854   8.90e-03   2.10e+03   9.88e+05
-  ...
-```
-
-The **Normalized** column shows `objective / initial_objective`:
-
-- Starts near 1.0
-- Approaches 0.0 as the solution converges
-
-## PSF Extraction from Beads
-
-Extract the experimental PSF from images of sub-diffraction beads (point sources).
-This is useful for calibrating the PSF from real data rather than using a
-theoretical model.
-
-Two methods are available:
-
-### Richardson-Lucy (simple, fast)
-
-```python
-from deconlib.deconvolution import extract_psf_rl
-import torch
-
-# Load bead image
-observed = torch.from_numpy(bead_image).to("cuda", dtype=torch.float32)
-
-# Create point source map with DC at corner (FFT convention)
-point_sources = torch.zeros_like(observed)
-point_sources[0, 0] = 1.0  # Single point at corner
-
-# Extract PSF
-result = extract_psf_rl(
-    observed,
-    point_sources,
-    num_iter=50,
-    background=100.0,  # Subtract background
-    verbose=True
-)
-psf = result.restored.cpu().numpy()  # DC at corner, normalized
-```
-
-### SI-CG (regularized, better for noisy data)
-
-```python
-from deconlib.deconvolution import extract_psf_sicg
-import torch
-
-# Load bead image
-observed = torch.from_numpy(bead_image).to("cuda", dtype=torch.float32)
-
-# Create point source map
-point_sources = torch.zeros_like(observed)
-point_sources[bead_y, bead_x] = 1.0  # Mark bead locations
-
-# Extract PSF with regularization
-result = extract_psf_sicg(
-    observed,
-    point_sources,
-    num_iter=100,
-    beta=0.001,        # Regularization weight
-    background=100.0,
-    verbose=True
-)
-psf = result.restored.cpu().numpy()  # Normalized PSF
-```
-
-### How It Works
-
-The forward model is:
-
-\[
-\text{observed} = \text{PSF} \ast \text{point\_sources} + \text{background}
-\]
-
-Since convolution is symmetric (\(A \ast B = B \ast A\)), we can swap roles:
-use the point source map as the "kernel" and solve for the PSF.
-
-!!! tip "Bead Selection"
-    - Use isolated beads away from image edges
-    - Multiple beads improve SNR (they average together)
-    - Ensure beads are truly sub-diffraction (~100nm for visible light)
-
-!!! tip "Which Method?"
-    - Use `extract_psf_rl` for quick extraction with good SNR
-    - Use `extract_psf_sicg` when you need regularization (noisy data)
-
-## Chambolle-Pock (PDHG) Algorithm
-
-The Chambolle-Pock algorithm solves Poisson deconvolution with sparse regularization
-using primal-dual hybrid gradient (PDHG) optimization:
-
-\[
-\min_{x \geq 0} \text{KL}(b \,||\, Ax + \text{bg}) + \alpha \cdot R(Lx)
-\]
-
-where KL is the Kullback-Leibler divergence, \(R\) is L1 or L2 norm, and \(L\) is
-a regularization operator (Hessian or identity).
-
-```python
-from deconlib.deconvolution import make_fft_convolver, solve_chambolle_pock, PDHGConfig
-
-# Create operators
-C, C_adj = make_fft_convolver(psf, device="cuda")
-observed = torch.from_numpy(image).to("cuda", dtype=torch.float32)
-
-# Configure and run Chambolle-Pock
-config = PDHGConfig(
-    alpha=0.001,               # Regularization weight
-    regularization="hessian",  # Use Hessian (second derivatives)
-    norm="L2",                 # Isotropic (avoids blocky artifacts)
-    spacing=(0.3, 0.1, 0.1),   # Physical spacing (dz, dy, dx) in microns
-    background=50.0,
-)
-
-result = solve_chambolle_pock(
-    observed, C, C_adj,
-    num_iter=200,
-    **config.to_solver_kwargs()
-)
-restored = result.restored.cpu().numpy()
-```
-
-### Key Parameters
-
-| Parameter | Description | Typical Values |
-|-----------|-------------|----------------|
-| `alpha` | Regularization weight. Higher = smoother/sparser | 0.0001 - 0.01 |
-| `regularization` | `"hessian"` (second derivatives) or `"identity"` (sparsity) | `"hessian"` |
-| `norm` | `"L1"` (anisotropic) or `"L2"` (isotropic) | `"L2"` |
-| `spacing` | Physical grid spacing for volume-consistent regularization | `(dz, dy, dx)` |
-| `background` | Constant background value | 0.0 or measured |
-| `accelerate` | Use FISTA-style momentum (2-3x faster) | `True` (default) |
-
-### L1 vs L2 Norm
-
-- **L1 (anisotropic)**: Soft-thresholds each derivative component independently.
-  Can produce sharper edges but may have axis-aligned artifacts.
-- **L2 (isotropic)**: Joint soft-thresholding across components at each pixel.
-  Promotes sparse derivatives while avoiding blocky artifacts.
-
-### Super-Resolution Mode
-
-For super-resolution with binned detectors:
-
-```python
-from deconlib.deconvolution import make_binned_convolver, solve_chambolle_pock, PDHGConfig
-
-# Create binned operators (returns operator norm for correct step sizes)
-A, A_adj, op_norm_sq = make_binned_convolver(psf_fine, bin_factor=2)
-
-config = PDHGConfig(
-    alpha=0.001,
-    blur_norm_sq=op_norm_sq,   # Important: use returned norm
-    spacing=(0.05, 0.05),      # Fine grid spacing
-)
-
-result = solve_chambolle_pock(
-    observed, A, A_adj,
-    num_iter=200,
-    init_shape=psf_fine.shape,  # Fine grid shape
-    **config.to_solver_kwargs()
-)
-```
-
-## Configuration Classes
-
-For complex parameter sets, use the configuration dataclasses:
-
-### SICGConfig
-
-```python
-from deconlib.deconvolution import SICGConfig, solve_sicg
-from dataclasses import replace
-
-config = SICGConfig(
-    beta=0.01,
-    background=100.0,
-    spacing=(0.3, 0.1, 0.1),
-    restart_interval=10,
-)
-
-result = solve_sicg(observed, C, C_adj, num_iter=100, **config.to_solver_kwargs())
-
-# Create variants easily
-stronger_reg = replace(config, beta=0.05)
-```
-
-### PDHGConfig
-
-```python
-from deconlib.deconvolution import PDHGConfig, solve_chambolle_pock
-from dataclasses import replace
-
-config = PDHGConfig(
-    alpha=0.005,
-    regularization="hessian",
-    norm="L2",
-    spacing=(0.3, 0.1, 0.1),
-)
-
-result = solve_chambolle_pock(observed, C, C_adj, num_iter=150, **config.to_solver_kwargs())
-
-# Reuse across multiple images
-for stack in stacks:
-    C, C_adj = make_fft_convolver(psf, device="cuda")
-    result = solve_chambolle_pock(stack, C, C_adj, num_iter=150, **config.to_solver_kwargs())
-```
+!!! tip "PSF Normalization"
+    PSFs are automatically normalized (sum to 1) by the convolvers.
 
 ## Algorithm Comparison
 
-| Algorithm | Use Case | Regularization | Non-negativity |
-|-----------|----------|----------------|----------------|
-| `solve_rl` | Known PSF, low noise | None (implicit) | Yes (multiplicative) |
-| `solve_sicg` | Known PSF, noisy data | Laplacian (β) | Yes (c² parametrization) |
-| `solve_chambolle_pock` | Known PSF, sparse/smooth | Hessian/Identity (α) | Yes (primal projection) |
-| `extract_psf_rl` | PSF calibration, fast | None (implicit) | Yes (multiplicative) |
-| `extract_psf_sicg` | PSF calibration, noisy | Laplacian (β) | Yes (c² parametrization) |
+| Algorithm | Use Case | Regularization | Speed |
+|-----------|----------|----------------|-------|
+| `richardson_lucy_with_operator` | Low noise, explicit forward model | None (implicit) | Fast |
+| `solve_pdhg_mlx` | Noisy data, flexibility | Configurable | Slower |

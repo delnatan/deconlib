@@ -1,26 +1,45 @@
 """Image deconvolution algorithms using Apple MLX.
 
-This module provides deconvolution algorithms for restoring images
-degraded by known point spread functions. All algorithms use Apple MLX
-for efficient GPU-accelerated computation on Apple Silicon.
+Solvers
+-------
+- ``solve_pdhg_mlx`` / ``solve_pdhg_with_operator`` — Malitsky-Pock adaptive
+  PDHG for Poisson or Gaussian data with identity/gradient/hessian
+  regularization and non-negativity.
+- ``richardson_lucy_with_operator`` — multiplicative RL for Poisson data with
+  an explicit forward model and finite-detector sensitivity.
 
-The deconvolution problem is formulated as:
-    b = C(x) + noise
+Forward-model operators
+-----------------------
+All operator classes in this module structurally satisfy the
+:class:`LinearOperator` protocol (``forward``, ``adjoint``, ``__call__``,
+``operator_norm_sq``). Build a forward model by composing primitives:
 
-where:
-    - b: observed blurred image
-    - x: unknown original image
-    - C: forward operator (convolution with PSF)
+    >>> R = compose(FiniteDetector(...), IntegratedDetectorConvolver(...))   # object -> blur -> bin -> crop
 
-Example:
+Hand the same operator to an external solver (e.g. ``memsolve``) as a pair of
+NumPy callables:
+
+    >>> from deconlib.deconvolution import as_numpy_op
+    >>> R, Rt = as_numpy_op(R_op)
+
+Live progress
+-------------
+Both solvers accept ``callback=(k, x) -> Optional[bool]``. Return a truthy
+value to stop early; ``None``/``False`` continues. Writing iterates to a
+pyvistra ``ImageBuffer`` is a one-line closure:
+
+    >>> def cb(k, x):
+    ...     buf[k // every, 0, 0, :, :] = np.asarray(x)
+    ...     return False
+
+Pass no ``callback`` for headless batched runs.
+
+Example
+-------
     >>> import mlx.core as mx
-    >>> from deconlib.deconvolution import solve_pdhg_mlx, FFTConvolver
-    >>>
-    >>> # Create convolver and deconvolve
-    >>> convolver = FFTConvolver(psf)
-    >>> observed = mx.array(blurred_image)
+    >>> from deconlib.deconvolution import solve_pdhg_mlx
     >>> result = solve_pdhg_mlx(
-    ...     observed,
+    ...     observed=mx.array(blurred),
     ...     psf=psf,
     ...     alpha=0.001,
     ...     regularization="hessian",
@@ -37,17 +56,17 @@ from .pdhg_mlx import (
     HessianRegularizer,
 )
 from .rl_mlx import (
-    richardson_lucy,
-    richardson_lucy_accelerated,
-    richardson_lucy_tv,
+    richardson_lucy_with_operator,
     RLResult,
 )
 from .linops_mlx import (
     FFTConvolver,
-    BinnedConvolver,
+    GaussianICF,
+    IntegratedDetectorConvolver,
     FiniteDetector,
     MatrixOperator,
     compute_detector_padding,
+    fast_padded_shape,
     Gradient1D,
     Gradient2D,
     Gradient3D,
@@ -55,6 +74,13 @@ from .linops_mlx import (
     Hessian2D,
     Hessian3D,
 )
+from .composition import (
+    Compose,
+    LinearOperator,
+    as_numpy_op,
+    compose,
+)
+from .wavelets import AtrousTransform
 
 __all__ = [
     # Result types
@@ -67,19 +93,25 @@ __all__ = [
     "GradientRegularizer",
     "HessianRegularizer",
     # MLX Algorithms - Richardson-Lucy
-    "richardson_lucy",
-    "richardson_lucy_accelerated",
-    "richardson_lucy_tv",
+    "richardson_lucy_with_operator",
     # MLX Linear Operators
     "FFTConvolver",
-    "BinnedConvolver",
+    "GaussianICF",
+    "IntegratedDetectorConvolver",
     "FiniteDetector",
     "MatrixOperator",
     "compute_detector_padding",
+    "fast_padded_shape",
     "Gradient1D",
     "Gradient2D",
     "Gradient3D",
     "Hessian1D",
     "Hessian2D",
     "Hessian3D",
+    # Composition / external-solver adapters
+    "Compose",
+    "LinearOperator",
+    "compose",
+    "as_numpy_op",
+    "AtrousTransform",
 ]

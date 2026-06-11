@@ -8,6 +8,7 @@ Run with: python tests/test_operators_mlx_adjoint.py
 """
 
 import mlx.core as mx
+import numpy as np
 
 # Set seed for reproducibility
 mx.random.seed(42)
@@ -47,7 +48,7 @@ def dot_product_test(forward_fn, adjoint_fn, x_shape, y_shape, name, **kwargs):
 
 def test_d1_fwd_adjoint():
     """Test d1_fwd / d1_fwd_adj pair."""
-    from deconlib.deconvolution.operators_mlx import d1_fwd, d1_fwd_adj
+    from deconlib.deconvolution.linops_mlx import d1_fwd, d1_fwd_adj
 
     print("\n" + "=" * 60)
     print("Testing d1_fwd / d1_fwd_adj")
@@ -84,7 +85,7 @@ def test_d1_fwd_adjoint():
 
 def test_d2_self_adjoint():
     """Test that d2 is self-adjoint."""
-    from deconlib.deconvolution.operators_mlx import d2, d2_adj
+    from deconlib.deconvolution.linops_mlx import d2, d2_adj
 
     print("\n" + "=" * 60)
     print("Testing d2 self-adjoint property (d2 == d2_adj)")
@@ -120,7 +121,7 @@ def test_d2_self_adjoint():
 
 def test_d1_cen_adjoint():
     """Test d1_cen / d1_cen_adj pair."""
-    from deconlib.deconvolution.operators_mlx import d1_cen, d1_cen_adj
+    from deconlib.deconvolution.linops_mlx import d1_cen, d1_cen_adj
 
     print("\n" + "=" * 60)
     print("Testing d1_cen / d1_cen_adj")
@@ -156,7 +157,7 @@ def test_d1_cen_adjoint():
 
 def test_grad_2d_adjoint():
     """Test Gradient2D class and grad_2d / grad_2d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         Gradient2D,
         grad_2d,
         grad_2d_adj,
@@ -215,7 +216,7 @@ def test_grad_2d_adjoint():
 
 def test_hessian_2d_adjoint():
     """Test Hessian2D class and hessian_2d / hessian_2d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         Hessian2D,
         hessian_2d,
         hessian_2d_adj,
@@ -261,7 +262,7 @@ def test_hessian_2d_adjoint():
 
 def test_grad_3d_adjoint():
     """Test Gradient3D class and grad_3d / grad_3d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         Gradient3D,
         grad_3d,
         grad_3d_adj,
@@ -315,7 +316,7 @@ def test_grad_3d_adjoint():
 
 def test_hessian_3d_adjoint():
     """Test Hessian3D class and hessian_3d / hessian_3d_adj functions."""
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         Hessian3D,
         hessian_3d,
         hessian_3d_adj,
@@ -369,7 +370,7 @@ def test_hessian_3d_adjoint():
 
 def test_downsample_upsample_adjoint():
     """Test downsample / upsample adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import downsample, upsample
+    from deconlib.deconvolution.linops_mlx import downsample, upsample
 
     print("\n" + "=" * 60)
     print("Testing downsample / upsample (sum-binning / replication)")
@@ -439,7 +440,7 @@ def test_downsample_upsample_adjoint():
 
 def test_fft_convolver_adjoint():
     """Test FFTConvolver forward/adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import FFTConvolver
+    from deconlib.deconvolution.linops_mlx import FFTConvolver
 
     print("\n" + "=" * 60)
     print("Testing FFTConvolver (FFT convolution / correlation)")
@@ -501,86 +502,227 @@ def test_fft_convolver_adjoint():
     return all_passed
 
 
-def test_binned_convolver_adjoint():
-    """Test BinnedConvolver forward/adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import BinnedConvolver
+def test_integrated_detector_convolver_adjoint():
+    """Test positive fractional detector integration forward/adjoint pair."""
+    from deconlib.deconvolution.linops_mlx import (
+        IntegratedDetectorConvolver,
+        downsample,
+        upsample,
+    )
 
     print("\n" + "=" * 60)
-    print("Testing BinnedConvolver (convolution + binning)")
+    print("Testing IntegratedDetectorConvolver (positive area integration)")
     print("=" * 60)
 
     all_passed = True
-
-    # Test cases: (highres_shape, factors, description)
     test_cases = [
-        ((16, 20), 2, "2D isotropic 2x binning"),
-        ((16, 20), (2, 4), "2D anisotropic (2, 4) binning"),
-        ((8, 12, 16), 2, "3D isotropic 2x binning"),
-        ((8, 12, 16), (1, 2, 2), "3D anisotropic (1, 2, 2) - XY only"),
+        ((18, 22), (11, 13), "2D non-integer positive integration"),
+        ((6, 14, 16), (6, 9, 11), "3D lateral non-integer integration"),
     ]
 
-    for highres_shape, factors, desc in test_cases:
-        # Compute lowres shape
-        if isinstance(factors, int):
-            lowres_shape = tuple(s // factors for s in highres_shape)
-        else:
-            lowres_shape = tuple(
-                s // f for s, f in zip(highres_shape, factors)
-            )
+    for highres_shape, output_shape, desc in test_cases:
+        kernel = mx.abs(mx.random.normal(highres_shape))
+        A = IntegratedDetectorConvolver(kernel, output_shape, normalize=True)
+        x = mx.abs(mx.random.normal(highres_shape))
+        y = mx.random.normal(output_shape)
 
-        # Create kernel
-        kernel = mx.random.normal(highres_shape)
-        kernel = mx.abs(kernel)
-        kernel = kernel / mx.sum(kernel)
-
-        # Test class-based interface
-        A = BinnedConvolver(kernel, factors, normalize=False)
-
-        # x lives on highres grid, y lives on lowres grid
-        x = mx.random.normal(highres_shape)
-        y = mx.random.normal(lowres_shape)
-
-        # Test __call__ interface
-        Ax = A(x)  # highres -> lowres
-        A_adj_y = A.adjoint(y)  # lowres -> highres
-
-        # Adjoint test: <Ax, y> = <x, A_adj(y)>
+        Ax = A.forward(x)
+        A_adj_y = A.adjoint(y)
         lhs = mx.sum(Ax * y).item()
         rhs = mx.sum(x * A_adj_y).item()
-
         denom = max(abs(lhs), abs(rhs), 1e-10)
         err = abs(lhs - rhs) / denom
+        min_forward = float(mx.min(Ax))
 
-        passed = err < RTOL
-        status = "PASS" if passed else "FAIL"
+        passed = err < 2e-3 and min_forward >= -1e-5
         print(
-            f"  [{status}] {desc}: <Ax,y>={lhs:.8f}, <x,A*y>={rhs:.8f}, err={err:.2e}"
+            f"  [{'PASS' if passed else 'FAIL'}] {desc}: "
+            f"err={err:.2e}, min(Ax)={min_forward:.2e}"
         )
-        print(
-            f"       norm_sq: {A.operator_norm_sq:.2f}, shapes: {A.highres_shape} -> {A.lowres_shape}"
-        )
-
-        # Verify shapes
-        shape_ok = Ax.shape == lowres_shape and A_adj_y.shape == highres_shape
-        if not shape_ok:
-            print(
-                f"       [FAIL] Shape mismatch: Ax={Ax.shape}, A*y={A_adj_y.shape}"
-            )
-            passed = False
-
-        # Verify stored shapes match
-        if A.lowres_shape != lowres_shape or A.highres_shape != highres_shape:
-            print(f"       [FAIL] Stored shape mismatch")
-            passed = False
-
         all_passed = all_passed and passed
+
+    # Integer overlap weights reduce to ordinary block sum binning.
+    shape = (12, 16)
+    factors = (2, 4)
+    output_shape = (6, 4)
+    kernel_np = np.zeros(shape, dtype=np.float32)
+    kernel_np[0, 0] = 1.0
+    kernel = mx.array(kernel_np)
+    x = mx.random.normal(shape)
+    y = mx.random.normal(output_shape)
+    integrated = IntegratedDetectorConvolver(kernel, output_shape, normalize=False)
+    fwd_err = float(mx.max(mx.abs(downsample(x, factors) - integrated.forward(x))))
+    adj_err = float(mx.max(mx.abs(upsample(y, factors) - integrated.adjoint(y))))
+    passed = fwd_err < 1e-2 and adj_err < 1e-2
+    print(
+        f"  [{'PASS' if passed else 'FAIL'}] integer equivalence: "
+        f"forward max={fwd_err:.2e}, adjoint max={adj_err:.2e}"
+    )
+    all_passed = all_passed and passed
 
     return all_passed
 
 
+def test_finite_detector_binned_rl_sensitivity():
+    """RL sensitivity should preserve edge-contributing support outside crop."""
+    from deconlib.deconvolution import (
+        FiniteDetector,
+        IntegratedDetectorConvolver,
+        compose,
+        richardson_lucy_with_operator,
+    )
+
+    print("\n" + "=" * 60)
+    print("Testing finite detector sensitivity for binned RL")
+    print("=" * 60)
+
+    detector = FiniteDetector((8, 8), padding=((2, 2), (2, 2)))
+    highres_shape = (24, 24)
+
+    coords = [np.fft.fftfreq(n) * n for n in highres_shape]
+    kernel = np.exp(-(coords[0] ** 2) / (2 * 1.2**2)).astype(np.float32)
+    kernel = kernel[:, None] * np.exp(
+        -(coords[1] ** 2) / (2 * 1.2**2)
+    ).astype(np.float32)[None, :]
+    kernel = kernel / kernel.sum()
+
+    binner = IntegratedDetectorConvolver(
+        kernel,
+        output_shape=detector.padded_shape,
+        normalize=False,
+    )
+    op = compose(detector, binner)
+
+    sensitivity = op.adjoint(mx.ones(detector.detector_shape))
+    edge_support = float(sensitivity[3, 12])
+    measured_support = float(sensitivity[4, 12])
+
+    x_true_np = np.ones(highres_shape, dtype=np.float32)
+    x_true_np[3, 12] += 5.0
+    x_true = mx.array(x_true_np)
+    observed = op.forward(x_true)
+    result = richardson_lucy_with_operator(
+        observed,
+        op,
+        num_iter=1,
+        init=x_true,
+        eval_interval=1,
+    )
+    restored = result.restored
+    rel_change = float(
+        mx.max(mx.abs(restored - x_true)) / mx.maximum(mx.max(mx.abs(x_true)), 1e-6)
+    )
+
+    passed = edge_support > 1e-4 and measured_support > edge_support and rel_change < 1e-5
+    print(
+        f"  [{'PASS' if passed else 'FAIL'}] edge_support={edge_support:.3e}, "
+        f"measured_support={measured_support:.3e}, fixed-point rel_change={rel_change:.3e}"
+    )
+    return passed
+
+
+def test_rl_valid_region_output():
+    """RL can return only the detector-valid fine-grid region."""
+    from deconlib.deconvolution import (
+        FiniteDetector,
+        IntegratedDetectorConvolver,
+        compose,
+        richardson_lucy_with_operator,
+    )
+
+    print("\n" + "=" * 60)
+    print("Testing RL valid-region output crop")
+    print("=" * 60)
+
+    detector = FiniteDetector((8, 8), padding=((2, 2), (2, 2)))
+    highres_shape = (24, 24)
+    kernel = np.zeros(highres_shape, dtype=np.float32)
+    kernel[0, 0] = 1.0
+
+    op = compose(
+        detector,
+        IntegratedDetectorConvolver(
+            kernel,
+            output_shape=detector.padded_shape,
+            normalize=False,
+        ),
+    )
+
+    x_true = mx.ones(highres_shape)
+    observed = op.forward(x_true)
+    full = richardson_lucy_with_operator(
+        observed,
+        op,
+        num_iter=1,
+        init=x_true,
+        eval_interval=1,
+    )
+    valid = richardson_lucy_with_operator(
+        observed,
+        op,
+        num_iter=1,
+        init=x_true,
+        eval_interval=1,
+        return_region="valid",
+    )
+
+    expected_slices = (slice(4, 20), slice(4, 20))
+    full_shape_ok = tuple(full.restored.shape) == highres_shape
+    valid_shape_ok = tuple(valid.restored.shape) == (16, 16)
+    slices_ok = valid.valid_slices == expected_slices
+    crop_err = float(mx.max(mx.abs(valid.restored - full.restored[expected_slices])))
+    metadata_ok = valid.full_shape == highres_shape
+    passed = full_shape_ok and valid_shape_ok and slices_ok and metadata_ok and crop_err < 1e-6
+    print(
+        f"  [{'PASS' if passed else 'FAIL'}] full_shape={tuple(full.restored.shape)}, "
+        f"valid_shape={tuple(valid.restored.shape)}, slices={valid.valid_slices}, "
+        f"crop_err={crop_err:.2e}"
+    )
+    return passed
+
+
+def test_integrated_detector_folded_icf_matches_composition():
+    """Folded ICF should match explicit GaussianICF composition."""
+    from deconlib.deconvolution import GaussianICF, compose
+    from deconlib.deconvolution.linops_mlx import IntegratedDetectorConvolver
+
+    print("\n" + "=" * 60)
+    print("Testing folded GaussianICF in IntegratedDetectorConvolver")
+    print("=" * 60)
+
+    shape = (12, 16)
+    output_shape = (6, 4)
+    icf_sigmas = (0.8, 1.1)
+    icf_spacings = (1.0, 1.0)
+    kernel = mx.abs(mx.random.normal(shape))
+    x = mx.random.normal(shape)
+    y = mx.random.normal(output_shape)
+
+    explicit = compose(
+        IntegratedDetectorConvolver(kernel, output_shape, normalize=True),
+        GaussianICF(shape, sigmas=icf_sigmas, spacings=icf_spacings),
+    )
+    folded = IntegratedDetectorConvolver(
+        kernel,
+        output_shape=output_shape,
+        normalize=True,
+        icf_sigmas=icf_sigmas,
+        icf_spacings=icf_spacings,
+    )
+
+    fwd_err = float(mx.max(mx.abs(explicit.forward(x) - folded.forward(x))))
+    adj_err = float(mx.max(mx.abs(explicit.adjoint(y) - folded.adjoint(y))))
+    passed = fwd_err < 1e-5 and adj_err < 1e-5
+    print(
+        f"  [{'PASS' if passed else 'FAIL'}] folded ICF: "
+        f"forward max={fwd_err:.2e}, adjoint max={adj_err:.2e}"
+    )
+    return passed
+
+
 def test_finite_detector_adjoint():
     """Test FiniteDetector crop/zero-pad adjoint pair."""
-    from deconlib.deconvolution.operators_mlx import (
+    from deconlib.deconvolution.linops_mlx import (
         FiniteDetector,
         compute_detector_padding,
     )
@@ -804,7 +946,10 @@ def main():
     results["hessian_3d/hessian_3d_adj"] = test_hessian_3d_adjoint()
     results["downsample/upsample"] = test_downsample_upsample_adjoint()
     results["FFTConvolver"] = test_fft_convolver_adjoint()
-    results["BinnedConvolver"] = test_binned_convolver_adjoint()
+    results["IntegratedDetectorConvolver"] = test_integrated_detector_convolver_adjoint()
+    results["finite detector binned RL sensitivity"] = test_finite_detector_binned_rl_sensitivity()
+    results["RL valid region output"] = test_rl_valid_region_output()
+    results["folded GaussianICF"] = test_integrated_detector_folded_icf_matches_composition()
     results["FiniteDetector"] = test_finite_detector_adjoint()
 
     # Summary
