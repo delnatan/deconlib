@@ -10,6 +10,8 @@ from typing import Optional, Tuple, Union
 import mlx.core as mx
 import numpy as np
 
+from ..utils.padding import pad_corner_origin_kernel
+
 try:
     from .linops_core_mlx import (
         SQRT2,
@@ -370,6 +372,77 @@ class FFTConvolver:
         return self.forward(x)
 
 
+class LinearFFTConvolver:
+    """Wrap-free FFT convolution on a same-shaped signal domain.
+
+    The input signal is zero-padded to an FFT canvas at least ``N + M - 1``
+    along every axis, the compact corner-origin PSF is embedded into that
+    canvas with its negative offsets at the high end, and the result is cropped
+    back to ``signal_shape``. This makes the FFT implementation match linear
+    zero-boundary convolution instead of circular convolution.
+    """
+
+    def __init__(
+        self,
+        kernel: Union[np.ndarray, mx.array],
+        signal_shape: Tuple[int, ...],
+        normalize: bool = True,
+        fft_shape: Optional[Tuple[int, ...]] = None,
+    ):
+        if isinstance(kernel, mx.array):
+            kernel_np = np.array(kernel)
+        else:
+            kernel_np = np.asarray(kernel)
+
+        self.signal_shape = tuple(int(s) for s in signal_shape)
+        self.kernel_shape = tuple(int(s) for s in kernel_np.shape)
+        if len(self.signal_shape) != len(self.kernel_shape):
+            raise ValueError(
+                "signal_shape and kernel must have the same number of dimensions"
+            )
+
+        minimum_fft_shape = tuple(
+            n + m - 1 for n, m in zip(self.signal_shape, self.kernel_shape)
+        )
+        if fft_shape is None:
+            fft_shape = fast_padded_shape(self.signal_shape, self.kernel_shape)
+        self.fft_shape = tuple(int(s) for s in fft_shape)
+        if len(self.fft_shape) != len(self.signal_shape):
+            raise ValueError("fft_shape must match signal_shape ndim")
+        if any(p < min_p for p, min_p in zip(self.fft_shape, minimum_fft_shape)):
+            raise ValueError(
+                f"fft_shape {self.fft_shape} is too small for linear "
+                f"convolution; minimum is {minimum_fft_shape}"
+            )
+
+        padded_kernel = pad_corner_origin_kernel(
+            kernel_np.astype(np.float32, copy=False),
+            self.fft_shape,
+        )
+        padding = tuple(
+            (0, fft_n - signal_n)
+            for signal_n, fft_n in zip(self.signal_shape, self.fft_shape)
+        )
+        self._domain = FiniteDetector(self.signal_shape, padding=padding)
+        self._convolver = FFTConvolver(padded_kernel, normalize=normalize)
+        self.operator_norm_sq = self._convolver.operator_norm_sq
+
+    def forward(self, x: mx.array) -> mx.array:
+        """Apply zero-boundary linear convolution."""
+        padded = self._domain.adjoint(x)
+        convolved = self._convolver.forward(padded)
+        return self._domain.forward(convolved)
+
+    def adjoint(self, y: mx.array) -> mx.array:
+        """Apply the adjoint zero-boundary correlation."""
+        padded = self._domain.adjoint(y)
+        correlated = self._convolver.adjoint(padded)
+        return self._domain.forward(correlated)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
 def _gaussian_icf_kernel(
     shape: Tuple[int, ...],
     sigmas: Tuple[float, ...],
@@ -501,6 +574,11 @@ class IntegratedDetectorConvolver:
     anisotropic super-resolution. The detector step is separable and built from
     nonnegative overlap weights between fine-grid cells and camera pixels. For
     integer scale factors it reduces to ordinary sum-binning.
+
+    By default convolution is circular on ``kernel.shape`` for backward
+    compatibility. Pass ``signal_shape`` with a compact corner-origin kernel to
+    run the convolution on an internal wrap-free FFT domain and crop back before
+    detector integration.
     """
 
     def __init__(
@@ -510,30 +588,80 @@ class IntegratedDetectorConvolver:
         normalize: bool = True,
         icf_sigmas: Optional[Tuple[float, ...]] = None,
         icf_spacings: Optional[Tuple[float, ...]] = None,
+        signal_shape: Optional[Tuple[int, ...]] = None,
+        fft_shape: Optional[Tuple[int, ...]] = None,
     ):
-        if isinstance(kernel, np.ndarray):
-            kernel = mx.array(kernel)
+        if isinstance(kernel, mx.array):
+            kernel_np = np.array(kernel)
+        else:
+            kernel_np = np.asarray(kernel)
 
-        self.highres_shape = tuple(kernel.shape)
+        self.kernel_shape = tuple(int(s) for s in kernel_np.shape)
+        self.highres_shape = (
+            tuple(int(s) for s in signal_shape)
+            if signal_shape is not None
+            else self.kernel_shape
+        )
         self.output_shape = tuple(output_shape)
         self.lowres_shape = self.output_shape
         ndim = len(self.highres_shape)
-        self.axes = tuple(range(-ndim, 0))
 
         if len(self.output_shape) != ndim:
             raise ValueError(
                 "output_shape must have the same number of dimensions as kernel"
             )
+        if len(self.kernel_shape) != ndim:
+            raise ValueError(
+                "kernel and signal_shape must have the same number of dimensions"
+            )
+
+        self._linear_domain = None
+        if signal_shape is None:
+            if fft_shape is not None and tuple(fft_shape) != self.highres_shape:
+                raise ValueError(
+                    "fft_shape can only differ from kernel.shape when "
+                    "signal_shape is provided"
+                )
+            self.fft_shape = self.highres_shape
+            kernel_fft = kernel_np.astype(np.float32, copy=False)
+        else:
+            minimum_fft_shape = tuple(
+                n + m - 1 for n, m in zip(self.highres_shape, self.kernel_shape)
+            )
+            if fft_shape is None:
+                fft_shape = fast_padded_shape(self.highres_shape, self.kernel_shape)
+            self.fft_shape = tuple(int(s) for s in fft_shape)
+            if len(self.fft_shape) != ndim:
+                raise ValueError("fft_shape must match signal_shape ndim")
+            if any(
+                p < min_p for p, min_p in zip(self.fft_shape, minimum_fft_shape)
+            ):
+                raise ValueError(
+                    f"fft_shape {self.fft_shape} is too small for linear "
+                    f"convolution; minimum is {minimum_fft_shape}"
+                )
+            kernel_fft = pad_corner_origin_kernel(
+                kernel_np.astype(np.float32, copy=False),
+                self.fft_shape,
+            )
+            padding = tuple(
+                (0, fft_n - signal_n)
+                for signal_n, fft_n in zip(self.highres_shape, self.fft_shape)
+            )
+            self._linear_domain = FiniteDetector(self.highres_shape, padding=padding)
+
+        self.axes = tuple(range(-ndim, 0))
+        kernel_mx = mx.array(kernel_fft)
 
         if normalize:
-            kernel = kernel / mx.sum(kernel)
+            kernel_mx = kernel_mx / mx.sum(kernel_mx)
 
-        self.otf = mx.fft.rfftn(kernel)
+        self.otf = mx.fft.rfftn(kernel_mx)
         if icf_sigmas is not None:
             if icf_spacings is None:
                 icf_spacings = (1.0,) * ndim
             self.otf = self.otf * _gaussian_icf_otf(
-                self.highres_shape,
+                self.fft_shape,
                 tuple(icf_sigmas),
                 tuple(icf_spacings),
                 real_fft=True,
@@ -571,19 +699,30 @@ class IntegratedDetectorConvolver:
 
     def forward(self, x: mx.array) -> mx.array:
         """Forward: convolve then integrate fine cells into detector pixels."""
-        x_ft = mx.fft.rfftn(x)
+        x_fft = self._linear_domain.adjoint(x) if self._linear_domain else x
+        x_ft = mx.fft.rfftn(x_fft)
         convolved = mx.fft.irfftn(
-            x_ft * self.otf, axes=self.axes, s=self.highres_shape
+            x_ft * self.otf, axes=self.axes, s=self.fft_shape
         )
+        if self._linear_domain:
+            convolved = self._linear_domain.forward(convolved)
         return self._integrate(convolved)
 
     def adjoint(self, y: mx.array) -> mx.array:
         """Adjoint: scatter detector pixels then correlate."""
         upsampled = self._integrate_adjoint(y)
-        y_ft = mx.fft.rfftn(upsampled)
-        return mx.fft.irfftn(
-            y_ft * self.otf_conj, axes=self.axes, s=self.highres_shape
+        y_fft = (
+            self._linear_domain.adjoint(upsampled)
+            if self._linear_domain
+            else upsampled
         )
+        y_ft = mx.fft.rfftn(y_fft)
+        correlated = mx.fft.irfftn(
+            y_ft * self.otf_conj, axes=self.axes, s=self.fft_shape
+        )
+        if self._linear_domain:
+            correlated = self._linear_domain.forward(correlated)
+        return correlated
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)

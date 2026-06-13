@@ -1,15 +1,12 @@
 """Array padding utilities for Fourier-based operations."""
 
+from typing import Sequence, Union
+
 import numpy as np
 
 from .fourier import imshift
 
-__all__ = ["pad_to_shape", "soft_pad"]
-
-
-from typing import Sequence, Union
-
-import numpy as np
+__all__ = ["pad_to_shape", "pad_corner_origin_kernel", "soft_pad"]
 
 
 def tukey_window(N: int, pad: int, dtype=np.float32) -> np.ndarray:
@@ -140,6 +137,57 @@ def pad_to_shape(
         raise ValueError(
             f"Unknown padding mode: {mode}. Use 'origin' or 'corner'."
         )
+
+
+def pad_corner_origin_kernel(
+    kernel: np.ndarray,
+    output_shape: tuple[int, ...],
+) -> np.ndarray:
+    """Pad a compact corner-origin convolution kernel to a larger FFT canvas.
+
+    Corner-origin kernels store zero offset at index 0, positive offsets at low
+    indices, and negative offsets wrapped to the high end of each compact axis.
+    When embedding such a kernel in a larger FFT domain, those negative-offset
+    samples must move to the high end of the larger canvas; ordinary trailing
+    zero padding would turn them into large positive offsets.
+    """
+    kernel = np.asarray(kernel)
+    input_shape = tuple(int(s) for s in kernel.shape)
+    output_shape = tuple(int(s) for s in output_shape)
+    ndim = len(input_shape)
+
+    if len(output_shape) != ndim:
+        raise ValueError(
+            f"output_shape has {len(output_shape)} dims, expected {ndim}"
+        )
+    for axis, (in_s, out_s) in enumerate(zip(input_shape, output_shape)):
+        if out_s < in_s:
+            raise ValueError(
+                f"output size {out_s} cannot be smaller than kernel size "
+                f"{in_s} in dimension {axis}"
+            )
+
+    result = np.zeros(output_shape, dtype=kernel.dtype)
+    chunks: list[list[tuple[slice, slice]]] = []
+    for in_s, out_s in zip(input_shape, output_shape):
+        n_positive = (in_s + 1) // 2
+        axis_chunks = [(slice(0, n_positive), slice(0, n_positive))]
+        if n_positive < in_s:
+            n_negative = in_s - n_positive
+            axis_chunks.append(
+                (slice(n_positive, in_s), slice(out_s - n_negative, out_s))
+            )
+        chunks.append(axis_chunks)
+
+    def copy_chunks(axis: int, src: list[slice], dst: list[slice]) -> None:
+        if axis == ndim:
+            result[tuple(dst)] = kernel[tuple(src)]
+            return
+        for src_slice, dst_slice in chunks[axis]:
+            copy_chunks(axis + 1, [*src, src_slice], [*dst, dst_slice])
+
+    copy_chunks(0, [], [])
+    return result
 
 
 def _pad_corner(img: np.ndarray, output_shape: tuple[int, ...]) -> np.ndarray:

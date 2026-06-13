@@ -8,7 +8,7 @@ from .fourier import (
     imshift,
     rfftfreq,
 )
-from .padding import pad_to_shape, soft_pad
+from .padding import pad_corner_origin_kernel, pad_to_shape, soft_pad
 from .zernike import (
     ansi_to_nm,
     noll_to_ansi,
@@ -30,6 +30,7 @@ __all__ = [
     "ansi_to_nm",
     "noll_to_ansi",
     # Padding
+    "pad_corner_origin_kernel",
     "pad_to_shape",
     "soft_pad",
 ]

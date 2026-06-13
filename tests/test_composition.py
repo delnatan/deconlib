@@ -9,6 +9,7 @@ from deconlib.deconvolution import (
     FFTConvolver,
     FiniteDetector,
     GaussianICF,
+    LinearFFTConvolver,
     LinearOperator,
     as_numpy_op,
     compose,
@@ -57,6 +58,16 @@ def test_compose_two_ops_adjoint():
         R.forward, R.adjoint, det.padded_shape, det.detector_shape
     )
     assert err < RTOL_F32, f"composed adjoint error {err:.2e} >= {RTOL_F32:.2e}"
+
+
+def test_linear_fft_convolver_adjoint():
+    psf = _gaussian_kernel((5, 5), sigma=1.0)
+    conv = LinearFFTConvolver(psf, signal_shape=(13, 11), normalize=True)
+
+    err = _dot_product_error(
+        conv.forward, conv.adjoint, (13, 11), (13, 11)
+    )
+    assert err < RTOL_F32
 
 
 def test_compose_norm_is_product():

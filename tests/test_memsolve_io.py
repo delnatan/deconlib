@@ -278,6 +278,39 @@ def _expand_psf(psf_small: np.ndarray, target_shape: tuple[int, ...]) -> np.ndar
     return np.roll(out, shifts, axis=tuple(range(out.ndim))).astype(np.float32)
 
 
+def _direct_corner_origin_convolution(
+    image: np.ndarray,
+    kernel: np.ndarray,
+) -> np.ndarray:
+    """Linear zero-boundary convolution for compact corner-origin kernels."""
+    image = np.asarray(image, dtype=np.float32)
+    kernel = np.asarray(kernel, dtype=np.float32)
+    out = np.zeros_like(image, dtype=np.float32)
+    offsets = [
+        tuple(int(round(v)) for v in (np.fft.fftfreq(n) * n))
+        for n in kernel.shape
+    ]
+    for kernel_index in np.ndindex(kernel.shape):
+        weight = float(kernel[kernel_index])
+        if weight == 0.0:
+            continue
+        offset = tuple(
+            axis_offsets[i]
+            for axis_offsets, i in zip(offsets, kernel_index)
+        )
+        src_slices = []
+        dst_slices = []
+        for axis_n, delta in zip(image.shape, offset):
+            if delta >= 0:
+                src_slices.append(slice(0, axis_n - delta))
+                dst_slices.append(slice(delta, axis_n))
+            else:
+                src_slices.append(slice(-delta, axis_n))
+                dst_slices.append(slice(0, axis_n + delta))
+        out[tuple(dst_slices)] += weight * image[tuple(src_slices)]
+    return out
+
+
 @pytest.fixture
 def psf_2d(optics) -> tuple[Psf, np.ndarray]:
     """A 16×16 corner-origin Gaussian PSF on the visible grid."""
@@ -443,6 +476,115 @@ def test_fft_conv_builds_atrous_wavelet_icf(optics, psf_2d):
     assert abs(lhs - rhs) < 1e-5 * max(abs(lhs), abs(rhs), 1.0)
 
 
+def test_fft_conv_uses_finite_detector_for_linear_convolution(optics):
+    data_shape = (5, 6)
+    psf_arr = np.array(
+        [
+            [0.40, 0.10, 0.05],
+            [0.15, 0.08, 0.02],
+            [0.12, 0.06, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    psf_arr /= psf_arr.sum()
+    padding = (1, 1)
+    visible_shape = tuple(d + 2 * p for d, p in zip(data_shape, padding))
+    geometry = BundleGeometry(
+        hidden_shape=visible_shape,
+        visible_shape=visible_shape,
+        data_shape=data_shape,
+        voxel_spacing=(0.1, 0.1),
+    )
+    recipe = ForwardRecipe(
+        kind="fft_conv",
+        detector_padding=padding,
+        psf_source="embedded",
+    )
+    problem = build_problem_from_recipe(
+        recipe,
+        psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
+        optics=optics,
+        geometry=geometry,
+        y=np.zeros(data_shape, dtype=np.float32),
+        prior=np.ones(visible_shape, dtype=np.float32),
+    )
+
+    image = np.zeros(visible_shape, dtype=np.float32)
+    image[1, 1] = 3.0
+    image[-1, -1] = 7.0
+    expected = _direct_corner_origin_convolution(image, psf_arr)[1:6, 1:7]
+
+    pred = problem.R(image)
+
+    assert pred.shape == data_shape
+    np.testing.assert_allclose(pred, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_fft_conv_without_detector_padding_is_linear_convolution(optics):
+    shape = (5, 6)
+    psf_arr = np.array(
+        [
+            [0.40, 0.10, 0.05],
+            [0.15, 0.08, 0.02],
+            [0.12, 0.06, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    psf_arr /= psf_arr.sum()
+    geometry = BundleGeometry(
+        hidden_shape=shape,
+        visible_shape=shape,
+        data_shape=shape,
+        voxel_spacing=(0.1, 0.1),
+    )
+    recipe = ForwardRecipe(kind="fft_conv", psf_source="embedded")
+    problem = build_problem_from_recipe(
+        recipe,
+        psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
+        optics=optics,
+        geometry=geometry,
+        y=np.zeros(shape, dtype=np.float32),
+        prior=np.ones(shape, dtype=np.float32),
+    )
+
+    image = np.zeros(shape, dtype=np.float32)
+    image[0, 0] = 3.0
+    image[-1, -1] = 7.0
+    expected = _direct_corner_origin_convolution(image, psf_arr)
+
+    pred = problem.R(image)
+
+    assert pred.shape == shape
+    np.testing.assert_allclose(pred, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_fft_conv_can_infer_finite_detector_padding_from_geometry(optics):
+    data_shape = (5, 6)
+    visible_shape = (7, 8)
+    psf_arr = _gaussian_psf_2d((3, 3), sigma=0.8)
+    geometry = BundleGeometry(
+        hidden_shape=visible_shape,
+        visible_shape=visible_shape,
+        data_shape=data_shape,
+        voxel_spacing=(0.1, 0.1),
+    )
+    recipe = ForwardRecipe(kind="fft_conv", psf_source="embedded")
+    problem = build_problem_from_recipe(
+        recipe,
+        psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
+        optics=optics,
+        geometry=geometry,
+        y=np.zeros(data_shape, dtype=np.float32),
+        prior=np.ones(visible_shape, dtype=np.float32),
+    )
+
+    image = np.zeros(visible_shape, dtype=np.float32)
+    image[1, 1] = 5.0
+    expected = _direct_corner_origin_convolution(image, psf_arr)[1:6, 1:7]
+
+    np.testing.assert_allclose(problem.R(image), expected, rtol=1e-5, atol=1e-5)
+
+
 def test_atrous_recipe_round_trip_preserves_spec(tmp_path: Path, optics, psf_2d):
     psf_obj, psf_arr = psf_2d
     visible_shape = psf_arr.shape
@@ -547,3 +689,42 @@ def test_super_res_idc_round_trip(tmp_path: Path, optics):
     pred = rebuilt.R(bundle.map.h)
     assert pred.shape == data_shape
     np.testing.assert_allclose(pred, inference.map.pred, rtol=1e-3, atol=1e-3)
+
+
+def test_super_res_idc_accepts_compact_psf_on_padded_linear_domain(optics):
+    data_shape = (6, 6)
+    super_res_factor = (2, 2)
+    detector_padding = (1, 1)
+    detector_domain_shape = tuple(
+        d + 2 * p for d, p in zip(data_shape, detector_padding)
+    )
+    visible_shape = tuple(
+        d * f for d, f in zip(detector_domain_shape, super_res_factor)
+    )
+    psf_arr = _gaussian_psf_2d((5, 5), sigma=1.0)
+    geometry = BundleGeometry(
+        hidden_shape=visible_shape,
+        visible_shape=visible_shape,
+        data_shape=data_shape,
+        voxel_spacing=(0.05, 0.05),
+    )
+    recipe = ForwardRecipe(
+        kind="super_res_idc",
+        super_res_factor=super_res_factor,
+        detector_padding=detector_padding,
+        psf_source="embedded",
+    )
+
+    problem = build_problem_from_recipe(
+        recipe,
+        psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
+        optics=optics,
+        geometry=geometry,
+        y=np.zeros(data_shape, dtype=np.float32),
+        prior=np.ones(visible_shape, dtype=np.float32),
+    )
+
+    pred = problem.R(np.ones(visible_shape, dtype=np.float32))
+
+    assert pred.shape == data_shape
+    assert np.all(np.isfinite(pred))

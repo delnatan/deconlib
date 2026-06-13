@@ -61,6 +61,7 @@ from .rl_mlx import (
 )
 from .linops_mlx import (
     FFTConvolver,
+    LinearFFTConvolver,
     GaussianICF,
     IntegratedDetectorConvolver,
     FiniteDetector,
@@ -96,6 +97,7 @@ __all__ = [
     "richardson_lucy_with_operator",
     # MLX Linear Operators
     "FFTConvolver",
+    "LinearFFTConvolver",
     "GaussianICF",
     "IntegratedDetectorConvolver",
     "FiniteDetector",

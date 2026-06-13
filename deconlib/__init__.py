@@ -91,7 +91,7 @@ from .io import (
     save_psf,
     save_pupil,
 )
-from .memsolve_io import (
+from .mem import (
     RECIPE_REGISTRY,
     BundleGeometry,
     BundleMask,
@@ -99,9 +99,11 @@ from .memsolve_io import (
     MemsolveBundle,
     OperatorFactoryArgs,
     build_problem_from_recipe,
+    register_recipe,
+)
+from .memsolve_io import (
     load_memsolve_bundle,
     peek_bundle_algorithm,
-    register_recipe,
     resume_inference,
     save_memsolve_bundle,
 )
@@ -111,12 +113,16 @@ from .workflow import (
     RichardsonLucyBundle,
     RichardsonLucyConfig,
     RichardsonLucyResult,
+    WaveletMemConfig,
+    WaveletMemResult,
     WorkflowCancelled,
     WorkflowProgress,
     WorkflowResult,
     load_richardson_lucy_bundle,
+    make_wavelet_recipe,
     run_deconvolution_workflow,
     run_richardson_lucy,
+    run_wavelet_mem_workflow,
     save_richardson_lucy_bundle,
 )
 
@@ -130,6 +136,7 @@ from .utils import (
     fourier_meshgrid,
     imshift,
     noll_to_ansi,
+    pad_corner_origin_kernel,
     pad_to_shape,
     soft_pad,
     zernike_polynomial,
@@ -226,7 +233,11 @@ __all__ = [
     "RichardsonLucyConfig",
     "RichardsonLucyResult",
     "RichardsonLucyBundle",
+    "WaveletMemConfig",
+    "WaveletMemResult",
     "run_richardson_lucy",
+    "make_wavelet_recipe",
+    "run_wavelet_mem_workflow",
     "save_richardson_lucy_bundle",
     "load_richardson_lucy_bundle",
     # Math utilities
@@ -238,6 +249,7 @@ __all__ = [
     "zernike_polynomials",
     "ansi_to_nm",
     "noll_to_ansi",
+    "pad_corner_origin_kernel",
     "pad_to_shape",
     "soft_pad",
 ]

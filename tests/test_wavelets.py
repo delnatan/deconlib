@@ -30,6 +30,25 @@ def test_atrous_transform_weighted_forward_adjoint_pair():
     assert abs(lhs - rhs) < 1e-10 * max(abs(lhs), abs(rhs), 1.0)
 
 
+def test_atrous_synthesis_preserves_flux_but_not_detail_positivity():
+    transform = AtrousTransform(levels=2, kernel="triangle", backend="numpy")
+    shape = (17, 17)
+    center = (shape[0] // 2, shape[1] // 2)
+
+    detail = np.zeros(transform.hidden_shape(shape))
+    detail[(0, *center)] = 1.0
+    detail_image = transform.forward(detail)
+
+    residual = np.zeros(transform.hidden_shape(shape))
+    residual[(transform.n_channels - 1, *center)] = 1.0
+    residual_image = transform.forward(residual)
+
+    assert float(detail_image.min()) < 0.0
+    assert np.isclose(float(detail_image.sum()), 0.0)
+    assert float(residual_image.min()) >= 0.0
+    assert np.isclose(float(residual_image.sum()), 1.0)
+
+
 def test_atrous_transform_mlx_matches_numpy_reference():
     rng = np.random.default_rng(14)
     transform_np = AtrousTransform(
