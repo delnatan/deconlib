@@ -18,6 +18,7 @@ from ..psf import Optics
 LinearOp = Callable[[np.ndarray], np.ndarray]
 Space = Literal["hidden", "data"]
 MaskSpace = Literal["hidden", "visible"]
+DetectorPadding = tuple[int | tuple[int, int], ...]
 
 
 @dataclass
@@ -49,7 +50,7 @@ class ForwardRecipe:
 
     kind: str
     super_res_factor: tuple[int, ...] = ()
-    detector_padding: tuple[int, ...] = ()
+    detector_padding: DetectorPadding = ()
     psf_source: str = "embedded"
     icf: Optional[dict] = None
 

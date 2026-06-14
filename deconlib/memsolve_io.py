@@ -92,9 +92,18 @@ def _read_recipe(group: h5py.Group) -> ForwardRecipe:
     srf: tuple[int, ...] = ()
     if "super_res_factor" in group.attrs:
         srf = tuple(int(v) for v in group.attrs["super_res_factor"])
-    dp: tuple[int, ...] = ()
+    dp: tuple[Any, ...] = ()
     if "detector_padding" in group.attrs:
-        dp = tuple(int(v) for v in group.attrs["detector_padding"])
+        raw_padding = np.asarray(group.attrs["detector_padding"])
+        if raw_padding.ndim == 1:
+            dp = tuple(int(v) for v in raw_padding)
+        elif raw_padding.ndim == 2 and raw_padding.shape[1] == 2:
+            dp = tuple((int(v[0]), int(v[1])) for v in raw_padding)
+        else:
+            raise ValueError(
+                "recipe.detector_padding attribute must be a 1D symmetric "
+                "padding vector or a 2D (before, after) array"
+            )
     psf_source = str(group.attrs.get("psf_source", "embedded"))
     icf: Optional[dict] = None
     if "icf_kind" in group.attrs:

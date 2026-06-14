@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import mem
@@ -18,6 +19,22 @@ from ..io import Psf
 from ..psf import Optics
 
 RECIPE_REGISTRY: dict[str, RecipeBuilder] = {}
+
+
+@dataclass(frozen=True)
+class RecipeShapes:
+    """Resolved array domains for a recipe.
+
+    Domains are named in the adjoint direction:
+    data -> finite detector adjoint -> detector domain -> optional detector
+    resampling adjoint -> visible object domain.
+    """
+
+    data_shape: tuple[int, ...]
+    detector_padding: tuple[tuple[int, int], ...]
+    detector_domain_shape: tuple[int, ...]
+    visible_shape: tuple[int, ...]
+    super_res_factor: tuple[int, ...]
 
 
 def register_recipe(kind: str):
@@ -98,7 +115,11 @@ def _normalize_detector_padding(
     padding: tuple[Any, ...],
     ndim: int,
 ) -> tuple[tuple[int, int], ...]:
-    """Normalize symmetric recipe padding to explicit ``(before, after)`` pairs."""
+    """Normalize recipe padding to explicit ``(before, after)`` pairs.
+
+    Accepts the legacy symmetric form ``(p0, p1, ...)`` and the explicit
+    per-axis form ``((before0, after0), (before1, after1), ...)``.
+    """
     if not padding:
         return tuple((0, 0) for _ in range(ndim))
     if len(padding) != ndim:
@@ -107,12 +128,17 @@ def _normalize_detector_padding(
     pairs: list[tuple[int, int]] = []
     for item in padding:
         if isinstance(item, (tuple, list, np.ndarray)):
-            raise ValueError("detector_padding entries must be symmetric integers")
+            if len(item) != 2:
+                raise ValueError(
+                    "detector_padding pair entries must have length 2"
+                )
+            before, after = (int(item[0]), int(item[1]))
         else:
             pad_i = int(item)
-        if pad_i < 0:
+            before = after = pad_i
+        if before < 0 or after < 0:
             raise ValueError("detector_padding values must be non-negative")
-        pairs.append((pad_i, pad_i))
+        pairs.append((before, after))
     return tuple(pairs)
 
 
@@ -185,6 +211,72 @@ def _lowres_domain_from_visible_shape(
     return tuple(lowres)
 
 
+def _resolve_recipe_shapes(
+    *,
+    recipe: ForwardRecipe,
+    geometry: BundleGeometry,
+) -> RecipeShapes:
+    """Resolve data, detector, and visible domains for a forward recipe.
+
+    The shape model is easiest to audit in the adjoint direction:
+
+    ``data_shape``
+        measured detector samples.
+    ``detector_domain_shape``
+        measured samples embedded in the padded detector domain.
+    ``visible_shape``
+        object-space samples after optional detector-resampling adjoint.
+
+    PSF FFT padding is intentionally not part of this resolver; the linear
+    blur operators decide their internal FFT canvas from the resolved
+    ``visible_shape`` and the PSF shape.
+    """
+    data_shape = tuple(int(s) for s in geometry.data_shape)
+    visible_shape = tuple(int(s) for s in geometry.visible_shape)
+    if len(data_shape) != len(visible_shape):
+        raise ValueError("data_shape and visible_shape must have same ndim")
+
+    if recipe.kind == "super_res_idc":
+        factor = _super_res_factor_tuple(recipe, len(data_shape))
+        detector_domain_shape = _lowres_domain_from_visible_shape(
+            visible_shape=visible_shape,
+            factor=factor,
+        )
+    else:
+        factor = (1,) * len(data_shape)
+        detector_domain_shape = visible_shape
+
+    detector_padding = _detector_padding_from_geometry(
+        data_shape=data_shape,
+        detector_domain_shape=detector_domain_shape,
+        recipe_padding=tuple(recipe.detector_padding or ()),
+    )
+    expected_detector = tuple(
+        d + before + after
+        for d, (before, after) in zip(data_shape, detector_padding)
+    )
+    if expected_detector != detector_domain_shape:
+        raise ValueError(
+            "detector padding and geometry imply detector domain "
+            f"{expected_detector}, but resolved {detector_domain_shape}"
+        )
+    expected_visible = tuple(
+        d * f for d, f in zip(detector_domain_shape, factor)
+    )
+    if expected_visible != visible_shape:
+        raise ValueError(
+            "detector domain and super_res_factor imply visible_shape "
+            f"{expected_visible}, but geometry has {visible_shape}"
+        )
+    return RecipeShapes(
+        data_shape=data_shape,
+        detector_padding=detector_padding,
+        detector_domain_shape=detector_domain_shape,
+        visible_shape=visible_shape,
+        super_res_factor=factor,
+    )
+
+
 def _make_icf_ops(
     spec: Optional[dict],
     shape: tuple[int, ...],
@@ -247,23 +339,17 @@ def _build_fft_conv(args: OperatorFactoryArgs) -> dict[str, Optional[LinearOp]]:
     from ..deconvolution.composition import as_numpy_op, compose
     from ..deconvolution.linops_mlx import FiniteDetector, LinearFFTConvolver
 
-    visible_shape = tuple(args.geometry.visible_shape)
-    data_shape = tuple(args.geometry.data_shape)
+    shapes = _resolve_recipe_shapes(recipe=args.recipe, geometry=args.geometry)
     psf_arr = _resolve_psf_array(args)
     convolver = LinearFFTConvolver(
         psf_arr,
-        signal_shape=visible_shape,
+        signal_shape=shapes.visible_shape,
         normalize=True,
     )
-    detector_padding = _detector_padding_from_geometry(
-        data_shape=data_shape,
-        detector_domain_shape=visible_shape,
-        recipe_padding=tuple(args.recipe.detector_padding or ()),
-    )
-    if any(before or after for before, after in detector_padding):
+    if any(before or after for before, after in shapes.detector_padding):
         detector = FiniteDetector(
-            detector_shape=data_shape,
-            padding=detector_padding,
+            detector_shape=shapes.data_shape,
+            padding=shapes.detector_padding,
         )
         blur_op = compose(detector, convolver)
     else:
@@ -271,10 +357,14 @@ def _build_fft_conv(args: OperatorFactoryArgs) -> dict[str, Optional[LinearOp]]:
     R, Rt = as_numpy_op(blur_op)
     icf_ops = _make_icf_ops(
         args.recipe.icf,
-        visible_shape,
+        shapes.visible_shape,
         tuple(args.geometry.voxel_spacing),
     )
-    _validate_icf_hidden_shape(args.geometry.hidden_shape, icf_ops, visible_shape)
+    _validate_icf_hidden_shape(
+        args.geometry.hidden_shape,
+        icf_ops,
+        shapes.visible_shape,
+    )
     return {"R": R, "Rt": Rt, "blur_op": blur_op, **icf_ops}
 
 
@@ -289,35 +379,26 @@ def _build_super_res_idc(
         IntegratedDetectorConvolver,
     )
 
-    visible_shape = tuple(args.geometry.visible_shape)
-    data_shape = tuple(args.geometry.data_shape)
-    factor = _super_res_factor_tuple(args.recipe, len(data_shape))
-    detector_domain_shape = _lowres_domain_from_visible_shape(
-        visible_shape=visible_shape,
-        factor=factor,
+    shapes = _resolve_recipe_shapes(recipe=args.recipe, geometry=args.geometry)
+    use_finite_detector = any(
+        before or after for before, after in shapes.detector_padding
     )
-    detector_padding = _detector_padding_from_geometry(
-        data_shape=data_shape,
-        detector_domain_shape=detector_domain_shape,
-        recipe_padding=tuple(args.recipe.detector_padding or ()),
-    )
-    use_finite_detector = any(before or after for before, after in detector_padding)
 
     psf_arr = _resolve_psf_array(args)
 
     idc = IntegratedDetectorConvolver(
         kernel=psf_arr,
-        output_shape=detector_domain_shape,
+        output_shape=shapes.detector_domain_shape,
         normalize=True,
-        signal_shape=visible_shape,
+        signal_shape=shapes.visible_shape,
     )
 
     if use_finite_detector:
         detector = FiniteDetector(
-            detector_shape=data_shape,
-            padding=detector_padding,
+            detector_shape=shapes.data_shape,
+            padding=shapes.detector_padding,
         )
-        if detector.padded_shape != detector_domain_shape:
+        if detector.padded_shape != shapes.detector_domain_shape:
             raise ValueError(
                 "internal: FiniteDetector.padded_shape does not match the "
                 "IDC output shape -- geometry / padding mismatch"
@@ -329,10 +410,14 @@ def _build_super_res_idc(
 
     icf_ops = _make_icf_ops(
         args.recipe.icf,
-        visible_shape,
+        shapes.visible_shape,
         tuple(args.geometry.voxel_spacing),
     )
-    _validate_icf_hidden_shape(args.geometry.hidden_shape, icf_ops, visible_shape)
+    _validate_icf_hidden_shape(
+        args.geometry.hidden_shape,
+        icf_ops,
+        shapes.visible_shape,
+    )
     return {"R": R, "Rt": Rt, "blur_op": blur_op, **icf_ops}
 
 
