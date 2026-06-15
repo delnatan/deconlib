@@ -722,206 +722,52 @@ def test_integrated_detector_folded_icf_matches_composition():
 
 def test_finite_detector_adjoint():
     """Test FiniteDetector crop/zero-pad adjoint pair."""
-    from deconlib.deconvolution.linops_mlx import (
-        FiniteDetector,
-        compute_detector_padding,
-    )
+    from deconlib.deconvolution.linops_mlx import FiniteDetector
 
     print("\n" + "=" * 60)
     print("Testing FiniteDetector (crop / zero-pad)")
     print("=" * 60)
 
+    cases = [
+        ((64,), ((7, 7),), (78,)),
+        ((64, 64), ((7, 7), (7, 7)), (78, 78)),
+        ((64, 64), ((8, 8), (8, 8)), (80, 80)),
+        ((20, 64, 64), ((2, 2), (7, 7), (7, 7)), (24, 78, 78)),
+        ((64, 64), ((10, 10), (10, 10)), (84, 84)),
+        ((64, 64), ((5, 10), (8, 12)), (79, 84)),
+        ((20, 64, 64), ((0, 0), (7, 7), (7, 7)), (20, 78, 78)),
+    ]
+
     all_passed = True
+    for detector_shape, padding, expected_padded in cases:
+        print(f"  Testing detector_shape={detector_shape}, padding={padding}:")
+        P = FiniteDetector(detector_shape, padding=padding)
 
-    # Test 1: 1D with kernel_shape
-    print("  Testing 1D with kernel_shape (15,):")
-    P = FiniteDetector((64,), kernel_shape=(15,))
-    expected_padded = (64 + 7 + 7,)  # (78,)
+        padding_ok = P.padded_shape == expected_padded
+        print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
+        if not padding_ok:
+            print("    [FAIL] Padded shape mismatch")
+            all_passed = False
 
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
+        x = mx.random.normal(P.padded_shape)
+        y = mx.random.normal(P.detector_shape)
+        Px = P.forward(x)
+        Pstar_y = P.adjoint(y)
+        lhs = mx.sum(Px * y).item()
+        rhs = mx.sum(x * Pstar_y).item()
+        denom = max(abs(lhs), abs(rhs), 1e-10)
+        err = abs(lhs - rhs) / denom
+        passed = err < RTOL
+        shape_ok = Px.shape == P.detector_shape and Pstar_y.shape == P.padded_shape
+        if not shape_ok:
+            print(f"    [FAIL] Shape mismatch: Px={Px.shape}, P*y={Pstar_y.shape}")
+            passed = False
+        status = "PASS" if passed else "FAIL"
+        print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
+        all_passed = all_passed and passed
 
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 2D with kernel_shape (odd kernel)
-    print("  Testing 2D with kernel_shape (15, 15):")
-    P = FiniteDetector((64, 64), kernel_shape=(15, 15))
-    expected_padded = (64 + 7 + 7, 64 + 7 + 7)  # (78, 78)
-
-    # Verify padding computation
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    # Adjoint test: <Px, y> = <x, P*y>
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-
-    Px = P.forward(x)
-    Pstar_y = P.adjoint(y)
-
-    lhs = mx.sum(Px * y).item()
-    rhs = mx.sum(x * Pstar_y).item()
-
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-
-    # Verify shapes
-    shape_ok = Px.shape == P.detector_shape and Pstar_y.shape == P.padded_shape
-    if not shape_ok:
-        print(f"    [FAIL] Shape mismatch: Px={Px.shape}, P*y={Pstar_y.shape}")
-        passed = False
-
-    all_passed = all_passed and passed
-
-    # Test 2: 2D with kernel_shape (even kernel)
-    print("  Testing 2D with kernel_shape (16, 16):")
-    P = FiniteDetector((64, 64), kernel_shape=(16, 16))
-    expected_padded = (64 + 8 + 8, 64 + 8 + 8)  # (80, 80)
-
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 3: 3D with anisotropic kernel
-    print("  Testing 3D with anisotropic kernel (5, 15, 15):")
-    P = FiniteDetector((20, 64, 64), kernel_shape=(5, 15, 15))
-    expected_padded = (20 + 2 + 2, 64 + 7 + 7, 64 + 7 + 7)  # (24, 78, 78)
-
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 4: Explicit symmetric padding (integer shorthand)
-    print("  Testing 2D with explicit padding (10, 10):")
-    P = FiniteDetector((64, 64), padding=(10, 10))
-    expected_padded = (64 + 10 + 10, 64 + 10 + 10)  # (84, 84)
-
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 5: Explicit asymmetric padding
-    print("  Testing 2D with asymmetric padding ((5, 10), (8, 12)):")
-    P = FiniteDetector((64, 64), padding=((5, 10), (8, 12)))
-    expected_padded = (64 + 5 + 10, 64 + 8 + 12)  # (79, 84)
-
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 6: Zero padding case (kernel axis size 1)
-    print("  Testing 3D with kernel size 1 in Z ((1, 15, 15)):")
-    P = FiniteDetector((20, 64, 64), kernel_shape=(1, 15, 15))
-    expected_padded = (20 + 0 + 0, 64 + 7 + 7, 64 + 7 + 7)  # (20, 78, 78)
-
-    padding_ok = P.padded_shape == expected_padded
-    print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-    if not padding_ok:
-        print("    [FAIL] Padded shape mismatch")
-        all_passed = False
-
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
-    lhs = mx.sum(P.forward(x) * y).item()
-    rhs = mx.sum(x * P.adjoint(y)).item()
-    denom = max(abs(lhs), abs(rhs), 1e-10)
-    err = abs(lhs - rhs) / denom
-    passed = err < RTOL
-    status = "PASS" if passed else "FAIL"
-    print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-    all_passed = all_passed and passed
-
-    # Test 7: Verify compute_detector_padding helper
-    print("  Testing compute_detector_padding helper:")
-    padding = compute_detector_padding((15, 15))
-    expected = ((7, 7), (7, 7))
-    helper_ok = padding == expected
-    status = "PASS" if helper_ok else "FAIL"
-    print(f"    [{status}] compute_detector_padding((15, 15)) = {padding}")
-    all_passed = all_passed and helper_ok
-
-    padding = compute_detector_padding((16, 16))
-    expected = ((8, 8), (8, 8))
-    helper_ok = padding == expected
-    status = "PASS" if helper_ok else "FAIL"
-    print(f"    [{status}] compute_detector_padding((16, 16)) = {padding}")
-    all_passed = all_passed and helper_ok
-
-    # Test 8: Verify operator_norm_sq = 1.0
     print(f"  operator_norm_sq = {P.operator_norm_sq}")
-    norm_ok = P.operator_norm_sq == 1.0
-    if not norm_ok:
+    if P.operator_norm_sq != 1.0:
         print("    [FAIL] operator_norm_sq should be 1.0")
         all_passed = False
 

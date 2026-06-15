@@ -91,6 +91,16 @@ from .io import (
     save_psf,
     save_pupil,
 )
+from .domains import (
+    DeconvolutionDomains,
+    DetectorPadding,
+    detector_domain_from_visible_shape,
+    detector_domain_shape_from_padding,
+    detector_padding_from_domain,
+    normalize_detector_padding,
+    normalize_resampling_factor,
+    resolve_deconvolution_domains,
+)
 from .mem import (
     RECIPE_REGISTRY,
     BundleGeometry,
@@ -209,6 +219,15 @@ __all__ = [
     "load_pupil",
     "save_psf",
     "load_psf",
+    # Deconvolution domains
+    "DeconvolutionDomains",
+    "DetectorPadding",
+    "normalize_detector_padding",
+    "detector_padding_from_domain",
+    "detector_domain_shape_from_padding",
+    "normalize_resampling_factor",
+    "detector_domain_from_visible_shape",
+    "resolve_deconvolution_domains",
     # memsolve bundle I/O
     "BundleGeometry",
     "BundleMask",

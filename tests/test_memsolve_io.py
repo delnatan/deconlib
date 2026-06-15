@@ -489,8 +489,10 @@ def test_fft_conv_uses_finite_detector_for_linear_convolution(optics):
         dtype=np.float32,
     )
     psf_arr /= psf_arr.sum()
-    padding = (1, 1)
-    visible_shape = tuple(d + 2 * p for d, p in zip(data_shape, padding))
+    padding = ((1, 1), (1, 1))
+    visible_shape = tuple(
+        d + before + after for d, (before, after) in zip(data_shape, padding)
+    )
     geometry = BundleGeometry(
         hidden_shape=visible_shape,
         visible_shape=visible_shape,
@@ -560,7 +562,7 @@ def test_fft_conv_without_detector_padding_is_linear_convolution(optics):
     np.testing.assert_allclose(pred, expected, rtol=1e-5, atol=1e-5)
 
 
-def test_fft_conv_can_infer_finite_detector_padding_from_geometry(optics):
+def test_fft_conv_requires_detector_padding_for_larger_visible_domain(optics):
     data_shape = (5, 6)
     visible_shape = (7, 8)
     psf_arr = _gaussian_psf_2d((3, 3), sigma=0.8)
@@ -571,20 +573,15 @@ def test_fft_conv_can_infer_finite_detector_padding_from_geometry(optics):
         voxel_spacing=(0.1, 0.1),
     )
     recipe = ForwardRecipe(kind="fft_conv", psf_source="embedded")
-    problem = build_problem_from_recipe(
-        recipe,
-        psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
-        optics=optics,
-        geometry=geometry,
-        y=np.zeros(data_shape, dtype=np.float32),
-        prior=np.ones(visible_shape, dtype=np.float32),
-    )
-
-    image = np.zeros(visible_shape, dtype=np.float32)
-    image[1, 1] = 5.0
-    expected = _direct_corner_origin_convolution(image, psf_arr)[1:6, 1:7]
-
-    np.testing.assert_allclose(problem.R(image), expected, rtol=1e-5, atol=1e-5)
+    with pytest.raises(ValueError, match="detector_padding is required"):
+        build_problem_from_recipe(
+            recipe,
+            psf=Psf(psf=psf_arr, optics=optics, pixel_size=geometry.voxel_spacing),
+            optics=optics,
+            geometry=geometry,
+            y=np.zeros(data_shape, dtype=np.float32),
+            prior=np.ones(visible_shape, dtype=np.float32),
+        )
 
 
 def test_fft_conv_accepts_asymmetric_detector_padding(optics):
@@ -762,9 +759,10 @@ def test_super_res_idc_round_trip(tmp_path: Path, optics):
 def test_super_res_idc_accepts_compact_psf_on_padded_linear_domain(optics):
     data_shape = (6, 6)
     super_res_factor = (2, 2)
-    detector_padding = (1, 1)
+    detector_padding = ((1, 1), (1, 1))
     detector_domain_shape = tuple(
-        d + 2 * p for d, p in zip(data_shape, detector_padding)
+        d + before + after
+        for d, (before, after) in zip(data_shape, detector_padding)
     )
     visible_shape = tuple(
         d * f for d, f in zip(detector_domain_shape, super_res_factor)

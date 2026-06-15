@@ -12,13 +12,13 @@ from typing import Any, Callable, Literal, Optional
 import mem
 import numpy as np
 
+from ..domains import DetectorPadding
 from ..io import Psf
 from ..psf import Optics
 
 LinearOp = Callable[[np.ndarray], np.ndarray]
 Space = Literal["hidden", "data"]
 MaskSpace = Literal["hidden", "visible"]
-DetectorPadding = tuple[int | tuple[int, int], ...]
 
 
 @dataclass

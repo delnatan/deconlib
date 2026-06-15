@@ -733,20 +733,6 @@ class IntegratedDetectorConvolver:
 # -----------------------------------------------------------------------------
 
 
-def compute_detector_padding(
-    kernel_shape: Tuple[int, ...],
-) -> Tuple[Tuple[int, int], ...]:
-    """Compute symmetric padding from kernel shape (M//2 per side per axis).
-
-    Args:
-        kernel_shape: Shape of the convolution kernel.
-
-    Returns:
-        Tuple of (before, after) padding for each axis.
-    """
-    return tuple((m // 2, m // 2) for m in kernel_shape)
-
-
 def _next_smooth_number(n: int) -> int:
     """Smallest integer >= n whose prime factors are only 2, 3, or 5.
 
@@ -900,9 +886,9 @@ class FiniteDetector:
         operator_norm_sq: Squared spectral norm (= 1.0 for projection).
 
     Example:
-        >>> P = FiniteDetector((64, 64), kernel_shape=(15, 15))
+        >>> P = FiniteDetector((64, 64), padding=((7, 7), (7, 7)))
         >>> print(P.padded_shape)  # (78, 78)
-        >>> x_padded = mx.random.normal((78, 78))
+        >>> x_padded = mx.random.normal(P.padded_shape)
         >>> y_detector = P.forward(x_padded)  # (64, 64)
         >>> x_back = P.adjoint(y_detector)  # (78, 78)
     """
@@ -912,62 +898,40 @@ class FiniteDetector:
     def __init__(
         self,
         detector_shape: Tuple[int, ...],
-        kernel_shape: Optional[Tuple[int, ...]] = None,
-        padding: Optional[
-            Union[Tuple[int, ...], Tuple[Tuple[int, int], ...]]
-        ] = None,
+        padding: Optional[Tuple[Tuple[int, int], ...]] = None,
     ):
         """Initialize FiniteDetector operator.
 
         Args:
             detector_shape: Shape of observed data (camera chip).
-            kernel_shape: Shape of convolution kernel. Used to compute padding
-                as M//2 per side per axis. Mutually exclusive with `padding`.
-            padding: Explicit padding specification. Can be:
-                - Tuple of ints: symmetric padding per axis, e.g. (10, 10)
-                - Tuple of (before, after) tuples, e.g. ((10, 10), (5, 5))
-                Mutually exclusive with `kernel_shape`.
+            padding: Explicit padding specification as ``(before, after)``
+                pairs per axis, e.g. ``((10, 10), (5, 5))``.
 
         Raises:
-            ValueError: If neither or both of kernel_shape/padding are provided.
+            ValueError: If padding is omitted or malformed.
         """
-        # Validate: exactly one of kernel_shape or padding must be provided
-        if (kernel_shape is None) == (padding is None):
-            raise ValueError(
-                "Exactly one of 'kernel_shape' or 'padding' must be provided"
-            )
+        if padding is None:
+            raise ValueError("padding must be provided as explicit pairs")
 
         self.detector_shape = detector_shape
         ndim = len(detector_shape)
 
-        # Compute padding from kernel_shape if provided
-        if kernel_shape is not None:
-            if len(kernel_shape) != ndim:
+        if len(padding) != ndim:
+            raise ValueError(
+                f"padding has {len(padding)} elements, "
+                f"detector_shape has {ndim} dims"
+            )
+        pairs = []
+        for item in padding:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
                 raise ValueError(
-                    f"kernel_shape has {len(kernel_shape)} dims, "
-                    f"detector_shape has {ndim}"
+                    "padding entries must be explicit (before, after) pairs"
                 )
-            self.padding = compute_detector_padding(kernel_shape)
-        else:
-            # Normalize padding to (before, after) tuples
-            # Handle integer shorthand: (10, 10) -> ((10, 10), (10, 10))
-            if isinstance(padding[0], int):
-                if len(padding) != ndim:
-                    raise ValueError(
-                        f"padding has {len(padding)} elements, "
-                        f"detector_shape has {ndim} dims"
-                    )
-                self.padding = tuple((p, p) for p in padding)
-            else:
-                if len(padding) != ndim:
-                    raise ValueError(
-                        f"padding has {len(padding)} elements, "
-                        f"detector_shape has {ndim} dims"
-                    )
-                self.padding = tuple(
-                    tuple(p) if not isinstance(p, tuple) else p
-                    for p in padding
-                )
+            before, after = (int(item[0]), int(item[1]))
+            if before < 0 or after < 0:
+                raise ValueError("padding values must be non-negative")
+            pairs.append((before, after))
+        self.padding = tuple(pairs)
 
         # Compute padded_shape = detector_shape + padding
         self.padded_shape = tuple(

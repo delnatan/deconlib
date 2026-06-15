@@ -8,6 +8,7 @@ from .recipes import (
 from .types import (
     BundleGeometry,
     BundleMask,
+    DetectorPadding,
     ForwardRecipe,
     LinearOp,
     MaskSpace,
@@ -21,6 +22,7 @@ from .types import (
 __all__ = [
     "BundleGeometry",
     "BundleMask",
+    "DetectorPadding",
     "ForwardRecipe",
     "LinearOp",
     "MaskSpace",

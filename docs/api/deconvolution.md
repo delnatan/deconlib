@@ -82,7 +82,3 @@ Image restoration algorithms using Apple MLX for GPU-accelerated computation.
 ::: deconlib.deconvolution.MLXDeconvolutionResult
     options:
       show_source: false
-
-## Utilities
-
-::: deconlib.deconvolution.compute_detector_padding

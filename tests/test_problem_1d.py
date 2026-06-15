@@ -145,7 +145,7 @@ def test_1d_operators():
 
     # Test 2: FiniteDetector in 1D
     print("\n  Testing FiniteDetector 1D:")
-    P = FiniteDetector((64,), kernel_shape=(5,))
+    P = FiniteDetector((64,), padding=((2, 2),))
     print(
         f"    detector_shape={P.detector_shape}, padded_shape={P.padded_shape}"
     )
@@ -209,7 +209,8 @@ def test_1d_forward_model():
     kernel_width = 9  # Larger kernel to show effect
 
     # Create FiniteDetector
-    P = FiniteDetector((detector_n,), kernel_shape=(kernel_width,))
+    detector_padding = ((kernel_width // 2, kernel_width // 2),)
+    P = FiniteDetector((detector_n,), padding=detector_padding)
     padded_n = P.padded_shape[0]
     print(
         f"  Detector: {detector_n}, Padded: {padded_n}, Padding: {P.padding}"

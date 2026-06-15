@@ -42,14 +42,14 @@ def test_existing_operators_satisfy_protocol():
     psf = _gaussian_kernel((16, 16), sigma=1.5)
     conv = FFTConvolver(psf)
     icf = GaussianICF((16, 16), sigmas=(0.8, 0.8), spacings=(1.0, 1.0))
-    det = FiniteDetector((12, 12), kernel_shape=(5, 5))
+    det = FiniteDetector((12, 12), padding=((2, 2), (2, 2)))
     for op in (conv, icf, det):
         assert isinstance(op, LinearOperator)
 
 
 def test_compose_two_ops_adjoint():
     # Forward model: object on padded grid -> FFT blur -> crop to detector.
-    det = FiniteDetector((24, 24), kernel_shape=(7, 7))
+    det = FiniteDetector((24, 24), padding=((3, 3), (3, 3)))
     psf = _gaussian_kernel(det.padded_shape, sigma=1.5)
     conv = FFTConvolver(psf)
     R = Compose(det, conv)
@@ -71,7 +71,7 @@ def test_linear_fft_convolver_adjoint():
 
 
 def test_compose_norm_is_product():
-    det = FiniteDetector((24, 24), kernel_shape=(5, 5))
+    det = FiniteDetector((24, 24), padding=((2, 2), (2, 2)))
     psf = _gaussian_kernel(det.padded_shape, sigma=1.2)
     conv = FFTConvolver(psf)
     R = Compose(det, conv)
@@ -80,7 +80,7 @@ def test_compose_norm_is_product():
 
 
 def test_compose_three_ops_via_helper():
-    det = FiniteDetector((20, 20), kernel_shape=(5, 5))
+    det = FiniteDetector((20, 20), padding=((2, 2), (2, 2)))
     psf = _gaussian_kernel(det.padded_shape, sigma=1.0)
     conv = FFTConvolver(psf)
     icf = GaussianICF(det.padded_shape, sigmas=(0.7, 0.7), spacings=(1.0, 1.0))
@@ -107,7 +107,7 @@ def test_compose_empty_raises():
 
 
 def test_as_numpy_op_round_trip_matches_native():
-    det = FiniteDetector((24, 24), kernel_shape=(7, 7))
+    det = FiniteDetector((24, 24), padding=((3, 3), (3, 3)))
     psf = _gaussian_kernel(det.padded_shape, sigma=1.5)
     conv = FFTConvolver(psf)
     R_op = Compose(det, conv)

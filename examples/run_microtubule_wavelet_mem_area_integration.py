@@ -41,7 +41,7 @@ DEFAULT_TEST_LOG_OUTPUT = (
 )
 
 TARGET_LATERAL_UM = 0.080
-DETECTOR_PADDING = (0, 16, 16)
+DETECTOR_PADDING = ((0, 0), (16, 16), (16, 16))
 
 
 def _valid_slices(
@@ -176,10 +176,7 @@ def main() -> None:
         dy / float(args.target_lateral_um),
         dx / float(args.target_lateral_um),
     )
-    detector = FiniteDetector(
-        observed.shape,
-        padding=tuple((p, p) for p in DETECTOR_PADDING),
-    )
+    detector = FiniteDetector(observed.shape, padding=DETECTOR_PADDING)
     fine_shape = tuple(
         int(round(padded * factor))
         for padded, factor in zip(detector.padded_shape, sampling_factors)

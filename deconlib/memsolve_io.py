@@ -60,9 +60,12 @@ def _write_recipe(group: h5py.Group, recipe: ForwardRecipe) -> None:
             recipe.super_res_factor, dtype=np.int64
         )
     if recipe.detector_padding:
-        group.attrs["detector_padding"] = np.asarray(
+        padding = np.asarray(
             recipe.detector_padding, dtype=np.int64
         )
+        if padding.ndim != 2 or padding.shape[1] != 2:
+            raise ValueError("recipe.detector_padding must be an (ndim, 2) array")
+        group.attrs["detector_padding"] = padding
     group.attrs["psf_source"] = recipe.psf_source
     if recipe.icf is not None:
         icf_kind = str(recipe.icf.get("kind", ""))
@@ -95,14 +98,12 @@ def _read_recipe(group: h5py.Group) -> ForwardRecipe:
     dp: tuple[Any, ...] = ()
     if "detector_padding" in group.attrs:
         raw_padding = np.asarray(group.attrs["detector_padding"])
-        if raw_padding.ndim == 1:
-            dp = tuple(int(v) for v in raw_padding)
-        elif raw_padding.ndim == 2 and raw_padding.shape[1] == 2:
+        if raw_padding.ndim == 2 and raw_padding.shape[1] == 2:
             dp = tuple((int(v[0]), int(v[1])) for v in raw_padding)
         else:
             raise ValueError(
-                "recipe.detector_padding attribute must be a 1D symmetric "
-                "padding vector or a 2D (before, after) array"
+                "recipe.detector_padding attribute must be a 2D "
+                "(before, after) array"
             )
     psf_source = str(group.attrs.get("psf_source", "embedded"))
     icf: Optional[dict] = None
