@@ -26,8 +26,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import PowerNorm
 
-from deconlib.io import load_psf, load_pupil
+from deconlib.io import load_psf
 from deconlib.psf import pupil_to_vectorial_psf
+from deconlib.psf.pupil_retrieval import load_pupil
 from deconlib.utils.fourier import fft_coords
 
 

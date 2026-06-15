@@ -22,8 +22,10 @@ import tifffile
 from deconlib.psf import (
     Optics,
     make_geometry,
-    make_pupil_real_filter,
     pupil_to_vectorial_psf,
+)
+from deconlib.psf.pupil_retrieval import (
+    make_pupil_real_filter,
     retrieve_phase_vectorial,
 )
 from deconlib.utils.fourier import fft_coords

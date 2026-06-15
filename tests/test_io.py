@@ -7,15 +7,17 @@ import pytest
 
 from deconlib import (
     Optics,
-    PhaseRetrievalResult,
     PsfDistillationResult,
-    Pupil,
     Psf,
     load_psf,
-    load_pupil,
     make_geometry,
     make_pupil,
     save_psf,
+)
+from deconlib.psf.pupil_retrieval import (
+    PhaseRetrievalResult,
+    Pupil,
+    load_pupil,
     save_pupil,
 )
 

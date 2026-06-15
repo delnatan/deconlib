@@ -8,12 +8,12 @@ from deconlib import (
     make_geometry,
     make_pupil,
     pupil_to_psf,
-    retrieve_phase_vectorial,
 )
 from deconlib.psf.pupil import (
     compute_fresnel_coefficients,
     compute_vectorial_factors,
 )
+from deconlib.psf.pupil_retrieval import retrieve_phase_vectorial
 from deconlib.psf.widefield import (
     pupil_to_vectorial_psf,
 )

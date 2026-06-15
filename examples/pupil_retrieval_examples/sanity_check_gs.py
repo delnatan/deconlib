@@ -34,8 +34,8 @@ from deconlib.psf import (
     make_geometry,
     make_pupil,
     pupil_to_vectorial_psf,
-    retrieve_phase_vectorial,
 )
+from deconlib.psf.pupil_retrieval import retrieve_phase_vectorial
 from deconlib.utils.fourier import fft_coords
 from deconlib.utils.zernike import zernike_polynomial
 

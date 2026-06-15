@@ -38,12 +38,14 @@ import tifffile
 from matplotlib.colors import CenteredNorm, PowerNorm
 
 from deconlib.psf import (
-    MLXRetrievalConfig,
     Optics,
     make_geometry,
-    make_pupil_real_filter,
     pupil_to_psf,
     pupil_to_vectorial_psf,
+)
+from deconlib.psf.pupil_retrieval import (
+    MLXRetrievalConfig,
+    make_pupil_real_filter,
     retrieve_phase,
     retrieve_phase_vectorial,
     retrieve_phase_vectorial_mlx,

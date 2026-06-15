@@ -44,8 +44,8 @@ import mlx.core as mx
 import mlx.optimizers as mopt
 import numpy as np
 
-from .optics import Geometry, Optics
-from .pupil import aplanatic_apodization, compute_vectorial_factors
+from ..optics import Geometry, Optics
+from ..pupil import aplanatic_apodization, compute_vectorial_factors
 from .retrieval import PhaseRetrievalResult
 
 __all__ = [

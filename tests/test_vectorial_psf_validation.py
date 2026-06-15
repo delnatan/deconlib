@@ -9,7 +9,6 @@ from deconlib import (
     fft_coords,
     make_geometry,
     make_pupil,
-    retrieve_phase_vectorial,
 )
 from deconlib.psf.aberrations import (
     ZernikeAberration,
@@ -17,6 +16,7 @@ from deconlib.psf.aberrations import (
     apply_aberrations,
 )
 from deconlib.psf.pupil import aplanatic_apodization, compute_vectorial_factors
+from deconlib.psf.pupil_retrieval import retrieve_phase_vectorial
 from deconlib.psf.widefield import pupil_to_vectorial_psf
 
 

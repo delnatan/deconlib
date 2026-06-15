@@ -40,7 +40,6 @@ from .psf import (
     # Core data structures
     BeadDetectionResult,
     Optics,
-    PhaseRetrievalResult,
     PsfDistillationResult,
     ZernikeAberration,
     ZernikeMode,
@@ -67,29 +66,22 @@ from .psf import (
     make_otf_mask,
     # Pupil functions
     make_pupil,
-    make_pupil_real_filter,
     matched_filter_amplitudes,
     poisson_reduced_chi_squared,
     project_psf,
     # Widefield PSF/OTF
     pupil_to_psf,
     pupil_to_vectorial_psf,
-    # Phase retrieval
-    retrieve_phase,
-    retrieve_phase_vectorial,
     stack_psfs,
 )
 
 # =============================================================================
-# I/O Module - HDF5 round-trip for Pupil/Psf artifacts
+# I/O Module - HDF5 round-trip for PSF artifacts
 # =============================================================================
 from .io import (
-    Pupil,
     Psf,
     load_psf,
-    load_pupil,
     save_psf,
-    save_pupil,
 )
 from .domains import (
     DeconvolutionDomains,
@@ -192,11 +184,6 @@ __all__ = [
     "Defocus",
     "ZernikeAberration",
     "ZernikeMode",
-    # Phase retrieval
-    "retrieve_phase",
-    "retrieve_phase_vectorial",
-    "PhaseRetrievalResult",
-    "make_pupil_real_filter",
     # PSF distillation
     "BeadDetectionResult",
     "PsfDistillationResult",
@@ -213,10 +200,7 @@ __all__ = [
     "fft_correlate",
     "poisson_reduced_chi_squared",
     # I/O
-    "Pupil",
     "Psf",
-    "save_pupil",
-    "load_pupil",
     "save_psf",
     "load_psf",
     # Deconvolution domains

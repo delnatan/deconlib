@@ -48,8 +48,8 @@ from typing import Callable, Literal, Union
 
 import numpy as np
 
-from .optics import Geometry, Optics
-from .pupil import aplanatic_apodization, compute_vectorial_factors
+from ..optics import Geometry, Optics
+from ..pupil import aplanatic_apodization, compute_vectorial_factors
 
 __all__ = [
     "retrieve_phase",
