@@ -149,6 +149,9 @@ from .utils import (
 # Solvers Module - Simple solver wrappers (requires MLX)
 # =============================================================================
 from .solvers import (
+    compute_detector_padding,
+    compute_visible_shape,
+    make_convolution_operator,
     richardson_lucy,
     RLResult,
     SolverResult,
@@ -291,6 +294,10 @@ __all__ = [
     "richardson_lucy",
     "RLResult",
     "SolverResult",
+    # Convenience helpers
+    "compute_visible_shape",
+    "compute_detector_padding",
+    "make_convolution_operator",
     # Deconvolution operators and composition
     "compose",
     "Compose",
