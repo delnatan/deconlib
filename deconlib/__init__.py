@@ -146,6 +146,50 @@ from .utils import (
 )
 
 # =============================================================================
+# Solvers Module - Simple solver wrappers (requires MLX)
+# =============================================================================
+from .solvers import (
+    richardson_lucy,
+    RLResult,
+    SolverResult,
+)
+
+# =============================================================================
+# Deconvolution Module - Core operators and composition (requires MLX)
+# =============================================================================
+from .deconvolution import (
+    # Composition
+    compose,
+    Compose,
+    LinearOperator,
+    as_numpy_op,
+    # PSF operators
+    FFTConvolver,
+    LinearFFTConvolver,
+    GaussianICF,
+    IntegratedDetectorConvolver,
+    FiniteDetector,
+    MatrixOperator,
+    fast_padded_shape,
+    # Regularization
+    Gradient1D,
+    Gradient2D,
+    Gradient3D,
+    Hessian1D,
+    Hessian2D,
+    Hessian3D,
+    # Wavelets
+    AtrousTransform,
+    # Solvers (low-level)
+    solve_pdhg_mlx,
+    solve_pdhg_with_operator,
+    IdentityRegularizer,
+    GradientRegularizer,
+    HessianRegularizer,
+    richardson_lucy_with_operator,
+)
+
+# =============================================================================
 # Deconvolution Module - import explicitly (requires MLX)
 # =============================================================================
 # from deconlib.deconvolution import (
@@ -243,6 +287,35 @@ __all__ = [
     "run_wavelet_mem_workflow",
     "save_richardson_lucy_bundle",
     "load_richardson_lucy_bundle",
+    # New simple solvers
+    "richardson_lucy",
+    "RLResult",
+    "SolverResult",
+    # Deconvolution operators and composition
+    "compose",
+    "Compose",
+    "LinearOperator",
+    "as_numpy_op",
+    "FFTConvolver",
+    "LinearFFTConvolver",
+    "GaussianICF",
+    "IntegratedDetectorConvolver",
+    "FiniteDetector",
+    "MatrixOperator",
+    "fast_padded_shape",
+    "Gradient1D",
+    "Gradient2D",
+    "Gradient3D",
+    "Hessian1D",
+    "Hessian2D",
+    "Hessian3D",
+    "AtrousTransform",
+    "solve_pdhg_mlx",
+    "solve_pdhg_with_operator",
+    "IdentityRegularizer",
+    "GradientRegularizer",
+    "HessianRegularizer",
+    "richardson_lucy_with_operator",
     # Math utilities
     "fft_coords",
     "fourier_meshgrid",
