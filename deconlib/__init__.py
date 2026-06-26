@@ -93,40 +93,40 @@ from .domains import (
     normalize_resampling_factor,
     resolve_deconvolution_domains,
 )
-from .mem import (
-    RECIPE_REGISTRY,
-    BundleGeometry,
-    BundleMask,
-    ForwardRecipe,
-    MemsolveBundle,
-    OperatorFactoryArgs,
-    build_problem_from_recipe,
-    register_recipe,
-)
-from .memsolve_io import (
-    load_memsolve_bundle,
-    peek_bundle_algorithm,
-    resume_inference,
-    save_memsolve_bundle,
-)
-from .workflow import (
-    IcfScanRow,
-    IcfSweep,
-    RichardsonLucyBundle,
-    RichardsonLucyConfig,
-    RichardsonLucyResult,
-    WaveletMemConfig,
-    WaveletMemResult,
-    WorkflowCancelled,
-    WorkflowProgress,
-    WorkflowResult,
-    load_richardson_lucy_bundle,
-    make_wavelet_recipe,
-    run_deconvolution_workflow,
-    run_richardson_lucy,
-    run_wavelet_mem_workflow,
-    save_richardson_lucy_bundle,
-)
+# from .mem import (
+#     RECIPE_REGISTRY,
+#     BundleGeometry,
+#     BundleMask,
+#     ForwardRecipe,
+#     MemsolveBundle,
+#     OperatorFactoryArgs,
+#     build_problem_from_recipe,
+#     register_recipe,
+# )
+# from .memsolve_io import (
+#     load_memsolve_bundle,
+#     peek_bundle_algorithm,
+#     resume_inference,
+#     save_memsolve_bundle,
+# )
+# from .workflow import (
+#     IcfScanRow,
+#     IcfSweep,
+#     RichardsonLucyBundle,
+#     RichardsonLucyConfig,
+#     RichardsonLucyResult,
+#     WaveletMemConfig,
+#     WaveletMemResult,
+#     WorkflowCancelled,
+#     WorkflowProgress,
+#     WorkflowResult,
+#     load_richardson_lucy_bundle,
+#     make_wavelet_recipe,
+#     run_deconvolution_workflow,
+#     run_richardson_lucy,
+#     run_wavelet_mem_workflow,
+#     save_richardson_lucy_bundle,
+# )
 
 # =============================================================================
 # Utils Module - Mathematical utilities
@@ -150,7 +150,9 @@ from .utils import (
 # =============================================================================
 from .solvers import (
     compute_detector_padding,
+    compute_valid_slices,
     compute_visible_shape,
+    extract_valid_region,
     make_convolution_operator,
     richardson_lucy,
     RLResult,
@@ -190,6 +192,16 @@ from .deconvolution import (
     GradientRegularizer,
     HessianRegularizer,
     richardson_lucy_with_operator,
+    # Shape utilities
+    DeconvolutionSpaces,
+    compute_hidden_shape,
+    create_initial_hidden,
+    resolve_deconvolution_spaces,
+    compute_padded_shape,
+    get_valid_slices,
+    visible_to_data_padding,
+    DEFAULT_EXTRA_PADDING,
+    compute_convolution_output_shape,
 )
 
 # =============================================================================
@@ -297,6 +309,8 @@ __all__ = [
     # Convenience helpers
     "compute_visible_shape",
     "compute_detector_padding",
+    "compute_valid_slices",
+    "extract_valid_region",
     "make_convolution_operator",
     # Deconvolution operators and composition
     "compose",
@@ -323,6 +337,16 @@ __all__ = [
     "GradientRegularizer",
     "HessianRegularizer",
     "richardson_lucy_with_operator",
+    # Shape utilities
+    "DeconvolutionSpaces",
+    "compute_hidden_shape",
+    "create_initial_hidden",
+    "resolve_deconvolution_spaces",
+    "compute_padded_shape",
+    "get_valid_slices",
+    "visible_to_data_padding",
+    "DEFAULT_EXTRA_PADDING",
+    "compute_convolution_output_shape",
     # Math utilities
     "fft_coords",
     "fourier_meshgrid",
