@@ -114,6 +114,37 @@ psf = pupil_to_vectorial_psf(
 )
 ```
 
+### Deconvolution
+
+Atomic operators for building forward models and running solvers:
+
+```python
+import mlx.core as mx
+from deconlib.deconvolution import (
+    solve_pdhg_mlx,
+    LinearFFTConvolver,
+    FractionalAreaDownsample,
+    Crop,
+    compose,
+)
+
+# Build forward model: high-res -> blur -> downsample -> crop -> data
+psf = ...  # Load or compute PSF at high resolution
+convolver = LinearFFTConvolver(psf, signal_shape=(256, 256), normalize=True)
+downsampler = FractionalAreaDownsample(scale=2.0)
+operator = compose(Crop((256, 256), (128, 128)), downsampler, convolver)
+
+# Run PDHG deconvolution
+result = solve_pdhg_mlx(
+    observed=mx.array(data),
+    psf=psf,
+    alpha=0.001,
+    regularization="hessian",
+    num_iter=200,
+)
+restored = result.restored
+```
+
 ## API Reference
 
 ### Core Data Structures
@@ -157,6 +188,26 @@ psf = pupil_to_vectorial_psf(
 | `fft_coords(n, spacing)` | FFT-compatible coordinates |
 | `zernike_polynomial(j, rho, phi)` | Single Zernike polynomial |
 | `zernike_polynomials(rho, phi, max_order)` | All polynomials up to order |
+
+### Deconvolution Operators
+
+| Class/Function | Description |
+|---------------|-------------|
+| `LinearFFTConvolver(psf, signal_shape, normalize)` | FFT-based linear convolution |
+| `FractionalAreaDownsample(scale)` | Downsampling preserving total intensity |
+| `FractionalAreaUpsample(scale)` | Upsampling (adjoint of downsampling) |
+| `Crop(original_shape, target_shape)` | Center cropping with proper adjoint |
+| `Pad(padding)` | Zero-padding with proper adjoint |
+| `compose(op1, op2, ...)` | Compose operators: `A(B(x))` |
+| `as_numpy_op(operator)` | Convert MLX operator to NumPy callables |
+
+### Deconvolution Solvers
+
+| Function | Description |
+|----------|-------------|
+| `solve_pdhg_mlx(observed, psf, ...)` | Adaptive PDHG with automatic step sizes |
+| `solve_pdhg_with_operator(observed, operator, ...)` | PDHG with custom composed operator |
+| `richardson_lucy_with_operator(observed, blur_op, ...)` | RL with custom operator |
 
 ## Reference
 
