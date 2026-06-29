@@ -14,7 +14,6 @@ from deconlib.deconvolution.linops_mlx import (
     Hessian2D,
     Hessian3D,
     FFTConvolver,
-    IntegratedDetectorConvolver,
 )
 
 
@@ -143,31 +142,6 @@ class TestConvolverNorms:
 
         # Normalized convolution should have norm <= 1
         assert computed <= 1.1  # allow small tolerance
-
-    def test_integrated_detector_convolver_norm(self):
-        """Verify IntegratedDetectorConvolver operator_norm_sq is an upper bound."""
-        shape = (64, 64)
-        output_shape = (32, 32)
-        kernel = mx.abs(mx.random.normal(shape))
-
-        A = IntegratedDetectorConvolver(kernel, output_shape, normalize=True)
-        computed = power_iteration_norm(A.forward, A.adjoint, shape)
-
-        # Estimate should be an upper bound
-        assert computed <= A.operator_norm_sq * 1.1
-
-    def test_integrated_detector_convolver_3d_anisotropic(self):
-        """Verify IntegratedDetectorConvolver with anisotropic integer binning."""
-        shape = (32, 64, 64)
-        output_shape = (32, 32, 32)
-        kernel = mx.abs(mx.random.normal(shape))
-
-        A = IntegratedDetectorConvolver(kernel, output_shape, normalize=True)
-        computed = power_iteration_norm(A.forward, A.adjoint, shape)
-
-        # Expected norm_sq = 2 * 2 = 4
-        assert A.operator_norm_sq == 4.0
-        assert computed <= A.operator_norm_sq * 1.1
 
 
 class TestPowerIterationBehavior:

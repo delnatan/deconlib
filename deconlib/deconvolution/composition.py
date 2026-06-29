@@ -26,8 +26,9 @@ class LinearOperator(Protocol):
     """Linear operator with explicit forward, adjoint, and a spectral-norm hint.
 
     Every operator class in :mod:`deconlib.deconvolution.linops_mlx`
-    (``FFTConvolver``, ``GaussianICF``, ``IntegratedDetectorConvolver``,
-    ``FiniteDetector``, ``MatrixOperator``, the gradients, the Hessians) conforms to this
+    and :mod:`deconlib.deconvolution.core_operators`
+    (``FFTConvolver``, ``GaussianICF``, ``LinearFFTConvolver``,
+    ``Crop``, ``Pad``, ``MatrixOperator``, the gradients, the Hessians) conforms to this
     protocol structurally; nothing needs to subclass it.
     """
 

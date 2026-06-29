@@ -33,15 +33,17 @@ restored = np.array(result.restored)
 The Richardson-Lucy algorithm iteratively refines an estimate assuming Poisson noise:
 
 $$
-x_{k+1} = x_k \cdot A^T\left(\frac{b}{A(x_k) + \text{bg}}\right)
+x_{k+1} = x_k \cdot \frac{A^T\left(\frac{y}{A(x_k) + \text{bg}}\right)}{s}
 $$
 
 Where:
 
 - $x$ is the estimated object
-- $b$ is the observed image
+- $y$ is the observed image
 - $A$ is the forward convolution operator
 - $A^T$ is the adjoint (correlation) operator
+- $s = A^T(1)$ is the sensitivity term
+- $\text{bg}$ is the background level
 
 ### Operator-Based Richardson-Lucy
 
@@ -61,28 +63,33 @@ restored = np.array(result.restored)
 print(f"Iterations: {result.iterations}")
 ```
 
-### Finite-Detector Super-Resolution RL
+### Super-Resolution RL
 
-For detector-aware super-resolution, model the padded object domain explicitly
-and return only the detector-valid fine-grid region:
+For super-resolution deconvolution, model the padded object domain explicitly
+and return only the valid fine-grid region:
 
 ```python
 from deconlib.deconvolution import (
-    FiniteDetector,
+    Crop,
     IntegratedDetectorConvolver,
     compose,
     richardson_lucy_with_operator,
 )
 
-detector = FiniteDetector(observed.shape, padding=((0, 0), (16, 16), (16, 16)))
-forward_op = compose(
-    detector,
-    IntegratedDetectorConvolver(
-        psf_fine,
-        output_shape=detector.padded_shape,
-        normalize=True,
-    ),
+# Compute padded shape for PSF padding
+psf_padding = tuple((psf_n // 2, psf_n // 2) for psf_n in psf_fine.shape)
+padded_visible_shape = tuple(
+    obs_n + pb + pa for obs_n, (pb, pa) in zip(observed.shape, psf_padding)
 )
+
+# Build operator chain: Crop(IntegratedDetectorConvolver(x))
+downsample = IntegratedDetectorConvolver(
+    psf_fine,
+    output_shape=observed.shape,
+    normalize=True,
+)
+crop = Crop(padded_visible_shape, observed.shape)
+forward_op = compose(crop, downsample)
 
 result = richardson_lucy_with_operator(
     observed,

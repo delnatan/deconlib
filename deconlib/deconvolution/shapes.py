@@ -18,7 +18,6 @@ The key relationships:
 - All spaces must satisfy linear convolution requirements when using FFTs
 """
 
-from dataclasses import dataclass
 from typing import Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -30,9 +29,6 @@ __all__ = [
     "visible_to_data_padding",
     "DEFAULT_EXTRA_PADDING",
     "compute_convolution_output_shape",
-    "create_initial_hidden",
-    "compute_hidden_shape",
-    "DeconvolutionSpaces",
 ]
 
 # Default extra padding at data-space for PSF tails
@@ -43,66 +39,63 @@ DEFAULT_EXTRA_PADDING: int = 10
 
 def compute_visible_shape(
     data_shape: Tuple[int, ...],
-    zoom_factor: Union[float, Tuple[float, ...]] = 1.0,
+    bin_factor: Union[float, Tuple[float, ...]] = 1.0,
 ) -> Tuple[int, ...]:
-    """Compute visible-space tensor shape from data-space shape and zoom factor.
+    """Compute visible-space tensor shape from data-space shape and bin factor.
     
-    The zoom_factor specifies the ratio of data pixel size to visible pixel size:
-    - zoom_factor = 1: Same pixel size (same number of pixels)
-    - zoom_factor > 1: Visible pixels are smaller (super-resolution, more pixels)
-    - zoom_factor < 1: Visible pixels are larger (coarser sampling, fewer pixels)
-    
-    This is consistent with the convention used in solvers.convenience where:
-        visible_shape[i] = round(data_shape[i] * zoom_factor[i])
+    The bin_factor specifies the ratio of visible pixel size to data pixel size:
+    - bin_factor = 1: Same pixel size (same number of pixels)
+    - bin_factor < 1: Visible pixels are smaller (super-resolution, more pixels)
+    - bin_factor > 1: Visible pixels are larger (coarser sampling, fewer pixels)
     
     This helper eliminates the need to manually calculate visible-space shapes
     when setting up deconvolution problems.
     
     Args:
         data_shape: Shape of the data-space tensor (camera chip).
-        zoom_factor: Zoom factor from data to visible space. Can be:
+        bin_factor: Bin factor from visible to data space. Can be:
             - float: Same factor for all dimensions
             - tuple: Per-dimension factors
     
     Returns:
         Shape of the visible-space tensor.
-        Each dimension is: data_dim * zoom_factor (rounded to nearest integer)
+        Each dimension is: data_dim / bin_factor (rounded to nearest integer)
     
     Examples:
         >>> # More pixels in visible space (super-resolution)
-        >>> compute_visible_shape((100, 100), zoom_factor=1.2)
-        (120, 120)
+        >>> compute_visible_shape((100, 100), bin_factor=0.85)
+        (118, 118)
         
         >>> # Fewer pixels in visible space (coarser sampling)
-        >>> compute_visible_shape((100, 100), zoom_factor=0.85)
-        (85, 85)
+        >>> compute_visible_shape((100, 100), bin_factor=1.2)
+        (83, 83)
         
         >>> # Same pixel size
-        >>> compute_visible_shape((100, 100), zoom_factor=1.0)
+        >>> compute_visible_shape((100, 100), bin_factor=1.0)
         (100, 100)
         
         >>> # Per-dimension factors
-        >>> compute_visible_shape((100, 100, 50), zoom_factor=(1.0, 1.0, 2.0))
-        (100, 100, 100)
+        >>> compute_visible_shape((100, 100, 50), bin_factor=(1.0, 1.0, 2.0))
+        (100, 100, 25)
     """
     data_shape = tuple(int(s) for s in data_shape)
     ndim = len(data_shape)
     
-    # Normalize zoom_factor to per-dimension
-    if isinstance(zoom_factor, (int, float)):
-        factors = (float(zoom_factor),) * ndim
+    # Normalize bin_factor to per-dimension
+    if isinstance(bin_factor, (int, float)):
+        factors = (float(bin_factor),) * ndim
     else:
-        factors = tuple(float(f) for f in zoom_factor)
+        factors = tuple(float(f) for f in bin_factor)
         if len(factors) != ndim:
             raise ValueError(
-                f"zoom_factor has {len(factors)} elements, "
+                f"bin_factor has {len(factors)} elements, "
                 f"expected {ndim} to match data_shape"
             )
     
     # Compute visible shape: round to nearest integer
-    # visible_dim = data_dim * zoom_factor
+    # visible_dim = data_dim / bin_factor
     visible_shape = tuple(
-        int(round(data_dim * factor)) 
+        int(round(data_dim / factor)) 
         for data_dim, factor in zip(data_shape, factors)
     )
     
@@ -138,82 +131,64 @@ def compute_padded_shape(
         - padding: Tuple of (before, after) pairs for each dimension
     
     Examples:
-        >>> shape, padding = compute_padded_shape((100, 100), (31, 31))
-        >>> # shape = (121, 121) minimum, but rounded to FFT-friendly
-        >>> # padding = ((10, 10), (10, 10)) approximately
+        >>> shape, padding = compute_padded_shape((100, 100), (31, 31), extra_padding=0)
+        >>> # Without extra padding: 100 + 30 = 130, symmetric: (15, 15)
+        >>> shape
+        (130, 130)
+        >>> padding
+        ((15, 15), (15, 15))
     """
-    from .linops_mlx import _next_smooth_number, fast_padded_shape
-    
     signal_shape = tuple(int(s) for s in signal_shape)
     kernel_shape = tuple(int(s) for s in kernel_shape)
     ndim = len(signal_shape)
     
     if len(kernel_shape) != ndim:
         raise ValueError(
-            f"signal_shape and kernel_shape must have same ndim: "
-            f"{len(signal_shape)} vs {len(kernel_shape)}"
+            f"kernel_shape has {len(kernel_shape)} dimensions, "
+            f"expected {ndim} to match signal_shape"
         )
     
-    # Normalize extra_padding
+    # Normalize extra_padding to per-dimension
     if isinstance(extra_padding, int):
-        extra = (extra_padding,) * ndim
+        extra_padding_tuple = (extra_padding,) * ndim
     else:
-        extra = tuple(int(p) for p in extra_padding)
-        if len(extra) != ndim:
-            raise ValueError(
-                f"extra_padding has {len(extra)} elements, "
-                f"expected {ndim}"
-            )
+        extra_padding_tuple = tuple(int(p) for p in extra_padding)
     
-    # Normalize min_pad
+    # Normalize min_pad to per-dimension
     if min_pad is None:
-        min_pads = (None,) * ndim
+        min_pad_tuple = None
     elif isinstance(min_pad, int):
-        min_pads = (min_pad,) * ndim
+        min_pad_tuple = (min_pad,) * ndim
     else:
-        min_pads = tuple(min_pad)
-        if len(min_pads) != ndim:
-            raise ValueError(
-                f"min_pad has {len(min_pads)} elements, "
-                f"expected {ndim}"
-            )
+        min_pad_tuple = tuple(p if p is not None else None for p in min_pad)
     
-    # For linear convolution, we need N + M - 1 total size to avoid wrap-around.
-    # This means we need (M - 1) additional padding beyond the signal size.
-    # The min_pad parameter works like in fast_padded_shape:
-    # - None: use (M - 1) padding
-    # - int: use that specific padding value (can be 0)
+    # Compute padding for each dimension
+    padding_list = []
+    padded_shape_list = []
     
-    padding_pairs = []
-    padded_dims = []
-    
-    for signal_n, kernel_n, min_p, extra_p in zip(
-        signal_shape, kernel_shape, min_pads, extra
-    ):
-        # Determine base padding
-        if min_p is not None:
-            base_pad = int(min_p)
-        else:
-            base_pad = kernel_n - 1
+    for i in range(ndim):
+        signal_dim = signal_shape[i]
+        kernel_dim = kernel_shape[i]
+        extra_pad = extra_padding_tuple[i]
         
-        # Total additional padding beyond signal size
-        total_pad = base_pad + extra_p
+        # Base padding for linear convolution: kernel_dim - 1
+        base_pad = kernel_dim - 1
         
-        # Ensure the padded shape is at least as large as the kernel
-        # (kernel must fit in the FFT buffer)
-        effective_pad = max(total_pad, kernel_n - signal_n)
+        # Apply min_pad override
+        if min_pad_tuple is not None and min_pad_tuple[i] is not None:
+            base_pad = min_pad_tuple[i]
         
-        # Symmetric padding (before, after)
-        pad_before = effective_pad // 2
-        pad_after = effective_pad - pad_before
+        # Total padding per axis
+        total_pad = base_pad + extra_pad
         
-        padding_pairs.append((pad_before, pad_after))
-        padded_dims.append(signal_n + effective_pad)
+        # Symmetric padding: split as evenly as possible
+        pad_before = total_pad // 2
+        pad_after = total_pad - pad_before
+        
+        padding_list.append((pad_before, pad_after))
+        padded_shape_list.append(signal_dim + total_pad)
     
-    padded_shape = tuple(padded_dims)
-    padding = tuple(padding_pairs)
-    
-    return padded_shape, padding
+    return tuple(padded_shape_list), tuple(padding_list)
 
 
 def get_valid_slices(
@@ -221,376 +196,174 @@ def get_valid_slices(
     signal_shape: Tuple[int, ...],
     padding: Optional[Tuple[Tuple[int, int], ...]] = None,
 ) -> Tuple[slice, ...]:
-    """Get slice objects to extract the valid region from a padded array.
+    """Return slice objects to extract valid region from padded arrays.
     
-    The valid region is the portion of the padded array that corresponds to
-    linear (not circular) convolution results, excluding padding artifacts.
+    The valid region is the part of the padded array that corresponds to
+    the original signal without padding artifacts.
     
     Args:
         padded_shape: Shape of the padded array.
-        signal_shape: Original signal shape (before padding).
-        padding: Optional explicit padding tuples. If None, computes from shape diff.
+        signal_shape: Original signal shape.
+        padding: Optional explicit padding tuples. If None, assumes symmetric padding.
     
     Returns:
-        Tuple of slice objects to extract valid region.
+        Tuple of slice objects, one per dimension.
     
     Examples:
-        >>> # Padded from (100, 100) to (120, 120) with symmetric padding
+        >>> # Symmetric padding: (100, 100) padded to (120, 120) with 10 padding per side
         >>> slices = get_valid_slices((120, 120), (100, 100))
-        >>> # slices = (slice(10, 110), slice(10, 110))
+        >>> slices
+        (slice(10, 110), slice(10, 110))
+        
+        >>> # Asymmetric padding
+        >>> slices = get_valid_slices((115,), (100,), padding=((10, 5),))
+        (slice(10, 110),)
     """
     padded_shape = tuple(int(s) for s in padded_shape)
     signal_shape = tuple(int(s) for s in signal_shape)
-    ndim = len(signal_shape)
+    ndim = len(padded_shape)
     
-    if len(padded_shape) != ndim:
+    if len(signal_shape) != ndim:
         raise ValueError(
-            f"padded_shape and signal_shape must have same ndim: "
-            f"{len(padded_shape)} vs {ndim}"
+            f"padded_shape has {ndim} dimensions, "
+            f"but signal_shape has {len(signal_shape)} dimensions. "
+            f"Both must have the same ndim."
         )
     
-    # Compute padding from shape difference if not provided
+    # If padding not provided, assume symmetric padding
     if padding is None:
-        padding = tuple(
-            ((padded_n - signal_n) // 2, padded_n - signal_n - (padded_n - signal_n) // 2)
-            for padded_n, signal_n in zip(padded_shape, signal_shape)
-        )
+        padding_list = []
+        for p_dim, s_dim in zip(padded_shape, signal_shape):
+            total_pad = p_dim - s_dim
+            pad_before = total_pad // 2
+            pad_after = total_pad - pad_before
+            padding_list.append((pad_before, pad_after))
+        padding = tuple(padding_list)
     
-    # Validate padding
-    if len(padding) != ndim:
-        raise ValueError(
-            f"padding has {len(padding)} elements, expected {ndim}"
-        )
-    
-    # Build slices
-    valid_slices = []
-    for signal_n, (pad_before, pad_after) in zip(signal_shape, padding):
+    # Create slices to extract valid region
+    slices = []
+    for i in range(ndim):
+        pad_before, pad_after = padding[i]
         start = pad_before
-        stop = pad_before + signal_n
-        valid_slices.append(slice(start, stop))
+        stop = padded_shape[i] - pad_after
+        slices.append(slice(start, stop))
     
-    return tuple(valid_slices)
+    return tuple(slices)
 
 
 def compute_convolution_output_shape(
     signal_shape: Tuple[int, ...],
     kernel_shape: Tuple[int, ...],
-    mode: Literal["valid", "same", "full"] = "valid",
+    mode: Literal["valid", "same", "full"] = "full",
 ) -> Tuple[int, ...]:
-    """Compute output shape for convolution with different modes.
+    """Compute output shape for different convolution modes.
     
     Args:
-        signal_shape: Shape of input signal.
-        kernel_shape: Shape of convolution kernel.
+        signal_shape: Shape of the input signal.
+        kernel_shape: Shape of the convolution kernel.
         mode: Convolution mode:
-            - "valid": Only valid region (no padding artifacts)
-            - "same": Same size as input (requires padding)
-            - "full": Full convolution (signal + kernel - 1)
+            - "valid": N - M + 1 (no padding)
+            - "same": Same as input (with padding)
+            - "full": N + M - 1 (full padding)
     
     Returns:
-        Output shape for the specified mode.
+        Output shape tuple.
+    
+    Examples:
+        >>> # Valid mode
+        >>> compute_convolution_output_shape((100, 100), (31, 31), mode="valid")
+        (70, 70)
+        
+        >>> # Full mode
+        >>> compute_convolution_output_shape((100, 100), (31, 31), mode="full")
+        (130, 130)
+        
+        >>> # Same mode
+        >>> compute_convolution_output_shape((100, 100), (31, 31), mode="same")
+        (100, 100)
     """
     signal_shape = tuple(int(s) for s in signal_shape)
     kernel_shape = tuple(int(s) for s in kernel_shape)
+    ndim = len(signal_shape)
     
-    if mode == "valid":
-        return tuple(
-            max(0, signal_n - kernel_n + 1)
-            for signal_n, kernel_n in zip(signal_shape, kernel_shape)
+    if len(kernel_shape) != ndim:
+        raise ValueError(
+            f"kernel_shape has {len(kernel_shape)} dimensions, "
+            f"expected {ndim} to match signal_shape"
         )
-    elif mode == "same":
-        return signal_shape
-    elif mode == "full":
-        return tuple(
-            signal_n + kernel_n - 1
-            for signal_n, kernel_n in zip(signal_shape, kernel_shape)
-        )
-    else:
-        raise ValueError(f"Unknown mode {mode!r}, use 'valid', 'same', or 'full'")
+    
+    output_shape = []
+    for s, k in zip(signal_shape, kernel_shape):
+        if mode == "valid":
+            out = max(0, s - k + 1)
+        elif mode == "same":
+            out = s
+        elif mode == "full":
+            out = s + k - 1
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Use 'valid', 'same', or 'full'.")
+        output_shape.append(out)
+    
+    return tuple(output_shape)
 
 
-# Convenience function for the common case
 def visible_to_data_padding(
     visible_shape: Tuple[int, ...],
     psf_shape: Tuple[int, ...],
-    *,
-    extra_padding: int = DEFAULT_EXTRA_PADDING,
+    extra_padding: Union[int, Tuple[int, ...]] = DEFAULT_EXTRA_PADDING,
 ) -> Tuple[Tuple[int, int], ...]:
     """Compute detector padding for visible-to-data transformation.
     
-    This computes the padding needed to model the finite detector effect
-    when going from visible space to data space via PSF convolution.
+    Computes padding at the visible-space level to handle PSF tails at the edges
+    of the finite detector. This padding is in visible-space pixels.
     
     Args:
-        visible_shape: Shape of visible-space tensor.
-        psf_shape: Shape of PSF kernel.
-        extra_padding: Additional padding at data-space for PSF tails.
+        visible_shape: Shape of the visible-space tensor.
+        psf_shape: Shape of the PSF.
+        extra_padding: Additional padding beyond PSF-based padding.
+            Can be int (same for all dims) or tuple (per-dimension).
     
     Returns:
         Padding tuples (before, after) for each dimension.
-    """
-    # For finite detector modeling, we need to pad the visible space
-    # so that objects outside the detector can still contribute to edge pixels
     
-    # The PSF extends (psf_shape - 1) // 2 in each direction
-    # With extra_padding, total padding per side is:
-    # (psf_n - 1) // 2 + extra_padding
-    
-    padding_pairs = []
-    for visible_n, psf_n in zip(visible_shape, psf_shape):
-        psf_radius = (psf_n - 1) // 2
-        pad_per_side = psf_radius + extra_padding
-        padding_pairs.append((pad_per_side, pad_per_side))
-    
-    return tuple(padding_pairs)
-
-
-@dataclass(frozen=True)
-class DeconvolutionSpaces:
-    """Resolved shapes for all three spaces in the deconvolution model.
-    
-    This dataclass provides a clean, unified interface for working with the
-    three-space model: hidden ↔ visible ↔ data.
-    
-    Attributes:
-        data_shape: Shape of data-space (camera/detector).
-        visible_shape: Shape of visible-space (object space before ICF).
-        hidden_shape: Shape of hidden-space (parameter/optimization space).
-        zoom_factors: Tuple of zoom factors from data to visible space.
-        psf_shape: Shape of the PSF kernel (known a priori).
-        detector_padding: Padding for finite detector modeling (visible-space units).
-        fft_padding: Padding for linear convolution FFT requirements.
-        extra_padding: Additional padding beyond PSF requirements.
-    
-    The relationships:
-    - visible_shape[i] = round(data_shape[i] * zoom_factors[i])
-    - hidden_shape may differ from visible_shape if ICF is applied
-    - detector_padding ensures objects outside detector contribute to edges
-    - fft_padding ensures N + M - 1 requirement for linear convolution
-    """
-    data_shape: Tuple[int, ...]
-    visible_shape: Tuple[int, ...]
-    hidden_shape: Tuple[int, ...]
-    zoom_factors: Tuple[float, ...]
-    psf_shape: Tuple[int, ...]
-    detector_padding: Tuple[Tuple[int, int], ...]
-    fft_padding: Tuple[Tuple[int, int], ...]
-    extra_padding: Union[int, Tuple[int, ...]]
-
-
-def compute_hidden_shape(
-    visible_shape: Tuple[int, ...],
-    icf_shape: Optional[Tuple[int, ...]] = None,
-) -> Tuple[int, ...]:
-    """Compute hidden-space shape from visible-space shape.
-    
-    The hidden-space is where the optimizer modifies pixel values. It may
-    have a different shape than the visible-space if an ICF (Intrinsic
-    Correlation Function) transform is applied.
-    
-    Args:
-        visible_shape: Shape of visible-space tensor.
-        icf_shape: Optional shape of ICF kernel. If None, hidden_shape = visible_shape.
-    
-    Returns:
-        Shape of hidden-space tensor.
-    
-    Example:
-        >>> # No ICF: hidden space same as visible space
-        >>> compute_hidden_shape((128, 128))
-        (128, 128)
-        >>> # With ICF: hidden space may be different
-        >>> compute_hidden_shape((128, 128), icf_shape=(64, 64))
-        (128, 128)  # ICF doesn't change shape, but this may vary
-    """
-    if icf_shape is None:
-        return visible_shape
-    
-    # For most ICF transforms (Gaussian, wavelet), the shape remains the same
-    # The ICF is applied in frequency space, so spatial dimensions don't change
-    return visible_shape
-
-
-def create_initial_hidden(
-    spaces: DeconvolutionSpaces,
-    data: Optional[Union[np.ndarray, "mx.array"]] = None,
-    init_value: float = 0.0,
-    dtype: type = np.float32,
-) -> np.ndarray:
-    """Create an initial hidden-space vector with proper zero-padding.
-    
-    This function creates an appropriately-sized and padded initial estimate
-    for iterative deconvolution algorithms. The returned array:
-    - Has shape = hidden_shape (includes all necessary padding)
-    - Can be initialized from data (back-projected) or with a constant value
-    - Satisfies linear convolution requirements for FFT-based operators
-    
-    Args:
-        spaces: DeconvolutionSpaces object with all shape information.
-        data: Optional observed data to use for back-projection initialization.
-            If None, initializes with init_value.
-        init_value: Constant value to use if data is None.
-        dtype: Data type for the returned array.
-    
-    Returns:
-        Initial hidden-space vector as numpy array with shape hidden_shape.
-    
-    Example:
-        >>> spaces = resolve_deconvolution_spaces(
-        ...     data_shape=(128, 128),
-        ...     psf_shape=(16, 16),
-        ...     zoom_factors=(1.2, 1.2),
-        ... )
-        >>> initial = create_initial_hidden(spaces, init_value=0.0)
-        >>> assert initial.shape == spaces.hidden_shape
-    """
-    try:
-        import mlx.core as mx
-        has_mlx = True
-    except ImportError:
-        has_mlx = False
-    
-    shape = spaces.hidden_shape
-    
-    if data is not None:
-        # Initialize from data via back-projection
-        if has_mlx and isinstance(data, mx.array):
-            # For MLX arrays, we'll create a numpy array
-            data_np = np.array(data)
-        elif isinstance(data, np.ndarray):
-            data_np = data
-        else:
-            raise TypeError(f"data must be numpy array or MLX array, got {type(data)}")
+    Examples:
+        >>> # PSF shape (31, 31): radius = (31-1)//2 = 15
+        >>> # With default extra_padding=10: 15 + 10 = 25 per side
+        >>> visible_to_data_padding((100, 100), (31, 31))
+        ((25, 25), (25, 25))
         
-        # Simple back-projection: normalize data and pad to hidden shape
-        # This is a reasonable default; more sophisticated initialization
-        # can be done by the caller
-        if data_np.ndim != len(shape):
-            raise ValueError(
-                f"data has {data_np.ndim} dimensions, "
-                f"but hidden_shape has {len(shape)}"
-            )
-        
-        # Normalize data to reasonable starting point
-        mean_val = float(np.mean(data_np))
-        if mean_val <= 0:
-            # If data is all zeros or negative, use a constant value
-            result = np.full(shape, 1.0, dtype=dtype)
-            return result
-        
-        normalized = (data_np / mean_val).astype(dtype)
-        
-        # Pad to hidden shape (centered)
-        result = np.zeros(shape, dtype=dtype)
-        slices = get_valid_slices(shape, data_np.shape)
-        result[slices] = normalized
-        
-        return result
-    else:
-        # Initialize with constant value
-        return np.full(shape, init_value, dtype=dtype)
-
-
-def resolve_deconvolution_spaces(
-    data_shape: Tuple[int, ...],
-    psf_shape: Tuple[int, ...],
-    *,
-    zoom_factors: Union[float, Tuple[float, ...]] = 1.0,
-    icf_shape: Optional[Tuple[int, ...]] = None,
-    extra_padding: Union[int, Tuple[int, ...]] = DEFAULT_EXTRA_PADDING,
-    min_pad: Optional[Union[int, Tuple[Optional[int], ...]]] = None,
-) -> DeconvolutionSpaces:
-    """Resolve all three space shapes for a deconvolution problem.
-    
-    This is the main convenience function for setting up a deconvolution problem.
-    Given the a priori information (data shape, PSF shape, zoom factors), it
-    computes all necessary shapes and padding for the three-space model.
-    
-    Args:
-        data_shape: Shape of the observed data (camera chip).
-        psf_shape: Shape of the PSF kernel (known a priori).
-        zoom_factors: Zoom factors from data to visible space.
-            - float: Same factor for all dimensions
-            - tuple: Per-dimension factors
-            - > 1.0: Super-resolution (finer visible pixels)
-            - < 1.0: Coarser visible pixels
-            - = 1.0: Same pixel size
-        icf_shape: Optional shape of ICF kernel. If None, no ICF transform.
-        extra_padding: Additional padding beyond PSF-based padding.
-            Can be int (same for all dims) or tuple (per-dimension).
-        min_pad: Minimum padding per axis for linear convolution.
-            - None: Use full N + M - 1 padding
-            - int: Same minimum padding for all axes
-            - tuple: Per-axis minimum padding (use None for full padding)
-    
-    Returns:
-        DeconvolutionSpaces with all resolved shapes and padding.
-    
-    Example:
-        >>> spaces = resolve_deconvolution_spaces(
-        ...     data_shape=(256, 256),
-        ...     psf_shape=(32, 32),
-        ...     zoom_factors=1.2,  # Super-resolution
-        ...     extra_padding=10,
-        ... )
-        >>> print(f"Visible shape: {spaces.visible_shape}")
-        >>> print(f"Hidden shape: {spaces.hidden_shape}")
-        >>> print(f"Detector padding: {spaces.detector_padding}")
+        >>> # Custom extra padding
+        >>> visible_to_data_padding((100, 100), (31, 31), extra_padding=5)
+        ((20, 20), (20, 20))
     """
-    data_shape = tuple(int(s) for s in data_shape)
+    visible_shape = tuple(int(s) for s in visible_shape)
     psf_shape = tuple(int(s) for s in psf_shape)
-    ndim = len(data_shape)
+    ndim = len(visible_shape)
     
     if len(psf_shape) != ndim:
         raise ValueError(
-            f"data_shape and psf_shape must have same ndim: "
-            f"{len(data_shape)} vs {len(psf_shape)}"
+            f"psf_shape has {len(psf_shape)} dimensions, "
+            f"expected {ndim} to match visible_shape"
         )
     
-    # Normalize zoom_factors
-    if isinstance(zoom_factors, (int, float)):
-        zoom = (float(zoom_factors),) * ndim
+    # Normalize extra_padding to per-dimension
+    if isinstance(extra_padding, int):
+        extra_padding_tuple = (extra_padding,) * ndim
     else:
-        zoom = tuple(float(z) for z in zoom_factors)
-        if len(zoom) != ndim:
-            raise ValueError(
-                f"zoom_factors has {len(zoom)} elements, "
-                f"expected {ndim} to match data_shape"
-            )
+        extra_padding_tuple = tuple(int(p) for p in extra_padding)
     
-    # Compute visible shape from data shape and zoom factors
-    visible_shape = tuple(
-        int(round(data_dim * zoom_dim))
-        for data_dim, zoom_dim in zip(data_shape, zoom)
-    )
+    padding_list = []
+    for i in range(ndim):
+        psf_dim = psf_shape[i]
+        extra_pad = extra_padding_tuple[i]
+        
+        # PSF radius: (dim - 1) // 2
+        psf_radius = (psf_dim - 1) // 2
+        
+        # Total padding per side
+        total_pad = psf_radius + extra_pad
+        
+        # Symmetric padding
+        padding_list.append((total_pad, total_pad))
     
-    # Compute hidden shape (may differ if ICF is applied)
-    hidden_shape = compute_hidden_shape(visible_shape, icf_shape)
-    
-    # Compute detector padding for finite detector modeling
-    # This is the padding in visible-space units to handle PSF tails
-    detector_padding = visible_to_data_padding(
-        visible_shape=visible_shape,
-        psf_shape=psf_shape,
-        extra_padding=extra_padding,
-    )
-    
-    # Compute FFT padding for linear convolution
-    # This ensures N + M - 1 requirement is satisfied
-    fft_shape, fft_padding = compute_padded_shape(
-        signal_shape=visible_shape,
-        kernel_shape=psf_shape,
-        extra_padding=0,  # We already added extra_padding to detector_padding
-        min_pad=min_pad,
-    )
-    
-    return DeconvolutionSpaces(
-        data_shape=data_shape,
-        visible_shape=visible_shape,
-        hidden_shape=hidden_shape,
-        zoom_factors=zoom,
-        psf_shape=psf_shape,
-        detector_padding=detector_padding,
-        fft_padding=fft_padding,
-        extra_padding=extra_padding,
-    )
+    return tuple(padding_list)

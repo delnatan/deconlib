@@ -28,47 +28,53 @@ def richardson_lucy(
     eval_interval: int = 10,
     return_region: str = "full",
     callback: Optional[Callable[[int, mx.array], bool]] = None,
+    verbose: bool = False,
 ) -> RLResult:
     """Run Richardson-Lucy deconvolution with a composed linear operator.
 
     This is a simple, direct interface to RL that takes a LinearOperator
     representing the forward model from visible-space to data-space.
+    The algorithm includes the sensitivity term A^T(1) in the denominator for
+    proper normalization.
 
     Args:
         observed: Observed data as MLX array, shape (H, W) or (D, H, W).
         operator: Linear operator from visible-space to data-space.
-            Should be composed as: FiniteDetector(PSFConvolver(...))
+            Should be composed as: Crop(PSFConvolver(...))
             The operator's forward() input shape determines visible-space,
             and its forward() output shape must match observed.shape.
         num_iter: Maximum number of iterations.
         background: Background intensity level (added before division).
+            Should be small (e.g., 0-5% of data mean) to avoid NaN.
         eval_interval: Compute loss every N iterations.
         return_region: "full" to return entire image, "valid" to return
             only the region unaffected by boundary effects.
         callback: Optional callback(iteration, current_estimate) -> bool.
             Return True to stop early. Called every eval_interval iterations.
+        verbose: If True, print iteration progress and loss values.
 
     Returns:
         RLResult with restored image, predictions, and convergence info.
 
     Example:
         >>> from deconlib.deconvolution import (
-        ...     compose, LinearFFTConvolver, FiniteDetector
+        ...     compose, LinearFFTConvolver, Crop
         ... )
         >>> from deconlib.solvers import richardson_lucy
         >>> import mlx.core as mx
         >>>
         >>> # Build forward operator
         >>> R = compose(
-        ...     FiniteDetector(detector_shape=data.shape, padding=((16, 16), (16, 16))),
-        ...     LinearFFTConvolver(psf.psf, signal_shape=visible_shape)
+        ...     Crop(padded_visible_shape, data.shape),
+        ...     LinearFFTConvolver(psf.psf, signal_shape=padded_visible_shape)
         ... )
         >>>
         >>> # Run RL
         >>> result = richardson_lucy(
         ...     observed=mx.array(data),
         ...     operator=R,
-        ...     num_iter=50
+        ...     num_iter=50,
+        ...     verbose=True  # Print progress
         ... )
     """
     if mx is None:
@@ -89,6 +95,7 @@ def richardson_lucy(
         eval_interval=eval_interval,
         return_region=return_region,
         callback=callback,
+        verbose=verbose,
     )
 
     # Convert results to numpy arrays

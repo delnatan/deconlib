@@ -43,9 +43,7 @@ Image restoration algorithms using Apple MLX for GPU-accelerated computation.
     options:
       show_source: false
 
-::: deconlib.deconvolution.FiniteDetector
-    options:
-      show_source: false
+
 
 ## Differential Operators
 

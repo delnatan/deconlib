@@ -11,19 +11,15 @@ Example:
     >>> result = richardson_lucy(observed=data, operator=R, num_iter=50)
     >>> 
     >>> # Or build manually with compose
-    >>> from deconlib.deconvolution import compose, LinearFFTConvolver, FiniteDetector
+    >>> from deconlib.deconvolution import compose, LinearFFTConvolver, Crop
     >>> R = compose(
-    ...     FiniteDetector(detector_shape=data.shape, padding=((16, 16), (16, 16))),
-    ...     LinearFFTConvolver(psf.psf, signal_shape=visible_shape)
+    ...     Crop(padded_visible_shape, data.shape),
+    ...     LinearFFTConvolver(psf.psf, signal_shape=padded_visible_shape)
     ... )
     >>> result = richardson_lucy(observed=data, operator=R, num_iter=50)
 """
 
-from .convenience import (
-    compute_detector_padding,
-    compute_visible_shape,
-    make_convolution_operator,
-)
+
 from .richardson_lucy import richardson_lucy, RLResult
 from .types import SolverResult
 
@@ -31,7 +27,4 @@ __all__ = [
     "richardson_lucy",
     "RLResult",
     "SolverResult",
-    "compute_visible_shape",
-    "compute_detector_padding",
-    "make_convolution_operator",
 ]

@@ -149,14 +149,16 @@ from .utils import (
 # Solvers Module - Simple solver wrappers (requires MLX)
 # =============================================================================
 from .solvers import (
-    compute_detector_padding,
-    compute_valid_slices,
-    compute_visible_shape,
-    extract_valid_region,
-    make_convolution_operator,
     richardson_lucy,
     RLResult,
     SolverResult,
+)
+
+# =============================================================================
+# Operators Module - Clean operator construction (requires MLX)
+# =============================================================================
+from .operators import (
+    save_restored_as_ims,
 )
 
 # =============================================================================
@@ -172,8 +174,6 @@ from .deconvolution import (
     FFTConvolver,
     LinearFFTConvolver,
     GaussianICF,
-    IntegratedDetectorConvolver,
-    FiniteDetector,
     MatrixOperator,
     fast_padded_shape,
     # Regularization
@@ -192,16 +192,6 @@ from .deconvolution import (
     GradientRegularizer,
     HessianRegularizer,
     richardson_lucy_with_operator,
-    # Shape utilities
-    DeconvolutionSpaces,
-    compute_hidden_shape,
-    create_initial_hidden,
-    resolve_deconvolution_spaces,
-    compute_padded_shape,
-    get_valid_slices,
-    visible_to_data_padding,
-    DEFAULT_EXTRA_PADDING,
-    compute_convolution_output_shape,
 )
 
 # =============================================================================
@@ -209,7 +199,7 @@ from .deconvolution import (
 # =============================================================================
 # from deconlib.deconvolution import (
 #     solve_pdhg_mlx, richardson_lucy_with_operator,
-#     FFTConvolver, FiniteDetector, Compose, as_numpy_op,
+#     FFTConvolver, Compose, as_numpy_op,
 # )
 
 __all__ = [
@@ -302,16 +292,10 @@ __all__ = [
     "run_wavelet_mem_workflow",
     "save_richardson_lucy_bundle",
     "load_richardson_lucy_bundle",
-    # New simple solvers
+    # Solvers
     "richardson_lucy",
     "RLResult",
     "SolverResult",
-    # Convenience helpers
-    "compute_visible_shape",
-    "compute_detector_padding",
-    "compute_valid_slices",
-    "extract_valid_region",
-    "make_convolution_operator",
     # Deconvolution operators and composition
     "compose",
     "Compose",
@@ -320,8 +304,7 @@ __all__ = [
     "FFTConvolver",
     "LinearFFTConvolver",
     "GaussianICF",
-    "IntegratedDetectorConvolver",
-    "FiniteDetector",
+
     "MatrixOperator",
     "fast_padded_shape",
     "Gradient1D",
@@ -337,16 +320,7 @@ __all__ = [
     "GradientRegularizer",
     "HessianRegularizer",
     "richardson_lucy_with_operator",
-    # Shape utilities
-    "DeconvolutionSpaces",
-    "compute_hidden_shape",
-    "create_initial_hidden",
-    "resolve_deconvolution_spaces",
-    "compute_padded_shape",
-    "get_valid_slices",
-    "visible_to_data_padding",
-    "DEFAULT_EXTRA_PADDING",
-    "compute_convolution_output_shape",
+
     # Math utilities
     "fft_coords",
     "fourier_meshgrid",
@@ -359,4 +333,7 @@ __all__ = [
     "pad_corner_origin_kernel",
     "pad_to_shape",
     "soft_pad",
+
+    # I/O utilities
+    "save_restored_as_ims",
 ]

@@ -11,6 +11,10 @@ import mlx.core as mx
 import numpy as np
 
 from ..utils.padding import pad_corner_origin_kernel
+try:
+    from .core_operators import Pad
+except ImportError:
+    from deconlib.deconvolution.core_operators import Pad
 
 try:
     from .linops_core_mlx import (
@@ -423,21 +427,21 @@ class LinearFFTConvolver:
             (0, fft_n - signal_n)
             for signal_n, fft_n in zip(self.signal_shape, self.fft_shape)
         )
-        self._domain = FiniteDetector(self.signal_shape, padding=padding)
+        self._domain = Pad(padding)
         self._convolver = FFTConvolver(padded_kernel, normalize=normalize)
         self.operator_norm_sq = self._convolver.operator_norm_sq
 
     def forward(self, x: mx.array) -> mx.array:
         """Apply zero-boundary linear convolution."""
-        padded = self._domain.adjoint(x)
+        padded = self._domain.forward(x)
         convolved = self._convolver.forward(padded)
-        return self._domain.forward(convolved)
+        return self._domain.adjoint(convolved)
 
     def adjoint(self, y: mx.array) -> mx.array:
         """Apply the adjoint zero-boundary correlation."""
-        padded = self._domain.adjoint(y)
+        padded = self._domain.forward(y)
         correlated = self._convolver.adjoint(padded)
-        return self._domain.forward(correlated)
+        return self._domain.adjoint(correlated)
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
@@ -452,14 +456,45 @@ def _gaussian_icf_kernel(
     if len(sigmas) != len(shape) or len(spacings) != len(shape):
         raise ValueError("shape, sigmas, and spacings must all have the same length")
 
-    coords = [np.fft.fftfreq(n) * n * d for n, d in zip(shape, spacings)]
-    kernel_1d = [np.exp(-(c**2) / (2.0 * s**2)) for c, s in zip(coords, sigmas)]
+    ndim = len(shape)
+    
+    # For isotropic Gaussian, we need a single sigma in physical units
+    # Check if all sigmas are equal (for isotropic behavior)
+    if not all(abs(s - sigmas[0]) < 1e-6 * abs(sigmas[0]) for s in sigmas):
+        # Fall back to separable implementation for anisotropic case
+        coords = [np.fft.fftfreq(n) * n * d for n, d in zip(shape, spacings)]
+        kernel_1d = [np.exp(-(c**2) / (2.0 * s**2)) for c, s in zip(coords, sigmas)]
 
-    kernel = kernel_1d[0]
-    for k in kernel_1d[1:]:
-        kernel = kernel[..., np.newaxis] * k
-    kernel = kernel.astype(np.float32)
+        kernel = kernel_1d[0]
+        for k in kernel_1d[1:]:
+            kernel = kernel[..., np.newaxis] * k
+        kernel = kernel.astype(np.float32)
 
+        if normalize:
+            kernel = kernel / kernel.sum()
+        return kernel
+    
+    # Isotropic implementation using radial coordinates
+    sigma = float(sigmas[0])
+    
+    # Create coordinate grids (physical coordinates relative to origin)
+    # np.fft.fftfreq(n) * n gives pixel indices centered at origin [0, 1, ..., n/2-1, -n/2, ..., -1]
+    # Multiply by spacing to get physical coordinates
+    coord_grids = [np.fft.fftfreq(n) * n * d for n, d in zip(shape, spacings)]
+    
+    # Compute squared radial distance in physical space: r² = sum(coord_i^2)
+    # Need to reshape each coord grid for proper broadcasting
+    r_sq = np.zeros(shape, dtype=np.float64)
+    for i, coord in enumerate(coord_grids):
+        # Reshape coord to have shape (1, 1, ..., n_i, 1, 1, ...) for broadcasting
+        new_shape = [1] * ndim
+        new_shape[i] = len(coord)
+        coord_reshaped = coord.reshape(new_shape)
+        r_sq += coord_reshaped**2
+    
+    # Isotropic Gaussian: exp(-r² / (2*sigma²))
+    kernel = np.exp(-r_sq / (2.0 * sigma**2)).astype(np.float32)
+    
     if normalize:
         kernel = kernel / kernel.sum()
     return kernel
@@ -479,11 +514,113 @@ def _gaussian_icf_otf(
     return mx.fft.rfftn(kernel) if real_fft else mx.fft.fftn(kernel)
 
 
+def _cauchy_icf_kernel(
+    shape: Tuple[int, ...],
+    gammas: Tuple[float, ...],
+    spacings: Tuple[float, ...],
+    normalize: bool = True,
+) -> np.ndarray:
+    if len(gammas) != len(shape) or len(spacings) != len(shape):
+        raise ValueError("shape, gammas, and spacings must all have the same length")
+
+    ndim = len(shape)
+    
+    # For isotropic Cauchy, we need a single gamma in physical units
+    # Check if all gammas are equal (for isotropic behavior)
+    if not all(abs(g - gammas[0]) < 1e-6 * abs(gammas[0]) for g in gammas):
+        # Fall back to separable implementation for anisotropic case
+        coords = [np.fft.fftfreq(n) * n * d for n, d in zip(shape, spacings)]
+        kernel_1d = [1.0 / (np.pi * g * (1.0 + (c / g) ** 2)) for c, g in zip(coords, gammas)]
+
+        kernel = kernel_1d[0]
+        for k in kernel_1d[1:]:
+            kernel = kernel[..., np.newaxis] * k
+        kernel = kernel.astype(np.float32)
+
+        if normalize:
+            kernel = kernel / kernel.sum()
+        return kernel
+    
+    # Isotropic implementation using radial coordinates
+    gamma = float(gammas[0])
+    
+    # Create coordinate grids (physical coordinates relative to origin)
+    # np.fft.fftfreq(n) * n gives pixel indices centered at origin [0, 1, ..., n/2-1, -n/2, ..., -1]
+    # Multiply by spacing to get physical coordinates
+    coord_grids = [np.fft.fftfreq(n) * n * d for n, d in zip(shape, spacings)]
+    
+    # Compute squared radial distance in physical space: r² = sum(coord_i^2)
+    # Need to reshape each coord grid for proper broadcasting
+    r_sq = np.zeros(shape, dtype=np.float64)
+    for i, coord in enumerate(coord_grids):
+        # Reshape coord to have shape (1, 1, ..., n_i, 1, 1, ...) for broadcasting
+        new_shape = [1] * ndim
+        new_shape[i] = len(coord)
+        coord_reshaped = coord.reshape(new_shape)
+        r_sq += coord_reshaped**2
+    
+    # Radial distance
+    r = np.sqrt(r_sq)
+    
+    # Isotropic multivariate Cauchy (Lorentzian) distribution
+    # For n dimensions: f(r) = C_n / (γ^n * (1 + (r/γ)²)^((n+1)/2))
+    # where C_n = Γ((n+1)/2) / π^((n+1)/2)
+    #
+    # Precomputed constants for common dimensions:
+    # n=1: C_1 = 1/π,     exponent=1,     kernel = 1 / (π*γ * (1 + (r/γ)²))
+    # n=2: C_2 = 1/(2π),  exponent=1.5,  kernel = 1 / (2π*γ² * (1 + (r/γ)²)^1.5)
+    # n=3: C_3 = 1/π²,    exponent=2,     kernel = 1 / (π²*γ³ * (1 + (r/γ)²)²)
+    
+    exponent = (ndim + 1) / 2
+    
+    # Normalization constants for 1D, 2D, 3D
+    # We can compute these without scipy by using known values of Γ function:
+    # Γ(1) = 1, Γ(1.5) = √π/2 ≈ 0.886227, Γ(2) = 1
+    if ndim == 1:
+        # C_1 = Γ(1) / π^1 = 1 / π
+        normalization = 1.0 / (np.pi * gamma)
+    elif ndim == 2:
+        # C_2 = Γ(1.5) / π^1.5 = (√π/2) / (π * √π) = 1 / (2π)
+        normalization = 1.0 / (2.0 * np.pi * gamma * gamma)
+    elif ndim == 3:
+        # C_3 = Γ(2) / π^2 = 1 / π²
+        normalization = 1.0 / (np.pi * np.pi * gamma * gamma * gamma)
+    else:
+        # For other dimensions, use a general approach
+        # We need Γ((n+1)/2) / π^((n+1)/2) / γ^n
+        # For now, raise an error for unsupported dimensions
+        raise ValueError(f"CauchyICF kernel only supports 1D, 2D, and 3D (got {ndim}D)")
+    
+    # Compute kernel: L(r) = normalization / (1 + (r/gamma)²)^exponent
+    kernel = normalization / (1.0 + (r / gamma) ** 2) ** exponent
+    kernel = kernel.astype(np.float32)
+    
+    if normalize:
+        kernel = kernel / kernel.sum()
+    return kernel
+
+
+def _cauchy_icf_otf(
+    shape: Tuple[int, ...],
+    gammas: Tuple[float, ...],
+    spacings: Tuple[float, ...],
+    *,
+    real_fft: bool,
+    normalize: bool = True,
+) -> mx.array:
+    kernel = mx.array(
+        _cauchy_icf_kernel(shape, gammas, spacings, normalize=normalize)
+    )
+    return mx.fft.rfftn(kernel) if real_fft else mx.fft.fftn(kernel)
+
+
 class GaussianICF:
     """Gaussian intrinsic correlation function (ICF) for MEM hidden space.
 
-    Applies anisotropic Gaussian smoothing via FFT:  f = C(h) = G * h
-    where G is a Gaussian kernel with per-axis sigma values.
+    Applies Gaussian smoothing via FFT:  f = C(h) = G * h
+    where G is a Gaussian kernel. When all sigmas are equal, the kernel
+    is isotropic (radial) in physical space. Otherwise, it falls back to
+    a separable (anisotropic) kernel.
 
     Because G is real and symmetric in FFT-corner convention, the OTF is
     real-valued, so forward == adjoint (C is self-adjoint).
@@ -491,6 +628,7 @@ class GaussianICF:
     Args:
         shape: Spatial shape of the hidden array (nz, ny, nx).
         sigmas: Gaussian sigma per axis in the same physical units as spacings.
+            For isotropic behavior, all values should be equal.
         spacings: Pixel spacing per axis, matching the units of sigmas.
         normalize: If True, normalise the kernel so it sums to 1.
 
@@ -535,6 +673,74 @@ class GaussianICF:
         return self.forward(x)
 
 
+class CauchyICF:
+    """Cauchy (Lorentzian) intrinsic correlation function with heavier tails.
+
+    Applies Cauchy smoothing via FFT: f = C(h) = L * h
+    where L is a Cauchy kernel with per-axis gamma (scale) parameters.
+    When all gammas are equal, the kernel is isotropic (radial) in physical
+    space. Otherwise, it falls back to a separable (anisotropic) kernel.
+
+    The Cauchy distribution has heavier tails than Gaussian (polynomial
+    decay vs super-exponential), making it more robust to outliers while
+    remaining efficient to compute via FFT.
+
+    When isotropic (all gammas equal), the kernel uses a radial coordinate
+    system based on the given pixel spacings, ensuring circular/spherical
+    symmetry in physical space and eliminating star-shaped artifacts.
+
+    Because L is real and symmetric in FFT-corner convention, the OTF is
+    real-valued, so forward == adjoint (C is self-adjoint).
+
+    Args:
+        shape: Spatial shape of the hidden array (nz, ny, nx).
+        gammas: Cauchy gamma (scale) parameter per axis in the same physical
+            units as spacings. For isotropic behavior, all values should be equal.
+            Controls the width of the distribution.
+        spacings: Pixel spacing per axis, matching the units of gammas.
+        normalize: If True, normalise the kernel so it sums to 1.
+
+    Attributes:
+        shape: Kernel/signal shape.
+        otf: Precomputed real-valued OTF (imaginary part is zero by symmetry).
+        operator_norm_sq: Squared spectral norm (max OTF value squared <= 1).
+    """
+
+    def __init__(
+        self,
+        shape: Tuple[int, ...],
+        gammas: Tuple[float, ...],
+        spacings: Tuple[float, ...],
+        normalize: bool = True,
+    ):
+        self.shape = tuple(shape)
+        self.gammas = tuple(float(g) for g in gammas)
+        self.spacings = tuple(float(s) for s in spacings)
+        self.axes = tuple(range(-len(shape), 0))
+
+        # OTF is real for a symmetric kernel — store as complex for rfftn compat
+        self.otf = _cauchy_icf_otf(
+            self.shape,
+            self.gammas,
+            self.spacings,
+            real_fft=True,
+            normalize=normalize,
+        )
+        self.operator_norm_sq = float(mx.max(mx.abs(self.otf) ** 2))
+
+    def forward(self, x: mx.array) -> mx.array:
+        """Apply Cauchy blur: f = L * h."""
+        x_ft = mx.fft.rfftn(x)
+        return mx.fft.irfftn(x_ft * self.otf, axes=self.axes, s=self.shape)
+
+    def adjoint(self, y: mx.array) -> mx.array:
+        """Apply adjoint (identical to forward — L is self-adjoint)."""
+        return self.forward(y)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
+
+
 def _fractional_overlap_matrix(in_size: int, out_size: int) -> np.ndarray:
     """Positive pixel-overlap integration matrix from fine cells to detector bins."""
     scale = in_size / out_size
@@ -567,170 +773,6 @@ def _apply_axis_matrix(x: mx.array, matrix: mx.array, axis: int) -> mx.array:
     return mx.transpose(y_perm, inv_perm)
 
 
-class IntegratedDetectorConvolver:
-    """Convolution + optional ICF + positive fractional pixel integration.
-
-    This is the positivity-preserving detector model for non-integer or
-    anisotropic super-resolution. The detector step is separable and built from
-    nonnegative overlap weights between fine-grid cells and camera pixels. For
-    integer scale factors it reduces to ordinary sum-binning.
-
-    By default convolution is circular on ``kernel.shape`` for backward
-    compatibility. Pass ``signal_shape`` with a compact corner-origin kernel to
-    run the convolution on an internal wrap-free FFT domain and crop back before
-    detector integration.
-    """
-
-    def __init__(
-        self,
-        kernel: Union[np.ndarray, mx.array],
-        output_shape: Tuple[int, ...],
-        normalize: bool = True,
-        icf_sigmas: Optional[Tuple[float, ...]] = None,
-        icf_spacings: Optional[Tuple[float, ...]] = None,
-        signal_shape: Optional[Tuple[int, ...]] = None,
-        fft_shape: Optional[Tuple[int, ...]] = None,
-    ):
-        if isinstance(kernel, mx.array):
-            kernel_np = np.array(kernel)
-        else:
-            kernel_np = np.asarray(kernel)
-
-        self.kernel_shape = tuple(int(s) for s in kernel_np.shape)
-        self.highres_shape = (
-            tuple(int(s) for s in signal_shape)
-            if signal_shape is not None
-            else self.kernel_shape
-        )
-        self.output_shape = tuple(output_shape)
-        self.lowres_shape = self.output_shape
-        ndim = len(self.highres_shape)
-
-        if len(self.output_shape) != ndim:
-            raise ValueError(
-                "output_shape must have the same number of dimensions as kernel"
-            )
-        if len(self.kernel_shape) != ndim:
-            raise ValueError(
-                "kernel and signal_shape must have the same number of dimensions"
-            )
-
-        self._linear_domain = None
-        if signal_shape is None:
-            if fft_shape is not None and tuple(fft_shape) != self.highres_shape:
-                raise ValueError(
-                    "fft_shape can only differ from kernel.shape when "
-                    "signal_shape is provided"
-                )
-            self.fft_shape = self.highres_shape
-            kernel_fft = kernel_np.astype(np.float32, copy=False)
-        else:
-            minimum_fft_shape = tuple(
-                n + m - 1 for n, m in zip(self.highres_shape, self.kernel_shape)
-            )
-            if fft_shape is None:
-                fft_shape = fast_padded_shape(self.highres_shape, self.kernel_shape)
-            self.fft_shape = tuple(int(s) for s in fft_shape)
-            if len(self.fft_shape) != ndim:
-                raise ValueError("fft_shape must match signal_shape ndim")
-            if any(
-                p < min_p for p, min_p in zip(self.fft_shape, minimum_fft_shape)
-            ):
-                raise ValueError(
-                    f"fft_shape {self.fft_shape} is too small for linear "
-                    f"convolution; minimum is {minimum_fft_shape}"
-                )
-            kernel_fft = pad_corner_origin_kernel(
-                kernel_np.astype(np.float32, copy=False),
-                self.fft_shape,
-            )
-            padding = tuple(
-                (0, fft_n - signal_n)
-                for signal_n, fft_n in zip(self.highres_shape, self.fft_shape)
-            )
-            self._linear_domain = FiniteDetector(self.highres_shape, padding=padding)
-
-        self.axes = tuple(range(-ndim, 0))
-        kernel_mx = mx.array(kernel_fft)
-
-        if normalize:
-            kernel_mx = kernel_mx / mx.sum(kernel_mx)
-
-        self.otf = mx.fft.rfftn(kernel_mx)
-        if icf_sigmas is not None:
-            if icf_spacings is None:
-                icf_spacings = (1.0,) * ndim
-            self.otf = self.otf * _gaussian_icf_otf(
-                self.fft_shape,
-                tuple(icf_sigmas),
-                tuple(icf_spacings),
-                real_fft=True,
-                normalize=True,
-            )
-
-        self.bin_matrices = tuple(
-            mx.array(_fractional_overlap_matrix(n, m))
-            for n, m in zip(self.highres_shape, self.output_shape)
-        )
-
-        bin_norm_sq = 1.0
-        for w in self.bin_matrices:
-            w_np = np.array(w)
-            bin_norm_sq *= float(np.max(w_np.sum(axis=1)) * np.max(w_np.sum(axis=0)))
-        self.operator_norm_sq = bin_norm_sq * float(
-            mx.max(mx.abs(self.otf) ** 2)
-        )
-
-    @property
-    def otf_conj(self) -> mx.array:
-        return mx.conj(self.otf)
-
-    def _integrate(self, x: mx.array) -> mx.array:
-        y = x
-        for axis, matrix in enumerate(self.bin_matrices):
-            y = _apply_axis_matrix(y, matrix, axis)
-        return y
-
-    def _integrate_adjoint(self, y: mx.array) -> mx.array:
-        x = y
-        for axis, matrix in enumerate(self.bin_matrices):
-            x = _apply_axis_matrix(x, mx.transpose(matrix), axis)
-        return x
-
-    def forward(self, x: mx.array) -> mx.array:
-        """Forward: convolve then integrate fine cells into detector pixels."""
-        x_fft = self._linear_domain.adjoint(x) if self._linear_domain else x
-        x_ft = mx.fft.rfftn(x_fft)
-        convolved = mx.fft.irfftn(
-            x_ft * self.otf, axes=self.axes, s=self.fft_shape
-        )
-        if self._linear_domain:
-            convolved = self._linear_domain.forward(convolved)
-        return self._integrate(convolved)
-
-    def adjoint(self, y: mx.array) -> mx.array:
-        """Adjoint: scatter detector pixels then correlate."""
-        upsampled = self._integrate_adjoint(y)
-        y_fft = (
-            self._linear_domain.adjoint(upsampled)
-            if self._linear_domain
-            else upsampled
-        )
-        y_ft = mx.fft.rfftn(y_fft)
-        correlated = mx.fft.irfftn(
-            y_ft * self.otf_conj, axes=self.axes, s=self.fft_shape
-        )
-        if self._linear_domain:
-            correlated = self._linear_domain.forward(correlated)
-        return correlated
-
-    def __call__(self, x: mx.array) -> mx.array:
-        return self.forward(x)
-
-
-# -----------------------------------------------------------------------------
-# Finite detector (cropping) operator
-# -----------------------------------------------------------------------------
 
 
 def _next_smooth_number(n: int) -> int:
@@ -864,6 +906,11 @@ class MatrixOperator:
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
+
+
+# -----------------------------------------------------------------------------
+# Finite Detector operator
+# -----------------------------------------------------------------------------
 
 
 class FiniteDetector:
@@ -1015,3 +1062,6 @@ class FiniteDetector:
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
+
+
+

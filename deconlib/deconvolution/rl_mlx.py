@@ -6,13 +6,14 @@ under Poisson noise. It's derived from maximum likelihood estimation assuming
 Poisson statistics.
 
 Update rule:
-    x_{k+1} = x_k * A^T(y / (A x_k + b))
+    x_{k+1} = x_k * A^T(y / (A x_k + b)) / s
 
 Where:
     - A: Explicit forward operator supplied by the caller
     - A^T: Adjoint operator (correlation)
     - y: Observed data
     - b: Background
+    - s: Sensitivity term = A^T(1), accounts for pixel sensitivity differences
     - *: Element-wise multiplication
 
 The algorithm preserves non-negativity and flux (sum of signal).
@@ -49,7 +50,12 @@ class RLResult:
 
 
 def _finite_detector_valid_slices(op) -> Optional[Tuple[slice, ...]]:
-    """Infer fine-grid valid slices for FiniteDetector after binned convolution."""
+    """Infer fine-grid valid slices for Crop/FiniteDetector operator after convolution.
+    
+    Supports compositions of:
+    - FiniteDetector/Crop(outer) + LinearFFTConvolver(inner) - without binning
+    - FiniteDetector/Crop(outer) + FractionalAreaDownsample + LinearFFTConvolver - with binning
+    """
     outer = getattr(op, "outer", None)
     inner = getattr(op, "inner", None)
     if outer is None or inner is None:
@@ -60,25 +66,51 @@ def _finite_detector_valid_slices(op) -> Optional[Tuple[slice, ...]]:
         for attr in ("detector_shape", "padding", "padded_shape")
     ):
         return None
-    if not all(hasattr(inner, attr) for attr in ("highres_shape", "output_shape")):
-        return None
-    if tuple(inner.output_shape) != tuple(outer.padded_shape):
-        return None
-
-    valid_slices = []
-    for detector_n, (pad_before, _), low_n, high_n in zip(
-        outer.detector_shape,
-        outer.padding,
-        inner.output_shape,
-        inner.highres_shape,
-    ):
-        low_start = pad_before
-        low_stop = pad_before + detector_n
-        scale = high_n / low_n
-        start = max(0, min(high_n, int(round(low_start * scale))))
-        stop = max(start, min(high_n, int(round(low_stop * scale))))
-        valid_slices.append(slice(start, stop))
-    return tuple(valid_slices)
+    
+    # Case 1: Composed operator with downsampling (3-level composition)
+    # outer = FiniteDetector/Crop
+    # inner = Compose(downsampler, convolver)
+    # inner.outer = FractionalAreaDownsample
+    # inner.inner = LinearFFTConvolver (has signal_shape)
+    if hasattr(inner, 'outer') and hasattr(inner.inner, 'signal_shape'):
+        # This is a 3-level composition: Crop(Downsample(Convolve(x)))
+        downsampler = inner.outer
+        convolver = inner.inner
+        
+        # Check if downsampler is FractionalAreaDownsample
+        if hasattr(downsampler, 'scale'):
+            # Map detector padding through downsampling to highres space
+            valid_slices = []
+            for detector_n, (pad_before, _), scale in zip(
+                outer.detector_shape,
+                outer.padding,
+                downsampler.scale if isinstance(downsampler.scale, tuple) else (downsampler.scale,) * len(outer.detector_shape),
+            ):
+                # In highres space, padding is scaled
+                highres_pad_before = int(round(pad_before * scale))
+                start = highres_pad_before
+                # detector_n in data space maps to detector_n * scale in highres space
+                highres_detector_n = int(round(detector_n * scale))
+                stop = start + highres_detector_n
+                valid_slices.append(slice(start, stop))
+            return tuple(valid_slices)
+    
+    # Case 2: Simple 2-level composition without binning
+    # The valid region is just the detector region in the padded space
+    if hasattr(inner, 'signal_shape'):
+        # LinearFFTConvolver has signal_shape
+        # The valid slices are from padding start to padding start + detector size
+        valid_slices = []
+        for detector_n, (pad_before, _) in zip(
+            outer.detector_shape,
+            outer.padding,
+        ):
+            start = pad_before
+            stop = pad_before + detector_n
+            valid_slices.append(slice(start, stop))
+        return tuple(valid_slices)
+    
+    return None
 
 
 def poisson_i_divergence(
@@ -120,8 +152,9 @@ def richardson_lucy_with_operator(
     """Richardson-Lucy deconvolution with a pre-built positive operator.
 
     Use this for composed forward models such as
-    ``compose(FiniteDetector(...), IntegratedDetectorConvolver(...))``. The RL
-    sensitivity is computed as ``A^T 1`` on the full reconstruction domain, so
+    ``compose(Crop(...), LinearFFTConvolver(...))`` or
+    ``compose(Crop(...), FractionalAreaDownsample(...), LinearFFTConvolver(...))``.
+    The RL sensitivity is computed as ``A^T 1`` on the full reconstruction domain, so
     object support outside the measured detector can remain active where it can
     contribute to edge pixels.
 
@@ -137,7 +170,8 @@ def richardson_lucy_with_operator(
         return_region: ``"full"`` returns the internal reconstruction domain.
             ``"valid"`` crops the final result to the measured detector field
             mapped onto the fine grid. Currently this is inferred for
-            ``compose(FiniteDetector, IntegratedDetectorConvolver)``.
+            ``compose(Crop, LinearFFTConvolver)`` or compositions with
+            ``FractionalAreaDownsample``.
     """
     if return_region not in ("full", "valid"):
         raise ValueError("return_region must be 'full' or 'valid'")
@@ -187,7 +221,8 @@ def richardson_lucy_with_operator(
         if valid_slices is None:
             raise ValueError(
                 "return_region='valid' requires a forward operator shaped like "
-                "compose(FiniteDetector, IntegratedDetectorConvolver)"
+                "compose(Crop, LinearFFTConvolver) or "
+                "compose(Crop, FractionalAreaDownsample, LinearFFTConvolver)"
             )
         restored = x[valid_slices]
         mx.eval(restored)

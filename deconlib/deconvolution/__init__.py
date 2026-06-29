@@ -14,7 +14,7 @@ All operator classes in this module structurally satisfy the
 :class:`LinearOperator` protocol (``forward``, ``adjoint``, ``__call__``,
 ``operator_norm_sq``). Build a forward model by composing primitives:
 
-    >>> R = compose(FiniteDetector(...), IntegratedDetectorConvolver(...))   # object -> blur -> bin -> crop
+    >>> R = compose(Crop(...), LinearFFTConvolver(...))   # object -> blur -> crop
 
 Hand the same operator to an external solver (e.g. ``memsolve``) as a pair of
 NumPy callables:
@@ -59,18 +59,15 @@ from .rl_mlx import (
     richardson_lucy_with_operator,
     RLResult,
 )
-from .rl_simple import (
-    rl_simple,
-    RLSimpleResult,
-)
+
 from .linops_mlx import (
     FFTConvolver,
     LinearFFTConvolver,
     GaussianICF,
-    IntegratedDetectorConvolver,
-    FiniteDetector,
+    CauchyICF,
     MatrixOperator,
     fast_padded_shape,
+    FiniteDetector,
     Gradient1D,
     Gradient2D,
     Gradient3D,
@@ -85,18 +82,6 @@ from .composition import (
     compose,
 )
 from .wavelets import AtrousTransform
-from .shapes import (
-    compute_visible_shape,
-    compute_padded_shape,
-    get_valid_slices,
-    compute_convolution_output_shape,
-    visible_to_data_padding,
-    DEFAULT_EXTRA_PADDING,
-    DeconvolutionSpaces,
-    compute_hidden_shape,
-    create_initial_hidden,
-    resolve_deconvolution_spaces,
-)
 from .core_operators import (
     Pad,
     Crop,
@@ -105,12 +90,19 @@ from .core_operators import (
     FractionalAreaDownsample,
     FractionalAreaUpsample,
 )
+from .shapes import (
+    compute_visible_shape,
+    compute_padded_shape,
+    get_valid_slices,
+    compute_convolution_output_shape,
+    visible_to_data_padding,
+    DEFAULT_EXTRA_PADDING,
+)
 
 __all__ = [
     # Result types
     "MLXDeconvolutionResult",
     "RLResult",
-    "RLSimpleResult",
     # MLX Algorithms - PDHG
     "solve_pdhg_mlx",
     "solve_pdhg_with_operator",
@@ -119,15 +111,22 @@ __all__ = [
     "HessianRegularizer",
     # MLX Algorithms - Richardson-Lucy
     "richardson_lucy_with_operator",
-    "rl_simple",
+    # Shape utilities
+    "compute_visible_shape",
+    "compute_padded_shape",
+    "get_valid_slices",
+    "compute_convolution_output_shape",
+    "visible_to_data_padding",
+    "DEFAULT_EXTRA_PADDING",
     # MLX Linear Operators
     "FFTConvolver",
     "LinearFFTConvolver",
     "GaussianICF",
-    "IntegratedDetectorConvolver",
-    "FiniteDetector",
+    "CauchyICF",
+
     "MatrixOperator",
     "fast_padded_shape",
+    "FiniteDetector",
     "Gradient1D",
     "Gradient2D",
     "Gradient3D",
@@ -140,17 +139,6 @@ __all__ = [
     "compose",
     "as_numpy_op",
     "AtrousTransform",
-    # Shape and padding utilities
-    "compute_visible_shape",
-    "compute_padded_shape",
-    "get_valid_slices",
-    "compute_convolution_output_shape",
-    "visible_to_data_padding",
-    "DEFAULT_EXTRA_PADDING",
-    "DeconvolutionSpaces",
-    "compute_hidden_shape",
-    "create_initial_hidden",
-    "resolve_deconvolution_spaces",
     # Core operators
     "Pad",
     "Crop",

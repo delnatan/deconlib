@@ -11,9 +11,8 @@ The algorithm solves:
 where:
     - A is any object satisfying the :class:`LinearOperator` protocol
       (``forward``, ``adjoint``, ``operator_norm_sq``). ``solve_pdhg_mlx``
-      builds A from a PSF (and optional detector integration); ``solve_pdhg_with_operator``
-      takes A directly, so composed forward models like
-      ``Compose(FiniteDetector, IntegratedDetectorConvolver)`` work transparently.
+      builds A from a PSF using atomic operators; ``solve_pdhg_with_operator``
+      takes A directly, so composed forward models work transparently.
     - L is the regularization operator (Identity, Gradient, or Hessian).
     - D is observed data, b is background.
 """
@@ -24,6 +23,7 @@ import mlx.core as mx
 import numpy as np
 
 from .base import MLXDeconvolutionResult
+from .composition import compose
 from .linops_mlx import (
     FFTConvolver,
     Gradient1D,
@@ -32,7 +32,11 @@ from .linops_mlx import (
     Hessian1D,
     Hessian2D,
     Hessian3D,
-    IntegratedDetectorConvolver,
+    FiniteDetector,
+    LinearFFTConvolver,
+)
+from .core_operators import (
+    FractionalAreaDownsample,
 )
 
 __all__ = [
@@ -618,7 +622,14 @@ def solve_pdhg_mlx(
     if bin_factors is not None and sampling_factors is not None:
         raise ValueError("bin_factors and sampling_factors are mutually exclusive")
 
-    # Create blur operator
+    # Handle ICF parameters - for now, not supported with atomic operators
+    if icf_sigmas is not None:
+        raise NotImplementedError(
+            "ICF (icf_sigmas) is not yet supported with atomic operators. "
+            "Use the composed operator API directly or remove icf_sigmas parameter."
+        )
+
+    # Create blur operator from atomic components
     if sampling_factors is not None:
         factors = _normalize_sampling_factors(sampling_factors, ndim)
         highres_shape = _shape_from_sampling_factors(tuple(observed.shape), factors)
@@ -627,13 +638,11 @@ def solve_pdhg_mlx(
                 "For sampling_factors, psf.shape must match the reconstructed "
                 f"high-resolution shape {highres_shape}; got {tuple(psf.shape)}"
             )
-        blur_op = IntegratedDetectorConvolver(
-            psf,
-            output_shape=tuple(observed.shape),
-            normalize=True,
-            icf_sigmas=icf_sigmas,
-            icf_spacings=icf_spacings,
-        )
+        # Build: observed = downsample(convolve(highres))
+        # For sampling_factors > 1: highres has more pixels, we downsample to observed
+        convolver = LinearFFTConvolver(psf, signal_shape=highres_shape, normalize=True)
+        downsampler = FractionalAreaDownsample(scale=factors)
+        blur_op = compose(downsampler, convolver)
     elif bin_factors is not None:
         factors = _normalize_bin_factors(bin_factors, ndim)
         highres_shape = tuple(psf.shape)
@@ -643,15 +652,14 @@ def solve_pdhg_mlx(
                 "For bin_factors, observed.shape must match psf.shape divided "
                 f"by bin_factors; expected {lowres_shape}, got {tuple(observed.shape)}"
             )
-        blur_op = IntegratedDetectorConvolver(
-            psf,
-            output_shape=lowres_shape,
-            normalize=True,
-            icf_sigmas=icf_sigmas,
-            icf_spacings=icf_spacings,
-        )
+        # Build: observed = bin(convolve(highres))
+        # For bin_factors > 1: highres has more pixels, we bin to observed
+        convolver = LinearFFTConvolver(psf, signal_shape=highres_shape, normalize=True)
+        binner = FractionalAreaDownsample(scale=factors)
+        blur_op = compose(binner, convolver)
     else:
-        blur_op = FFTConvolver(psf, normalize=True)
+        # No super-resolution: use LinearFFTConvolver on observed domain
+        blur_op = LinearFFTConvolver(psf, signal_shape=tuple(observed.shape), normalize=True)
         highres_shape = observed.shape
 
     # Create regularizer
@@ -939,12 +947,10 @@ def solve_pdhg_with_operator(
 ) -> MLXDeconvolutionResult:
     """PDHG solver accepting a pre-built linear operator.
 
-    Unlike ``solve_pdhg_mlx`` which builds an ``FFTConvolver`` from a PSF,
+    Unlike ``solve_pdhg_mlx`` which builds a blur operator from a PSF,
     this version accepts any object satisfying the :class:`LinearOperator`
     protocol (``forward``, ``adjoint``, ``operator_norm_sq``). Use this with
-    composed forward models (``Compose(FiniteDetector, IntegratedDetectorConvolver)``,
-    etc.) or non-convolutional operators such as ``MatrixOperator`` for
-    Fredholm integral equations.
+    composed forward models or non-convolutional operators such as ``MatrixOperator``.
 
     Minimizes (depending on loss_type):
         Poisson: sum(Ax + b - D*log(Ax + b)) + alpha * ||Lx||_{1 or 1,2}
@@ -957,7 +963,7 @@ def solve_pdhg_with_operator(
             ``operator_norm_sq``). For ``MatrixOperator`` with shape (m, n),
             ``observed`` should have shape (m,) and the solution will have
             shape (n,). For composed operators
-            (``Compose(FiniteDetector, FFTConvolver)``), ``observed`` and the
+            (``Compose(Crop, FFTConvolver)``), ``observed`` and the
             solution shape are inferred from ``observed.shape``.
         alpha: Regularization weight. Larger = smoother result.
         regularization: Type of regularization operator L:

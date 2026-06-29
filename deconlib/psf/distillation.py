@@ -13,8 +13,8 @@ Workflow
    b. Richardson-Lucy amplitude update — re-estimates each bead amplitude
       from the current PSF and all-bead model.
 
-All heavy FFT work runs on MLX via ``FFTConvolver`` and ``FiniteDetector``.
-``FiniteDetector.for_linear_convolution`` turns MLX's circular FFT into an
+All heavy FFT work runs on MLX via ``FFTConvolver`` and ``Pad``.
+The ``fast_padded_shape`` function with ``Pad`` turns MLX's circular FFT into an
 exact linear convolution, so there is no wrap-around artefact.
 
 The result is a unit-flux PSF in the FFT corner-origin convention, ready for
@@ -1153,20 +1153,23 @@ def distill_psf(
         total = float(image_pos_np.sum())
         init_amplitudes = np.full(len(positions), total / max(len(positions), 1), dtype=np.float64)
 
-    # --- Build FiniteDetector ---
+    # --- Build Pad for linear convolution ---
     import mlx.core as mx
     from deconlib.deconvolution.linops_mlx import (
         FFTConvolver,
-        FiniteDetector,
+        fast_padded_shape,
     )
+    from deconlib.deconvolution.core_operators import Pad
 
-    detector = FiniteDetector.for_linear_convolution(image_np.shape, psf_shape, min_pad=min_pad)
+    padded_shape = fast_padded_shape(image_np.shape, psf_shape, min_pad=min_pad)
+    padding = tuple((0, p - n) for p, n in zip(padded_shape, image_np.shape))
+    detector = Pad(padding)
     if verbose:
-        print(f"padded FFT shape: {detector.padded_shape}", flush=True)
+        print(f"padded FFT shape: {padded_shape}", flush=True)
 
     # Static MLX arrays (built once)
-    y_p = detector.adjoint(mx.array(image_pos_np + np.float32(nf)))
-    valid_p = detector.adjoint(mx.ones(image_np.shape, dtype=mx.float32))
+    y_p = detector.forward(mx.array(image_pos_np + np.float32(nf)))
+    valid_p = detector.forward(mx.ones(image_np.shape, dtype=mx.float32))
 
     # Unclamped residual data for the chi² diagnostic — sub-background pixels
     # carry real (negative) information about the read-noise floor that an
