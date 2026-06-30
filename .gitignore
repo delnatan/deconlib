@@ -1,3 +1,10 @@
+# Claude
+.claude/
+CLAUDE.md
+graphify-out/
+
+.gitignore
+
 # Python
 __pycache__/
 *.py[cod]
