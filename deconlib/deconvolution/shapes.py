@@ -27,14 +27,10 @@ __all__ = [
     "compute_padded_shape",
     "get_valid_slices",
     "visible_to_data_padding",
-    "DEFAULT_EXTRA_PADDING",
     "compute_convolution_output_shape",
 ]
 
-# Default extra padding at data-space for PSF tails
-# Conservative value: main peak of PSFs rarely gets larger than this
-# in most light microscopy experiments
-DEFAULT_EXTRA_PADDING: int = 10
+_DEFAULT_DETECTOR_PADDING: int = 10
 
 
 def compute_visible_shape(
@@ -106,33 +102,29 @@ def compute_padded_shape(
     signal_shape: Tuple[int, ...],
     kernel_shape: Tuple[int, ...],
     *,
-    extra_padding: Union[int, Tuple[int, ...]] = DEFAULT_EXTRA_PADDING,
     min_pad: Optional[Union[int, Tuple[Optional[int], ...]]] = None,
 ) -> Tuple[Tuple[int, ...], Tuple[Tuple[int, int], ...]]:
     """Compute padded shape and padding tuples for wrap-free linear convolution.
-    
-    For linear convolution (not circular), the minimum FFT size is N + M - 1
-    along each axis to avoid wrap-around artifacts. This function computes
-    the padded shape and explicit padding tuples.
-    
+
+    Pads each axis by M - 1 (kernel_dim - 1), which is the exact minimum for
+    linear convolution via circular FFT with no wrap-around artifacts.
+
     Args:
         signal_shape: Shape of the input signal.
         kernel_shape: Shape of the convolution kernel (PSF).
-        extra_padding: Additional padding beyond N + M - 1.
-            Can be int (same for all dims) or tuple (per-dimension).
-        min_pad: Minimum padding per axis before adding extra_padding.
-            - None: Use full N + M - 1 padding
-            - int: Same minimum padding for all axes
-            - tuple: Per-axis minimum padding (use None for full padding)
-    
+        min_pad: Override the M - 1 padding on specific axes. Useful when the
+            kernel is already confined along an axis (e.g. z in PSF distillation).
+            - None: Use M - 1 on every axis (default)
+            - int: Same override for all axes
+            - tuple: Per-axis override; use None to keep M - 1 on that axis
+
     Returns:
         Tuple of:
         - padded_shape: Total padded shape (signal + padding)
         - padding: Tuple of (before, after) pairs for each dimension
-    
+
     Examples:
-        >>> shape, padding = compute_padded_shape((100, 100), (31, 31), extra_padding=0)
-        >>> # Without extra padding: 100 + 30 = 130, symmetric: (15, 15)
+        >>> shape, padding = compute_padded_shape((100, 100), (31, 31))
         >>> shape
         (130, 130)
         >>> padding
@@ -141,19 +133,13 @@ def compute_padded_shape(
     signal_shape = tuple(int(s) for s in signal_shape)
     kernel_shape = tuple(int(s) for s in kernel_shape)
     ndim = len(signal_shape)
-    
+
     if len(kernel_shape) != ndim:
         raise ValueError(
             f"kernel_shape has {len(kernel_shape)} dimensions, "
             f"expected {ndim} to match signal_shape"
         )
-    
-    # Normalize extra_padding to per-dimension
-    if isinstance(extra_padding, int):
-        extra_padding_tuple = (extra_padding,) * ndim
-    else:
-        extra_padding_tuple = tuple(int(p) for p in extra_padding)
-    
+
     # Normalize min_pad to per-dimension
     if min_pad is None:
         min_pad_tuple = None
@@ -161,33 +147,24 @@ def compute_padded_shape(
         min_pad_tuple = (min_pad,) * ndim
     else:
         min_pad_tuple = tuple(p if p is not None else None for p in min_pad)
-    
-    # Compute padding for each dimension
+
     padding_list = []
     padded_shape_list = []
-    
+
     for i in range(ndim):
         signal_dim = signal_shape[i]
         kernel_dim = kernel_shape[i]
-        extra_pad = extra_padding_tuple[i]
-        
-        # Base padding for linear convolution: kernel_dim - 1
-        base_pad = kernel_dim - 1
-        
-        # Apply min_pad override
+
+        total_pad = kernel_dim - 1
         if min_pad_tuple is not None and min_pad_tuple[i] is not None:
-            base_pad = min_pad_tuple[i]
-        
-        # Total padding per axis
-        total_pad = base_pad + extra_pad
-        
-        # Symmetric padding: split as evenly as possible
+            total_pad = min_pad_tuple[i]
+
         pad_before = total_pad // 2
         pad_after = total_pad - pad_before
-        
+
         padding_list.append((pad_before, pad_after))
         padded_shape_list.append(signal_dim + total_pad)
-    
+
     return tuple(padded_shape_list), tuple(padding_list)
 
 
@@ -310,7 +287,7 @@ def compute_convolution_output_shape(
 def visible_to_data_padding(
     visible_shape: Tuple[int, ...],
     psf_shape: Tuple[int, ...],
-    extra_padding: Union[int, Tuple[int, ...]] = DEFAULT_EXTRA_PADDING,
+    extra_padding: Union[int, Tuple[int, ...]] = _DEFAULT_DETECTOR_PADDING,
 ) -> Tuple[Tuple[int, int], ...]:
     """Compute detector padding for visible-to-data transformation.
     

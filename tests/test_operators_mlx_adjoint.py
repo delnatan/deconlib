@@ -156,22 +156,16 @@ def test_d1_cen_adjoint():
 
 
 def test_grad_2d_adjoint():
-    """Test Gradient2D class and grad_2d / grad_2d_adj functions."""
-    from deconlib.deconvolution.linops_mlx import (
-        Gradient2D,
-        grad_2d,
-        grad_2d_adj,
-    )
+    """Test Gradient2D adjoint correctness."""
+    from deconlib.deconvolution.linops_mlx import Gradient2D
 
     print("\n" + "=" * 60)
-    print("Testing Gradient2D (class and functions)")
+    print("Testing Gradient2D")
     print("=" * 60)
 
-    # Input shape (Y, X), output shape (2, Y, X)
     input_shape = (16, 20)
     output_shape = (2, 16, 20)
 
-    # Test class-based interface
     D = Gradient2D()
     print(f"  operator_norm_sq = {D.operator_norm_sq}")
 
@@ -189,41 +183,22 @@ def test_grad_2d_adjoint():
 
     passed = err < RTOL
     status = "PASS" if passed else "FAIL"
-    print(
-        f"  [{status}] Class: <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}"
-    )
+    print(f"  [{status}] <Dx,y>={lhs:.8f}, <x,D*y>={rhs:.8f}, err={err:.2e}")
 
-    # Verify shapes
     shape_ok = Lx.shape == output_shape and Lstar_y.shape == input_shape
     if not shape_ok:
         print("  [FAIL] Shape mismatch!")
         passed = False
 
-    # Test function interface matches class
-    Lx_func = grad_2d(x)
-    Lstar_y_func = grad_2d_adj(y)
-    func_match = (
-        mx.allclose(Lx, Lx_func).item()
-        and mx.allclose(Lstar_y, Lstar_y_func).item()
-    )
-    print(
-        f"  [{'PASS' if func_match else 'FAIL'}] Function interface matches class"
-    )
-    passed = passed and func_match
-
     return passed
 
 
 def test_hessian_2d_adjoint():
-    """Test Hessian2D class and hessian_2d / hessian_2d_adj functions."""
-    from deconlib.deconvolution.linops_mlx import (
-        Hessian2D,
-        hessian_2d,
-        hessian_2d_adj,
-    )
+    """Test Hessian2D adjoint correctness."""
+    from deconlib.deconvolution.linops_mlx import Hessian2D
 
     print("\n" + "=" * 60)
-    print("Testing Hessian2D (class and functions)")
+    print("Testing Hessian2D")
     print("=" * 60)
 
     # Input shape (Y, X), output shape (3, Y, X)
@@ -261,15 +236,11 @@ def test_hessian_2d_adjoint():
 
 
 def test_grad_3d_adjoint():
-    """Test Gradient3D class and grad_3d / grad_3d_adj functions."""
-    from deconlib.deconvolution.linops_mlx import (
-        Gradient3D,
-        grad_3d,
-        grad_3d_adj,
-    )
+    """Test Gradient3D adjoint correctness."""
+    from deconlib.deconvolution.linops_mlx import Gradient3D
 
     print("\n" + "=" * 60)
-    print("Testing Gradient3D (class and functions)")
+    print("Testing Gradient3D")
     print("=" * 60)
 
     # Input shape (Z, Y, X), output shape (3, Z, Y, X)
@@ -315,15 +286,11 @@ def test_grad_3d_adjoint():
 
 
 def test_hessian_3d_adjoint():
-    """Test Hessian3D class and hessian_3d / hessian_3d_adj functions."""
-    from deconlib.deconvolution.linops_mlx import (
-        Hessian3D,
-        hessian_3d,
-        hessian_3d_adj,
-    )
+    """Test Hessian3D adjoint correctness."""
+    from deconlib.deconvolution.linops_mlx import Hessian3D
 
     print("\n" + "=" * 60)
-    print("Testing Hessian3D (class and functions)")
+    print("Testing Hessian3D")
     print("=" * 60)
 
     # Input shape (Z, Y, X), output shape (6, Z, Y, X)
@@ -568,10 +535,10 @@ def main():
     results["d1_fwd/d1_fwd_adj"] = test_d1_fwd_adjoint()
     results["d2 self-adjoint"] = test_d2_self_adjoint()
     results["d1_cen/d1_cen_adj"] = test_d1_cen_adjoint()
-    results["grad_2d/grad_2d_adj"] = test_grad_2d_adjoint()
-    results["hessian_2d/hessian_2d_adj"] = test_hessian_2d_adjoint()
-    results["grad_3d/grad_3d_adj"] = test_grad_3d_adjoint()
-    results["hessian_3d/hessian_3d_adj"] = test_hessian_3d_adjoint()
+    results["Gradient2D"] = test_grad_2d_adjoint()
+    results["Hessian2D"] = test_hessian_2d_adjoint()
+    results["Gradient3D"] = test_grad_3d_adjoint()
+    results["Hessian3D"] = test_hessian_3d_adjoint()
     results["downsample/upsample"] = test_downsample_upsample_adjoint()
     results["FFTConvolver"] = test_fft_convolver_adjoint()
     results["FiniteDetector"] = test_finite_detector_adjoint()

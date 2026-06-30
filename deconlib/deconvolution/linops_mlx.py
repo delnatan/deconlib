@@ -241,88 +241,6 @@ class Hessian3D:
 
 
 # -----------------------------------------------------------------------------
-# Function wrappers for backward compatibility
-# -----------------------------------------------------------------------------
-
-
-def grad_2d(f: mx.array) -> mx.array:
-    """2D gradient. See Gradient2D for details."""
-    return mx.stack([d1_fwd(f, axis=0), d1_fwd(f, axis=1)], axis=0)
-
-
-def grad_2d_adj(g: mx.array) -> mx.array:
-    """Adjoint of 2D gradient."""
-    return d1_fwd_adj(g[0], axis=0) + d1_fwd_adj(g[1], axis=1)
-
-
-def grad_3d(f: mx.array, r: float = 1.0) -> mx.array:
-    """3D gradient with anisotropic spacing. See Gradient3D for details."""
-    return mx.stack([
-        r * d1_fwd(f, axis=0),
-        d1_fwd(f, axis=1),
-        d1_fwd(f, axis=2),
-    ], axis=0)
-
-
-def grad_3d_adj(g: mx.array, r: float = 1.0) -> mx.array:
-    """Adjoint of 3D gradient."""
-    adj_z = d1_fwd_adj(r * g[0], axis=0)
-    adj_y = d1_fwd_adj(g[1], axis=1)
-    adj_x = d1_fwd_adj(g[2], axis=2)
-    return adj_z + adj_y + adj_x
-
-
-def hessian_2d(f: mx.array) -> mx.array:
-    """2D Hessian. See Hessian2D for details."""
-    H_yy = d2(f, axis=0)
-    H_xx = d2(f, axis=1)
-    H_xy = d1_cen(d1_cen(f, axis=0), axis=1)
-    return mx.stack([H_yy, H_xx, SQRT2 * H_xy], axis=0)
-
-
-def hessian_2d_adj(H: mx.array) -> mx.array:
-    """Adjoint of 2D Hessian."""
-    adj_yy = d2_adj(H[0], axis=0)
-    adj_xx = d2_adj(H[1], axis=1)
-    adj_xy = d1_cen_adj(d1_cen_adj(H[2], axis=0), axis=1)
-    return adj_yy + adj_xx + SQRT2 * adj_xy
-
-
-def hessian_3d(f: mx.array, r: float = 1.0) -> mx.array:
-    """3D Hessian with anisotropic spacing. See Hessian3D for details."""
-    H_zz = d2(f, axis=0)
-    H_yy = d2(f, axis=1)
-    H_xx = d2(f, axis=2)
-
-    Dz = d1_cen(f, axis=0)
-    Dy = d1_cen(f, axis=1)
-    H_xy = d1_cen(Dy, axis=2)
-    H_xz = d1_cen(Dz, axis=2)
-    H_yz = d1_cen(Dz, axis=1)
-
-    weights = mx.array([r**2, 1.0, 1.0, r * SQRT2, r * SQRT2, SQRT2])
-    weights = weights.reshape(6, 1, 1, 1)
-    H_stack = mx.stack([H_zz, H_yy, H_xx, H_yz, H_xz, H_xy], axis=0)
-    return H_stack * weights
-
-
-def hessian_3d_adj(H: mx.array, r: float = 1.0) -> mx.array:
-    """Adjoint of 3D Hessian."""
-    weights = mx.array([r**2, 1.0, 1.0, r * SQRT2, r * SQRT2, SQRT2])
-    weights = weights.reshape(6, 1, 1, 1)
-    H_w = H * weights
-
-    adj_zz = d2_adj(H_w[0], axis=0)
-    adj_yy = d2_adj(H_w[1], axis=1)
-    adj_xx = d2_adj(H_w[2], axis=2)
-    adj_yz = d1_cen_adj(d1_cen_adj(H_w[3], axis=1), axis=0)
-    adj_xz = d1_cen_adj(d1_cen_adj(H_w[4], axis=2), axis=0)
-    adj_xy = d1_cen_adj(d1_cen_adj(H_w[5], axis=2), axis=1)
-
-    return adj_zz + adj_yy + adj_xx + adj_yz + adj_xz + adj_xy
-
-
-# -----------------------------------------------------------------------------
 # FFT convolution operators
 # -----------------------------------------------------------------------------
 
@@ -741,36 +659,6 @@ class CauchyICF:
         return self.forward(x)
 
 
-def _fractional_overlap_matrix(in_size: int, out_size: int) -> np.ndarray:
-    """Positive pixel-overlap integration matrix from fine cells to detector bins."""
-    scale = in_size / out_size
-    weights = np.zeros((out_size, in_size), dtype=np.float32)
-    for j in range(out_size):
-        left = j * scale
-        right = (j + 1) * scale
-        k0 = int(np.floor(left))
-        k1 = int(np.ceil(right))
-        for k in range(max(0, k0), min(in_size, k1)):
-            overlap = min(right, k + 1.0) - max(left, k)
-            if overlap > 0:
-                weights[j, k] = overlap
-    return weights
-
-
-def _apply_axis_matrix(x: mx.array, matrix: mx.array, axis: int) -> mx.array:
-    """Apply a dense matrix along one axis of an array."""
-    ndim = x.ndim
-    axis = axis % ndim
-    perm = (axis,) + tuple(i for i in range(ndim) if i != axis)
-    inv_perm = tuple(np.argsort(perm))
-
-    x_perm = mx.transpose(x, perm)
-    in_size = x_perm.shape[0]
-    rest_shape = x_perm.shape[1:]
-    x_flat = x_perm.reshape((in_size, -1))
-    y_flat = matrix @ x_flat
-    y_perm = y_flat.reshape((matrix.shape[0],) + rest_shape)
-    return mx.transpose(y_perm, inv_perm)
 
 
 

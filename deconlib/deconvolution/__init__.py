@@ -96,7 +96,13 @@ from .shapes import (
     get_valid_slices,
     compute_convolution_output_shape,
     visible_to_data_padding,
-    DEFAULT_EXTRA_PADDING,
+)
+from .tile_processing import (
+    TileSpec,
+    TileOperator,
+    compute_tiles,
+    make_tile_operator,
+    process_tiles,
 )
 
 __all__ = [
@@ -117,7 +123,6 @@ __all__ = [
     "get_valid_slices",
     "compute_convolution_output_shape",
     "visible_to_data_padding",
-    "DEFAULT_EXTRA_PADDING",
     # MLX Linear Operators
     "FFTConvolver",
     "LinearFFTConvolver",
@@ -146,4 +151,10 @@ __all__ = [
     "LinearConvolve",
     "FractionalAreaDownsample",
     "FractionalAreaUpsample",
+    # Tile processing
+    "TileSpec",
+    "TileOperator",
+    "compute_tiles",
+    "make_tile_operator",
+    "process_tiles",
 ]

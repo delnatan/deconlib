@@ -9,7 +9,6 @@ from deconlib.deconvolution.shapes import (
     get_valid_slices,
     compute_convolution_output_shape,
     visible_to_data_padding,
-    DEFAULT_EXTRA_PADDING,
 )
 
 
@@ -53,56 +52,31 @@ class TestComputePaddedShape:
     """Tests for compute_padded_shape helper."""
 
     def test_basic_linear_convolution(self):
-        """Minimum padding for linear convolution is M - 1."""
-        # Signal (100, 100), kernel (31, 31)
-        # Min padding: 30 per dim, total padded: 130 per dim
-        # With default extra_padding=10: 30 + 10 = 40 per dim
-        # Symmetric: 20 before, 20 after → 100 + 40 = 140 per dim
-        shape, padding = compute_padded_shape(
-            (100, 100), (31, 31), extra_padding=0
-        )
-        # Without extra padding: 100 + 30 = 130
+        """Padding is exactly M - 1 per axis."""
+        shape, padding = compute_padded_shape((100, 100), (31, 31))
+        # 100 + 30 = 130
         assert shape == (130, 130)
         assert padding == ((15, 15), (15, 15))
 
-    def test_with_extra_padding(self):
-        """Extra padding is added to linear convolution padding."""
-        shape, padding = compute_padded_shape(
-            (100, 100), (31, 31), extra_padding=10
-        )
-        # 100 + (30 + 10) = 140
-        assert shape == (140, 140)
-        # (30 + 10) // 2 = 20 before, 20 after
-        assert padding == ((20, 20), (20, 20))
-
-    def test_per_dimension_extra_padding(self):
-        """Per-dimension extra padding."""
-        shape, padding = compute_padded_shape(
-            (100, 100), (31, 31), extra_padding=(5, 15)
-        )
-        # Dim 0: 100 + (30 + 5) = 135
-        # Dim 1: 100 + (30 + 15) = 145
-        assert shape == (135, 145)
-        assert padding == ((17, 18), (22, 23))
+    def test_asymmetric_kernel(self):
+        """Different kernel sizes per axis."""
+        shape, padding = compute_padded_shape((100, 100), (31, 11))
+        assert shape == (130, 110)
+        assert padding == ((15, 15), (5, 5))
 
     def test_min_pad_override(self):
-        """min_pad can override linear convolution padding."""
-        # With min_pad=0, we use 0 base padding + extra_padding
-        shape, padding = compute_padded_shape(
-            (100, 100), (31, 31), extra_padding=10, min_pad=0
-        )
-        # min_pad=0 means 0 base padding, + 10 extra = 10 total per side
-        # But kernel (31) must fit, so effective_pad = max(10, 31-100) = 10
-        assert shape == (110, 110)
-        assert padding == ((5, 5), (5, 5))
+        """min_pad=0 suppresses padding on all axes."""
+        shape, padding = compute_padded_shape((100, 100), (31, 31), min_pad=0)
+        assert shape == (100, 100)
+        assert padding == ((0, 0), (0, 0))
 
     def test_min_pad_per_axis(self):
-        """Per-axis min_pad."""
+        """Per-axis min_pad: suppress z, keep natural padding on y/x."""
         shape, padding = compute_padded_shape(
-            (100, 100), (31, 31), extra_padding=0, min_pad=(0, None)
+            (100, 100), (31, 31), min_pad=(0, None)
         )
-        # Dim 0: min_pad=0, so 0 base padding, kernel fits (31 < 100), so 100 + 0 = 100
-        # Dim 1: min_pad=None, so 30 base padding, 100 + 30 = 130
+        # Dim 0: min_pad=0 → no padding
+        # Dim 1: natural M-1 = 30
         assert shape == (100, 130)
         assert padding == ((0, 0), (15, 15))
 
@@ -176,9 +150,3 @@ class TestVisibleToDataPadding:
         assert padding == ((14, 14), (14, 14))
 
 
-class TestDefaultExtraPadding:
-    """Test that DEFAULT_EXTRA_PADDING is set correctly."""
-
-    def test_default_value(self):
-        """Default extra padding is 10."""
-        assert DEFAULT_EXTRA_PADDING == 10

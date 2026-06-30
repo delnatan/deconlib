@@ -1,8 +1,17 @@
-"""Super-resolution deconvolution with explicit operator composition.
+"""3D widefield deconvolution with super-resolution reconstruction.
 
-Data: (41, 100, 100) with zoom (1.0, 1.25, 1.25) and pixel spacing (0.196, 0.1043, 0.1043)
-PSF: widefield, lambda=0.6um, NA=1.4, ni=1.515, ns=1.45
-Forward model: padded visible -> convolve -> downsample -> crop -> data
+Three-space model
+-----------------
+  data    (Nz, Ny, Nx)  – camera pixels at data_pixel_spacing
+  visible (Vz, Vy, Vx)  – reconstruction space at visible_pixel_spacing
+  padded  (Pz, Py, Px)  – convolution domain (visible + PSF support margins)
+
+Forward operator:  padded → convolve → downsample → crop → data
+
+Zoom factors > 1 give finer visible pixels than data pixels ("super-res" mode).
+This is useful for critically-sampled data where deconvolution artifacts arise
+from working exactly at the Nyquist limit. The PSF is computed at visible-space
+pixel spacing, so it remains well-resolved even when the data is not.
 """
 
 from pathlib import Path
@@ -10,8 +19,14 @@ import mlx.core as mx
 import numpy as np
 from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
-    compose, LinearFFTConvolver, Crop, FractionalAreaDownsample,
-    richardson_lucy_with_operator
+    compose,
+    Crop,
+    FractionalAreaDownsample,
+    LinearFFTConvolver,
+    richardson_lucy_with_operator,
+    compute_visible_shape,
+    compute_padded_shape,
+    get_valid_slices,
 )
 from pyvistra.io import load_image, save_imaris, normalize_to_5d
 
@@ -21,22 +36,26 @@ from pyvistra.io import load_image, save_imaris, normalize_to_5d
 datapath = Path("/Users/delnatan/Projects/Deconvolution/RMM_ASM_sample/")
 image_file = "inner_box_100x100.ims"
 
-# Deconvolution parameters
-zoom_factors = (1.0, 1.25, 1.25)
-num_iter = 100
-background_data = 100.0  # Background intensity in data-space
+# Reconstruction
+zoom_factors = (1.0, 1.26, 1.26)  # visible / data pixel ratio (>1 = super-res)
+num_iter = 150
+background_data = 100.0            # background counts per camera pixel (data space)
 
-# PSF parameters
-psf_params = {
-    "wavelength": 0.6,
-    "na": 1.4,
-    "ni": 1.515,
-    "ns": 1.45,
-}
+# PSF optics
+psf_wavelength = 0.6               # μm
+psf_na = 1.4
+psf_ni = 1.515                     # immersion medium refractive index
+psf_ns = 1.45                      # sample medium refractive index
+
+# PSF support in data pixels — independent of pixel spacing, so the physical
+# extent scales correctly with the metadata. Converted to visible-space pixels
+# via: n_visible = halfrange_px * data_spacing / visible_spacing = halfrange_px * zoom.
+psf_axial_halfrange_px = 10        # data z-pixels on each side of focus
+psf_lateral_halfrange_px = 25      # data xy-pixels on each side of axis
 
 # Output
 output_dir = Path("output")
-output_file = "restored_DE260626.ims"
+output_file = "restored_DE260626_v2.ims"
 
 # =============================================================================
 # LOAD DATA
@@ -45,151 +64,94 @@ data, meta = load_image(str(datapath / image_file))
 Nt, Nz, Nch, Ny, Nx = data.shape
 
 mxdata = mx.array(data[0, :, 0, :, :].astype(np.float32))
-data_pixel_spacing = meta["scale"]
+data_shape = (Nz, Ny, Nx)
+data_pixel_spacing = meta["scale"]  # (dz, dy, dx) in μm
 
 # =============================================================================
-# DERIVED QUANTITIES
+# DOMAIN SETUP
 # =============================================================================
-# Spacings
-visible_pixel_spacing = tuple(
-    data_p / zoom for data_p, zoom in zip(data_pixel_spacing, zoom_factors)
-)
+# Visible-space pixel spacing (finer than data by the zoom factors)
+visible_pixel_spacing = tuple(dp / z for dp, z in zip(data_pixel_spacing, zoom_factors))
 
-# Shapes
-base_visible_shape = tuple(
-    int(round(d * z)) for d, z in zip((Nz, Ny, Nx), zoom_factors)
-)
+# Visible-space shape: data_dim × zoom (more pixels in each zoomed dimension)
+# bin_factor = 1/zoom: each visible pixel is 1/zoom the size of a data pixel
+bin_factors = tuple(1.0 / z for z in zoom_factors)
+visible_shape = compute_visible_shape(data_shape, bin_factor=bin_factors)
 
-# PSF
-zvec = fft_coords(base_visible_shape[0], spacing=visible_pixel_spacing[0])
+# PSF: computed at visible-space spacing over a limited axial range.
+# Odd number of planes so that DC (focus plane) sits at the center / corner.
+psf_nz  = 2 * int(round(psf_axial_halfrange_px   * data_pixel_spacing[0] / visible_pixel_spacing[0])) + 1
+psf_nxy = 2 * int(round(psf_lateral_halfrange_px * data_pixel_spacing[1] / visible_pixel_spacing[1])) + 1
+psf_z = fft_coords(psf_nz, spacing=visible_pixel_spacing[0])
 psf = compute_widefield_psf(
-    z=zvec,
-    shape=base_visible_shape[1:],
+    z=psf_z,
+    shape=(psf_nxy, psf_nxy),
     spacing=visible_pixel_spacing[1:],
+    wavelength=psf_wavelength,
+    na=psf_na,
+    ni=psf_ni,
+    ns=psf_ns,
     normalize=True,
-    **psf_params
 )
 
-# Padding
-psf_padding = tuple((psf_n // 2, psf_n // 2) for psf_n in psf.shape)
-padded_visible_shape = tuple(
-    base_v + pb + pa for base_v, (pb, pa) in zip(base_visible_shape, psf_padding)
-)
+# Convolution domain: visible + (psf_dim - 1) per axis for wrap-free FFT.
+padded_shape, padding = compute_padded_shape(visible_shape, psf.shape)
 
-# Forward model shapes
+# Valid slices: region in padded_shape corresponding to the measured detector
+valid_slices = get_valid_slices(padded_shape, visible_shape, padding)
+
+# Shape after downsampling the padded domain to data-space pixel density
 downsampled_shape = tuple(
-    max(1, int(round(pv / zoom))) for pv, zoom in zip(padded_visible_shape, zoom_factors)
-)
-
-# Background translation to visible-space
-# For uniform background: visible_bg = data_bg * (N_data / N_visible)
-n_data = np.prod((Nz, Ny, Nx))
-n_visible = np.prod(padded_visible_shape)
-background_visible = background_data * (n_data / n_visible)
-
-# Valid region for analysis
-valid_slices = tuple(
-    slice(pb, pb + vs) for vs, (pb, _) in zip(base_visible_shape, psf_padding)
+    int(round(p / z)) for p, z in zip(padded_shape, zoom_factors)
 )
 
 # =============================================================================
-# BUILD FORWARD OPERATOR
+# FORWARD OPERATOR
 # =============================================================================
-convolver = LinearFFTConvolver(psf, signal_shape=padded_visible_shape, normalize=True)
-downsample = FractionalAreaDownsample(scale=zoom_factors)
-detector = Crop(downsampled_shape, (Nz, Ny, Nx))
-operator = compose(detector, downsample, convolver)
+# padded_shape → [convolve] → [downsample] → [crop] → data_shape
+convolver = LinearFFTConvolver(psf, signal_shape=padded_shape, normalize=True)
+downsampler = FractionalAreaDownsample(scale=zoom_factors, in_shape=padded_shape)
+detector = Crop(downsampled_shape, data_shape)
+operator = compose(detector, downsampler, convolver)
 
 # =============================================================================
-# EXECUTE
+# INITIALIZATION
 # =============================================================================
-# Use the translated background for RL regularization
-background = max(0.0, background_visible)
+# FractionalAreaDownsample integrates flux: a visible voxel with value c
+# contributes c × zoom_z × zoom_y × zoom_x to a camera pixel. To initialize
+# the reconstruction such that the forward model predicts the background level,
+# each visible voxel should start at background_data / prod(zoom_factors).
+background_visible = background_data / np.prod(zoom_factors)
+initial = mx.full(padded_shape, float(background_visible), dtype=mxdata.dtype)
 
-# Use background-informed initialization (overrides energy-preserving)
-initial = mx.full(padded_visible_shape, background_visible, dtype=mxdata.dtype)
-
+# =============================================================================
+# SOLVE
+# =============================================================================
 rl_result = richardson_lucy_with_operator(
     observed=mxdata,
     blur_op=operator,
     num_iter=num_iter,
-    background=background,
+    background=background_data,  # data-space background counts per camera pixel
     init=initial,
     eval_interval=5,
     verbose=True,
 )
 
-restored = np.asarray(rl_result.restored, dtype=np.float32)
-
 # =============================================================================
-# DIAGNOSTICS
+# EXTRACT VALID REGION AND SAVE
 # =============================================================================
-print("=" * 70)
-print("PARAMETERS")
-print("=" * 70)
-print(f"Data shape: {mxdata.shape}")
-print(f"Data pixel spacing: {data_pixel_spacing}")
-print(f"Visible pixel spacing: {visible_pixel_spacing}")
-print(f"Zoom factors: {zoom_factors}")
+restored = np.asarray(rl_result.restored[valid_slices], dtype=np.float32)
 
-print("\n" + "=" * 70)
-print("DERIVED QUANTITIES")
-print("=" * 70)
-print(f"Base visible shape: {base_visible_shape}")
-print(f"PSF shape: {psf.shape}, sum: {np.sum(psf):.6f}")
-print(f"PSF padding: {psf_padding}")
-print(f"Padded visible shape: {padded_visible_shape}")
-print(f"Downsampled shape: {downsampled_shape}")
-
-print("\n" + "=" * 70)
-print("ENERGY")
-print("=" * 70)
-data_total = float(np.sum(np.array(mxdata)))
-print(f"Data total: {data_total:.2f}")
-print(f"Background (data-space): {background_data:.2f}")
-print(f"Background (visible-space): {background_visible:.6f}")
-print(f"N_data / N_visible: {n_data / n_visible:.6f}")
-print(f"Initial sum: {background_visible * n_visible:.2f}")
-
-restored_total = float(np.sum(restored))
-print(f"Restored total: {restored_total:.2f}")
-print(f"Energy ratio (restored/data): {restored_total / data_total:.4f}")
-
-print("\n" + "=" * 70)
-print("VALID REGION")
-print("=" * 70)
-valid_region = restored[valid_slices]
-print(f"Shape: {valid_region.shape} (expected: {base_visible_shape})")
-print(f"Sum: {np.sum(valid_region):.2f}")
-print(f"Mean: {np.mean(valid_region):.6f}")
-
-if valid_region.ndim >= 3:
-    edge_region = valid_region[:2, :, :]
-    center_idx = valid_region.shape[0] // 2
-    center_region = valid_region[center_idx - 5:center_idx + 5, :, :]
-    edge_center_ratio = np.mean(edge_region) / np.mean(center_region)
-    print(f"Edge/center ratio: {edge_center_ratio:.4f}")
-    if abs(edge_center_ratio - 1.0) > 0.3:
-        print("WARNING: Significant edge artifacts detected!")
-
-print("\n" + "=" * 70)
-print("SAVE")
-print("=" * 70)
 output_dir.mkdir(parents=True, exist_ok=True)
-restored_output_path = output_dir / output_file
-
-# Convert to 5D and save using pyvistra directly
-restored_5d = normalize_to_5d(restored, dims='zyx')
+restored_5d = normalize_to_5d(restored, dims="zyx")
 metadata = {
-    'scale': visible_pixel_spacing,
-    'channels': [{'name': 'Deconvolved (visible-space, with padding)'}],
+    "scale": visible_pixel_spacing,
+    "channels": [{"name": "Deconvolved"}],
 }
 save_imaris(
-    str(restored_output_path),
+    str(output_dir / output_file),
     restored_5d,
     metadata=metadata,
     resolution_levels=True,
 )
-print(f"Saved: {restored_output_path}")
-print("Note: Result is in visible-space with padding preserved.")
-
+print(f"Saved: {output_dir / output_file}")

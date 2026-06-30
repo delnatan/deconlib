@@ -193,16 +193,32 @@ def richardson_lucy_with_operator(
     active_support = sensitivity_raw > sensitivity_floor
     sensitivity = mx.where(active_support, sensitivity_raw, 1.0)
     x = mx.where(active_support, x, 0.0)
+    # Evaluate constants so they are embedded as literals when the step is compiled.
+    mx.eval(sensitivity, active_support, x)
     loss_history = []
 
-    for k in range(num_iter):
-        model = blur_op.forward(x) + background
-        ratio = observed / mx.maximum(model, eps)
+    # Compile the inner loop body. MLX traces through blur_op.forward/adjoint,
+    # capturing operator internals (OTF, weight matrices) as constants in the graph.
+    # Subsequent calls replay the compiled graph without Python overhead per iteration.
+    # eval() every iteration keeps the graph size bounded — for 3D FFT chains,
+    # each step is large enough that skipping eval accumulates significant memory.
+    _bg = float(background)
+    _eps = eps
+
+    def _rl_step(x: mx.array) -> mx.array:
+        model = blur_op.forward(x) + _bg
+        ratio = observed / mx.maximum(model, _eps)
         correction = mx.where(active_support, blur_op.adjoint(ratio) / sensitivity, 0.0)
-        x = mx.maximum(x * correction, eps)
+        return mx.maximum(x * correction, _eps)
+
+    rl_step = mx.compile(_rl_step)
+
+    for k in range(num_iter):
+        x = rl_step(x)
+        mx.eval(x)  # flush graph every iteration to bound memory
 
         if k % eval_interval == 0 or k == num_iter - 1:
-            mx.eval(x)
+            model = blur_op.forward(x) + background
             loss = poisson_i_divergence(observed, model)
             loss_history.append(loss)
             if verbose:
