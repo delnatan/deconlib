@@ -18,8 +18,8 @@ The deconlib library provides **minimal, clearly composed linear operators** tha
 - `Crop(original_shape, target_shape)` - Center-cropping (forward: crop, adjoint: pad)
 
 ### Convolution
-- `FFTConvolve(kernel)` - Circular FFT-based convolution
 - `LinearFFTConvolver(kernel, signal_shape)` - Linear (wrap-free) convolution with automatic FFT padding
+- `FFTConvolver(kernel)` - Circular FFT-based convolution (rarely used directly; `LinearFFTConvolver` composes this internally)
 
 ### Resampling
 - `FractionalAreaDownsample(scale)` - Fractional-area downsampling (forward: down, adjoint: up)
@@ -36,6 +36,23 @@ The deconlib library provides **minimal, clearly composed linear operators** tha
 - `Compose(outer, inner)` - Compose two operators
 - `as_numpy_op(operator)` - Convert to NumPy callables for external solvers
 
+### Solvers
+- `richardson_lucy_with_operator(observed, blur_op, num_iter, ...)` - Multiplicative RL for Poisson data
+- `solve_pdhg_mlx` / `solve_pdhg_with_operator` - Adaptive PDHG with explicit regularization
+
+## How Linear Convolution Works
+
+FFT convolution is naturally *circular* — it wraps signal that would fall off
+one edge back onto the opposite edge. A real optical system doesn't do this,
+so `LinearFFTConvolver` fakes the *linear* (wrap-free) result: it zero-pads
+the signal to a canvas at least `N + M - 1` samples wide (`N` = signal,
+`M` = kernel), circularly convolves on that larger canvas — where the wrapped
+part and the true part no longer overlap — and crops back down to `N`. This
+is why every recipe below pads the reconstruction domain by roughly half the
+PSF size before convolving, and crops back afterward. See the
+`deconlib.deconvolution` module docstring or `LinearFFTConvolver`'s own
+docstring for the full picture with a worked diagram.
+
 ---
 
 ## Recipe 1: Conventional Deconvolution (Same Pixel Size)
@@ -45,7 +62,9 @@ The deconlib library provides **minimal, clearly composed linear operators** tha
 **Forward Model:** `visible -> PSF convolution -> crop to detector -> data`
 
 ```python
-from deconlib.deconvolution import compose, LinearFFTConvolver, Crop
+from deconlib.deconvolution import (
+    compose, LinearFFTConvolver, Crop, richardson_lucy_with_operator
+)
 import mlx.core as mx
 import numpy as np
 
@@ -75,31 +94,15 @@ operator = compose(detector, convolver)
 # - operator.adjoint: data_shape -> padded_visible_shape
 
 # Use with solver
-from deconlib.solvers import richardson_lucy
-result = richardson_lucy(
+result = richardson_lucy_with_operator(
     observed=data,
-    operator=operator,
+    blur_op=operator,
     num_iter=50,
     background=0.0
 )
 
 # Result shape = padded_visible_shape
 # Valid region (without padding): extract center data_shape region
-```
-
-**Alternative using explicit Pad/Crop:**
-```python
-from deconlib.deconvolution import Pad, Crop, FFTConvolve, compose
-
-# Manual N+M-1 padding
-conv_padding = tuple((k-1, 0) for k in psf.shape)  # Asymmetric: pad after only
-padded_shape = tuple(s + k - 1 for s, k in zip(data_shape, psf.shape))
-
-# Build manually: Crop(FFTConvolve(Pad(x)))
-pad_op = Pad(conv_padding)
-conv_op = FFTConvolve(psf)
-crop_op = Crop(padded_shape, data_shape)
-operator = compose(crop_op, conv_op, pad_op)
 ```
 
 ---
@@ -112,8 +115,8 @@ operator = compose(crop_op, conv_op, pad_op)
 
 ```python
 from deconlib.deconvolution import (
-    compose, LinearFFTConvolver, Crop, 
-    FractionalAreaDownsample
+    compose, LinearFFTConvolver, Crop,
+    FractionalAreaDownsample, richardson_lucy_with_operator
 )
 import mlx.core as mx
 import numpy as np
@@ -149,7 +152,7 @@ detector = Crop(data_shape, data_shape)
 operator = compose(detector, downsample, convolver)
 
 # Use with solver
-result = richardson_lucy(observed=data, operator=operator, num_iter=50)
+result = richardson_lucy_with_operator(observed=data, blur_op=operator, num_iter=50)
 ```
 
 **Simplified version (if downsampling produces correct shape):**
@@ -202,7 +205,7 @@ operator = compose(detector, upsample, convolver)
 
 ```python
 from deconlib.deconvolution import (
-    compose, LinearFFTConvolver, Crop, GaussianICF
+    compose, LinearFFTConvolver, Crop, GaussianICF, richardson_lucy_with_operator
 )
 
 # Parameters
@@ -234,7 +237,7 @@ operator = compose(detector, convolver, icf)
 
 # For Richardson-Lucy, the forward model is operator
 # The hidden space is padded_visible_shape
-result = richardson_lucy(observed=data, operator=operator, num_iter=50)
+result = richardson_lucy_with_operator(observed=data, blur_op=operator, num_iter=50)
 ```
 
 ---
@@ -293,9 +296,9 @@ init_value = data_total / padded_npixels
 initial = mx.full(padded_visible_shape, init_value, dtype=data.dtype)
 
 # Run RL with initialization
-result = richardson_lucy(
+result = richardson_lucy_with_operator(
     observed=mx.array(data),
-    operator=operator,
+    blur_op=operator,
     num_iter=100,
     background=max(0.0, np.mean(data) * 0.01),
     init=initial,

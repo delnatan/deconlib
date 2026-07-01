@@ -25,9 +25,6 @@ try:
         d1_fwd_adj,
         d2,
         d2_adj,
-        downsample,
-        upsample,
-        _normalize_factors,
     )
 except ImportError:
     from linops_core_mlx import (
@@ -38,9 +35,6 @@ except ImportError:
         d1_fwd_adj,
         d2,
         d2_adj,
-        downsample,
-        upsample,
-        _normalize_factors,
     )
 
 
@@ -295,13 +289,36 @@ class FFTConvolver:
 
 
 class LinearFFTConvolver:
-    """Wrap-free FFT convolution on a same-shaped signal domain.
+    """Wrap-free (linear) convolution, simulated via zero-padded circular FFT.
 
-    The input signal is zero-padded to an FFT canvas at least ``N + M - 1``
-    along every axis, the compact corner-origin PSF is embedded into that
-    canvas with its negative offsets at the high end, and the result is cropped
-    back to ``signal_shape``. This makes the FFT implementation match linear
-    zero-boundary convolution instead of circular convolution.
+    FFT convolution is inherently *circular*: multiplying two spectra and
+    inverting wraps whatever would fall off one edge back onto the opposite
+    edge. A real optical system doesn't do this — light that blurs past the
+    edge of a finite object is simply gone. To get the *linear* convolution
+    result (the physically correct one) out of an FFT, embed both signal and
+    kernel in a canvas wide enough that the wrapped part of the circular
+    result never overlaps the true part, then crop back down::
+
+        signal (N=6)         x x x x x x
+        kernel (M=3)                 k k k
+
+        canvas (>= N+M-1=8)  x x x x x x 0 0      <- zero-padded signal
+                             k k k 0 0 0 0 0      <- kernel, DC at index 0,
+                                                      negative offsets wrapped
+                                                      to the high end (FFT/OTF
+                                                      convention)
+        circular convolve    [ N+M-1 correct samples, nothing left to wrap ]
+        crop back to N       x x x x x x          <- discard the M-1 tail
+
+    Concretely: pad ``signal_shape`` up to ``fft_shape`` (>= ``N + M - 1`` per
+    axis, rounded to a GPU-friendly 5-smooth size by :func:`fast_padded_shape`
+    unless overridden), embed the compact corner-origin kernel into that
+    canvas with :func:`~deconlib.utils.padding.pad_corner_origin_kernel`
+    (negative offsets move to the high end, not off the edge), circularly
+    convolve via :class:`FFTConvolver`, then crop back to ``signal_shape``.
+    The adjoint runs the same three steps in reverse (pad, correlate, crop),
+    so this operator is its own valid adjoint pair — safe to hand to any
+    solver in this module or an external one via :func:`as_numpy_op`.
     """
 
     def __init__(
@@ -794,162 +811,5 @@ class MatrixOperator:
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
-
-
-# -----------------------------------------------------------------------------
-# Finite Detector operator
-# -----------------------------------------------------------------------------
-
-
-class FiniteDetector:
-    """Finite detector (crop/zero-pad) operator.
-
-    Models the finite extent of a camera sensor. Crops reconstruction to
-    detector size (forward) or embeds detector data into larger space (adjoint).
-
-    This enables accurate image reconstruction by accounting for signal from
-    outside the detector region that contributes to edge pixels due to blur
-    (PSF convolution).
-
-    Physical model:
-        Object (larger than detector) -> Blur (convolution) -> Bin -> **Clip**
-
-    Attributes:
-        detector_shape: Shape of observed data (camera chip).
-        padded_shape: Shape of reconstruction with padding.
-        padding: Padding amounts per axis as tuple of (before, after) tuples.
-        operator_norm_sq: Squared spectral norm (= 1.0 for projection).
-
-    Example:
-        >>> P = FiniteDetector((64, 64), padding=((7, 7), (7, 7)))
-        >>> print(P.padded_shape)  # (78, 78)
-        >>> x_padded = mx.random.normal(P.padded_shape)
-        >>> y_detector = P.forward(x_padded)  # (64, 64)
-        >>> x_back = P.adjoint(y_detector)  # (78, 78)
-    """
-
-    operator_norm_sq = 1.0  # Projection operator: ||P|| = 1
-
-    def __init__(
-        self,
-        detector_shape: Tuple[int, ...],
-        padding: Optional[Tuple[Tuple[int, int], ...]] = None,
-    ):
-        """Initialize FiniteDetector operator.
-
-        Args:
-            detector_shape: Shape of observed data (camera chip).
-            padding: Explicit padding specification as ``(before, after)``
-                pairs per axis, e.g. ``((10, 10), (5, 5))``.
-
-        Raises:
-            ValueError: If padding is omitted or malformed.
-        """
-        if padding is None:
-            raise ValueError("padding must be provided as explicit pairs")
-
-        self.detector_shape = detector_shape
-        ndim = len(detector_shape)
-
-        if len(padding) != ndim:
-            raise ValueError(
-                f"padding has {len(padding)} elements, "
-                f"detector_shape has {ndim} dims"
-            )
-        pairs = []
-        for item in padding:
-            if not isinstance(item, (tuple, list)) or len(item) != 2:
-                raise ValueError(
-                    "padding entries must be explicit (before, after) pairs"
-                )
-            before, after = (int(item[0]), int(item[1]))
-            if before < 0 or after < 0:
-                raise ValueError("padding values must be non-negative")
-            pairs.append((before, after))
-        self.padding = tuple(pairs)
-
-        # Compute padded_shape = detector_shape + padding
-        self.padded_shape = tuple(
-            d + pb + pa for d, (pb, pa) in zip(detector_shape, self.padding)
-        )
-
-        # Precompute slice objects for efficient cropping
-        self._slices = tuple(
-            slice(pb, pb + d)
-            for d, (pb, pa) in zip(detector_shape, self.padding)
-        )
-
-    @classmethod
-    def for_linear_convolution(
-        cls,
-        signal_shape: Tuple[int, ...],
-        kernel_shape: Tuple[int, ...],
-        *,
-        min_pad: Optional[Union[int, Tuple[Optional[int], ...]]] = None,
-    ) -> "FiniteDetector":
-        """Create a FiniteDetector sized for wrap-free linear convolution.
-
-        Pads each axis by ``(0, fast_n - N)`` so that the signal sits at the
-        start of the padded domain (corner-origin convention) and the total
-        padded size is FFT-friendly.  Use this together with
-        ``FFTConvolver(pad_psf(kernel, detector.padded_shape))`` to perform
-        linear convolution via circular FFT without any wrap-around artefact.
-
-        The ``min_pad`` argument lets you relax padding on specific axes.
-        The common case is PSF distillation from coverslip beads, where all
-        point sources lie in a single focal plane so the axial convolution is
-        already confined within the image and needs no extra z-padding:
-
-            det = FiniteDetector.for_linear_convolution(
-                image.shape, psf_shape, min_pad=(0, None, None)
-            )
-
-        Args:
-            signal_shape: Spatial shape of the signal (e.g. the image).
-            kernel_shape: Spatial shape of the convolution kernel (e.g. PSF).
-            min_pad: Per-axis padding override passed to :func:`fast_padded_shape`.
-                ``None`` (default) uses the full ``M - 1`` pad on every axis.
-
-        Returns:
-            FiniteDetector whose ``padded_shape`` is the smallest smooth
-            shape that can host the (possibly relaxed) linear convolution.
-
-        Example:
-            >>> det = FiniteDetector.for_linear_convolution(
-            ...     (101, 589, 549), (101, 256, 256))
-            >>> det.padded_shape          # (216, 864, 810)
-            >>> det2 = FiniteDetector.for_linear_convolution(
-            ...     (101, 589, 549), (101, 256, 256), min_pad=(0, None, None))
-            >>> det2.padded_shape         # (108, 864, 810)
-        """
-        padded = fast_padded_shape(signal_shape, kernel_shape, min_pad=min_pad)
-        padding = tuple((0, p - n) for p, n in zip(padded, signal_shape))
-        return cls(signal_shape, padding=padding)
-
-    def forward(self, x: mx.array) -> mx.array:
-        """Crop padded array to detector size.
-
-        Args:
-            x: Array with shape matching padded_shape.
-
-        Returns:
-            Cropped array with shape matching detector_shape.
-        """
-        return x[self._slices]
-
-    def adjoint(self, y: mx.array) -> mx.array:
-        """Zero-pad detector array to padded size.
-
-        Args:
-            y: Array with shape matching detector_shape.
-
-        Returns:
-            Zero-padded array with shape matching padded_shape.
-        """
-        return mx.pad(y, list(self.padding), mode="constant", constant_values=0)
-
-    def __call__(self, x: mx.array) -> mx.array:
-        return self.forward(x)
-
 
 

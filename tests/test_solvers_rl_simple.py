@@ -11,8 +11,8 @@ except ImportError:
 from deconlib.deconvolution import (
     LinearFFTConvolver,
     richardson_lucy_with_operator,
+    RLResult,
 )
-from deconlib.solvers import richardson_lucy, RLResult
 
 
 @pytest.mark.skipif(mx is None, reason="MLX not available")
@@ -36,9 +36,9 @@ class TestSimpleRL:
         R = LinearFFTConvolver(psf, signal_shape=shape, normalize=True)
         
         # Run RL solver
-        result = richardson_lucy(
+        result = richardson_lucy_with_operator(
             observed=mx.array(observed),
-            operator=R,
+            blur_op=R,
             num_iter=5,
             background=0.0,
         )
@@ -63,9 +63,9 @@ class TestSimpleRL:
         
         R = LinearFFTConvolver(psf, signal_shape=shape, normalize=True)
         
-        result = richardson_lucy(
+        result = richardson_lucy_with_operator(
             observed=mx.array(observed),
-            operator=R,
+            blur_op=R,
             num_iter=3,
         )
         

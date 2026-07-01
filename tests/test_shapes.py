@@ -7,8 +7,6 @@ from deconlib.deconvolution.shapes import (
     compute_visible_shape,
     compute_padded_shape,
     get_valid_slices,
-    compute_convolution_output_shape,
-    visible_to_data_padding,
 )
 
 
@@ -105,48 +103,5 @@ class TestGetValidSlices:
             get_valid_slices((120, 120), (100,))
 
 
-class TestComputeConvolutionOutputShape:
-    """Tests for compute_convolution_output_shape helper."""
-
-    def test_valid_mode(self):
-        """Valid mode: N - M + 1."""
-        assert compute_convolution_output_shape((100, 100), (31, 31), mode="valid") == (70, 70)
-        assert compute_convolution_output_shape((100,), (5,), mode="valid") == (96,)
-
-    def test_same_mode(self):
-        """Same mode: same as input."""
-        assert compute_convolution_output_shape((100, 100), (31, 31), mode="same") == (100, 100)
-
-    def test_full_mode(self):
-        """Full mode: N + M - 1."""
-        assert compute_convolution_output_shape((100, 100), (31, 31), mode="full") == (130, 130)
-
-    def test_invalid_mode(self):
-        """Invalid mode raises error."""
-        with pytest.raises(ValueError, match="Unknown mode"):
-            compute_convolution_output_shape((100,), (5,), mode="invalid")
-
-
-class TestVisibleToDataPadding:
-    """Tests for visible_to_data_padding helper."""
-
-    def test_basic_padding(self):
-        """Basic padding with default extra_padding."""
-        padding = visible_to_data_padding((100, 100), (31, 31))
-        # PSF radius: (31 - 1) // 2 = 15
-        # Total: 15 + 10 = 25 per side
-        assert padding == ((25, 25), (25, 25))
-
-    def test_custom_extra_padding(self):
-        """Custom extra_padding value."""
-        padding = visible_to_data_padding((100, 100), (31, 31), extra_padding=5)
-        # 15 + 5 = 20 per side
-        assert padding == ((20, 20), (20, 20))
-
-    def test_even_psf_shape(self):
-        """Even PSF shape: radius = (M - 1) // 2."""
-        padding = visible_to_data_padding((100, 100), (30, 30), extra_padding=0)
-        # (30 - 1) // 2 = 14
-        assert padding == ((14, 14), (14, 14))
 
 

@@ -1,26 +1,55 @@
 """Image deconvolution algorithms using Apple MLX.
 
-Solvers
--------
-- ``solve_pdhg_mlx`` / ``solve_pdhg_with_operator`` — Malitsky-Pock adaptive
-  PDHG for Poisson or Gaussian data with identity/gradient/hessian
-  regularization and non-negativity.
-- ``richardson_lucy_with_operator`` — multiplicative RL for Poisson data with
-  an explicit forward model and finite-detector sensitivity.
+Mental model
+------------
+Using this module is a two-step process:
 
-Forward-model operators
------------------------
-All operator classes in this module structurally satisfy the
-:class:`LinearOperator` protocol (``forward``, ``adjoint``, ``__call__``,
-``operator_norm_sq``). Build a forward model by composing primitives:
+1. **Build the forward model** by composing linear operators that describe
+   how the true (visible-space) object turns into the measured data —
+   blur, resample, crop. Every operator here structurally satisfies the
+   :class:`LinearOperator` protocol (``forward``, ``adjoint``, ``__call__``,
+   ``operator_norm_sq``), so they compose freely with :func:`compose`:
 
-    >>> R = compose(Crop(...), LinearFFTConvolver(...))   # object -> blur -> crop
+       >>> R = compose(Crop(...), LinearFFTConvolver(...))   # object -> blur -> crop
 
-Hand the same operator to an external solver (e.g. ``memsolve``) as a pair of
-NumPy callables:
+   ``R.forward(x)`` simulates the camera; ``R.adjoint(y)`` is its transpose
+   (used internally by every solver below, and by external ones via
+   :func:`as_numpy_op`).
 
-    >>> from deconlib.deconvolution import as_numpy_op
-    >>> R, Rt = as_numpy_op(R_op)
+2. **Hand ``R`` to a solver entry point** — this module has exactly two:
+
+   - :func:`richardson_lucy_with_operator` — multiplicative RL for Poisson
+     data. Cheap per iteration, needs no regularization strength to tune.
+   - :func:`solve_pdhg_mlx` / :func:`solve_pdhg_with_operator` — Malitsky-Pock
+     adaptive PDHG for Poisson or Gaussian data with identity/gradient/hessian
+     regularization and non-negativity, when RL's implicit smoothing isn't
+     enough control over the reconstruction.
+
+   Both solvers only ever call ``R.forward``/``R.adjoint`` — they don't know
+   or care how ``R`` was assembled, so the same operator built in step 1
+   works with either solver, or with an external one (e.g. ``memsolve``) via:
+
+       >>> from deconlib.deconvolution import as_numpy_op
+       >>> R_np, Rt_np = as_numpy_op(R)
+
+Linear convolution via the zero-padding trick
+----------------------------------------------
+FFT convolution is naturally *circular*: multiplying spectra and inverting
+wraps signal that would fall off one edge back onto the opposite edge. This
+matters because a blurred imaging model must be *linear* (finite-support,
+zero boundary) — light that reaches the detector from beyond the field of
+view should stay lost, not reappear on the far side.
+
+The fix is the same one used for FFT-based convolution in general: embed the
+signal and kernel in a canvas at least ``N + M - 1`` samples wide (``N`` =
+signal, ``M`` = kernel), so the true linear-convolution result fits without
+overlap, then crop back down to ``N``. :class:`LinearFFTConvolver` does
+exactly this — pad, circularly convolve via :class:`FFTConvolver`, crop —
+and its adjoint runs the same three steps in reverse (pad, correlate, crop),
+so ``compose(Crop(...), LinearFFTConvolver(...))`` is a valid adjoint pair
+end to end. This is the operator every recipe in ``examples/RECIPES.md``
+builds the forward model around, since it is the physically correct model
+for how a PSF actually blurs a finite object.
 
 Live progress
 -------------
@@ -67,7 +96,6 @@ from .linops_mlx import (
     CauchyICF,
     MatrixOperator,
     fast_padded_shape,
-    FiniteDetector,
     Gradient1D,
     Gradient2D,
     Gradient3D,
@@ -85,8 +113,6 @@ from .wavelets import AtrousTransform
 from .core_operators import (
     Pad,
     Crop,
-    FFTConvolve,
-    LinearConvolve,
     FractionalAreaDownsample,
     FractionalAreaUpsample,
 )
@@ -94,8 +120,6 @@ from .shapes import (
     compute_visible_shape,
     compute_padded_shape,
     get_valid_slices,
-    compute_convolution_output_shape,
-    visible_to_data_padding,
 )
 from .tile_processing import (
     TileSpec,
@@ -121,8 +145,6 @@ __all__ = [
     "compute_visible_shape",
     "compute_padded_shape",
     "get_valid_slices",
-    "compute_convolution_output_shape",
-    "visible_to_data_padding",
     # MLX Linear Operators
     "FFTConvolver",
     "LinearFFTConvolver",
@@ -131,7 +153,6 @@ __all__ = [
 
     "MatrixOperator",
     "fast_padded_shape",
-    "FiniteDetector",
     "Gradient1D",
     "Gradient2D",
     "Gradient3D",
@@ -147,8 +168,6 @@ __all__ = [
     # Core operators
     "Pad",
     "Crop",
-    "FFTConvolve",
-    "LinearConvolve",
     "FractionalAreaDownsample",
     "FractionalAreaUpsample",
     # Tile processing

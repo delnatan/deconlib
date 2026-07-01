@@ -10,8 +10,15 @@ This document describes the recent implementation of core linear operators for d
 The core operators implement fundamental linear transformations for image processing and deconvolution:
 
 - **Padding / Cropping**: `Pad`, `Crop`
-- **Convolution**: `FFTConvolve`, `LinearConvolve`
 - **Resampling**: `FractionalAreaDownsample`, `FractionalAreaUpsample`
+
+FFT-based convolution (`FFTConvolve`/`LinearConvolve`) used to live here too, but
+was removed 2026-06-30 as an unused duplicate of `linops_mlx.FFTConvolver` /
+`linops_mlx.LinearFFTConvolver` — every forward model in this codebase already
+built on the `linops_mlx` versions (they add GPU-friendly FFT-shape sizing via
+`fast_padded_shape`), so the ones here were dead code that only made it easier
+to reach for the wrong convolution operator. Use `linops_mlx.LinearFFTConvolver`
+for linear (zero-boundary) convolution.
 
 All operators implement the `LinearOperator` protocol:
 - `forward(x) -> y`
@@ -30,7 +37,7 @@ The operators are intentionally domain-agnostic. Instead of domain-specific comp
 R = compose(
     Crop(original_shape=padded_shape, target_shape=detector_shape),
     FractionalAreaDownsample(scale=factor),
-    LinearConvolve(psf, signal_shape)
+    LinearFFTConvolver(psf, signal_shape=signal_shape),
 )
 ```
 
@@ -40,6 +47,13 @@ R = compose(
 - Better numerical precision than `fftn/ifftn` + `.real`
 - Avoids complex dtype issues
 - Works natively with MLX arrays on GPU
+- Circular by construction — `LinearFFTConvolver` gets *linear* (wrap-free)
+  convolution out of this by zero-padding the signal to `>= N + M - 1` before
+  convolving and cropping back down afterward. This is the physically correct
+  model for how a PSF blurs a finite object, and it's the operator every
+  forward model in this codebase is built around. See the module docstring
+  in `deconlib/deconvolution/__init__.py` and `LinearFFTConvolver`'s own
+  docstring in `linops_mlx.py` for the full explanation with a worked diagram.
 
 ### 3. Fractional-Area Resampling
 
@@ -48,13 +62,6 @@ R = compose(
 - Preserves non-negativity: input ≥ 0 → output ≥ 0
 - Supports arbitrary scale factors (integer and non-integer)
 - GPU-efficient via MLX broadcasting
-
-### 4. Linear vs Circular Convolution
-
-- **`FFTConvolve`**: Circular convolution (periodic boundary)
-- **`LinearConvolve`**: Linear convolution (zero boundary) = Crop ∘ FFTConvolve ∘ Pad
-
-The padding strategy for `LinearConvolve` uses symmetric padding of `(kernel_size - 1)` total per axis, ensuring the linear convolution result fits in the original signal shape.
 
 ## Operator Details
 
@@ -76,30 +83,6 @@ Center-cropping operator that stores original shape for proper adjoint.
 crop = Crop(original_shape=(100, 100), target_shape=(80, 80))
 cropped = crop.forward(x)   # Shape decreases
 padded = crop.adjoint(cropped)  # Shape restored (zero-pads back)
-```
-
-### FFTConvolve
-
-Circular FFT-based convolution.
-
-```python
-conv = FFTConvolve(kernel, normalize=True)  # Normalizes kernel to sum=1
-convolved = conv.forward(x)
-correlated = conv.adjoint(y)  # Correlation = adjoint of convolution
-```
-
-Note: Input shape must match kernel shape (use `LinearConvolve` for different sizes).
-
-### LinearConvolve
-
-Linear (zero-boundary) convolution. Internally composed as:
-```
-LinearConvolve = Crop ∘ FFTConvolve(padded_kernel) ∘ Pad
-```
-
-```python
-linear_conv = LinearConvolve(kernel, signal_shape=(256, 256))
-result = linear_conv.forward(x)  # Same shape as signal_shape
 ```
 
 ### FractionalAreaDownsample
@@ -128,7 +111,7 @@ The typical forward model chain for deconvolution:
 
 ```python
 from deconlib.deconvolution import (
-    compose, LinearConvolve, FractionalAreaDownsample, Crop
+    compose, LinearFFTConvolver, FractionalAreaDownsample, Crop
 )
 
 # Define the forward model: blur -> downsample -> crop
@@ -139,7 +122,7 @@ detector_shape = (120, 120)
 forward_model = compose(
     Crop(original_shape=(128, 128), target_shape=detector_shape),
     FractionalAreaDownsample(scale=2.0),
-    LinearConvolve(psf, signal_shape)
+    LinearFFTConvolver(psf, signal_shape=signal_shape)
 )
 
 # Apply forward model
@@ -169,7 +152,6 @@ R, Rt = as_numpy_op(forward_model)
 
 ## Future Work
 
-- Consider adding `normalized` flag to `LinearConvolve` for PSF normalization
 - Explore using `rfftn` with explicit axes for potentially better performance
 - Add optional batch dimension support for multi-channel images
 - Consider adding GPU-specific optimizations for large kernels

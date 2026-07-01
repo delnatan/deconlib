@@ -32,7 +32,6 @@ from .linops_mlx import (
     Hessian1D,
     Hessian2D,
     Hessian3D,
-    FiniteDetector,
     LinearFFTConvolver,
 )
 from .core_operators import (

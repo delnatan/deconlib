@@ -24,7 +24,7 @@ or ``False`` to continue.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -36,81 +36,21 @@ class RLResult:
 
     Attributes:
         restored: Deconvolved image.
+        pred: Forward-predicted data, ``blur_op.forward(restored) + background``.
         iterations: Number of iterations performed.
         loss_history: Mean Poisson I-divergence at each eval_interval.
+        background: Background level used.
         full_shape: Shape of the internal reconstruction before any output crop.
         valid_slices: Slices used to crop the internal reconstruction, if any.
     """
 
     restored: mx.array
+    pred: mx.array
     iterations: int
     loss_history: list
+    background: float = 0.0
     full_shape: Optional[Tuple[int, ...]] = None
     valid_slices: Optional[Tuple[slice, ...]] = None
-
-
-def _finite_detector_valid_slices(op) -> Optional[Tuple[slice, ...]]:
-    """Infer fine-grid valid slices for Crop/FiniteDetector operator after convolution.
-    
-    Supports compositions of:
-    - FiniteDetector/Crop(outer) + LinearFFTConvolver(inner) - without binning
-    - FiniteDetector/Crop(outer) + FractionalAreaDownsample + LinearFFTConvolver - with binning
-    """
-    outer = getattr(op, "outer", None)
-    inner = getattr(op, "inner", None)
-    if outer is None or inner is None:
-        return None
-
-    if not all(
-        hasattr(outer, attr)
-        for attr in ("detector_shape", "padding", "padded_shape")
-    ):
-        return None
-    
-    # Case 1: Composed operator with downsampling (3-level composition)
-    # outer = FiniteDetector/Crop
-    # inner = Compose(downsampler, convolver)
-    # inner.outer = FractionalAreaDownsample
-    # inner.inner = LinearFFTConvolver (has signal_shape)
-    if hasattr(inner, 'outer') and hasattr(inner.inner, 'signal_shape'):
-        # This is a 3-level composition: Crop(Downsample(Convolve(x)))
-        downsampler = inner.outer
-        convolver = inner.inner
-        
-        # Check if downsampler is FractionalAreaDownsample
-        if hasattr(downsampler, 'scale'):
-            # Map detector padding through downsampling to highres space
-            valid_slices = []
-            for detector_n, (pad_before, _), scale in zip(
-                outer.detector_shape,
-                outer.padding,
-                downsampler.scale if isinstance(downsampler.scale, tuple) else (downsampler.scale,) * len(outer.detector_shape),
-            ):
-                # In highres space, padding is scaled
-                highres_pad_before = int(round(pad_before * scale))
-                start = highres_pad_before
-                # detector_n in data space maps to detector_n * scale in highres space
-                highres_detector_n = int(round(detector_n * scale))
-                stop = start + highres_detector_n
-                valid_slices.append(slice(start, stop))
-            return tuple(valid_slices)
-    
-    # Case 2: Simple 2-level composition without binning
-    # The valid region is just the detector region in the padded space
-    if hasattr(inner, 'signal_shape'):
-        # LinearFFTConvolver has signal_shape
-        # The valid slices are from padding start to padding start + detector size
-        valid_slices = []
-        for detector_n, (pad_before, _) in zip(
-            outer.detector_shape,
-            outer.padding,
-        ):
-            start = pad_before
-            stop = pad_before + detector_n
-            valid_slices.append(slice(start, stop))
-        return tuple(valid_slices)
-    
-    return None
 
 
 def poisson_i_divergence(
@@ -147,7 +87,6 @@ def richardson_lucy_with_operator(
     callback: Optional[Callable[[int, mx.array], bool]] = None,
     eval_interval: int = 10,
     verbose: bool = False,
-    return_region: Literal["full", "valid"] = "full",
 ) -> RLResult:
     """Richardson-Lucy deconvolution with a pre-built positive operator.
 
@@ -158,6 +97,11 @@ def richardson_lucy_with_operator(
     object support outside the measured detector can remain active where it can
     contribute to edge pixels.
 
+    Always returns the full reconstruction domain (``RLResult.restored``).
+    Callers who padded the domain for wrap-free convolution should crop the
+    result themselves, e.g. via ``shapes.compute_padded_shape``/
+    ``get_valid_slices`` computed alongside the forward model.
+
     Args:
         observed: Observed detector image.
         blur_op: Positive forward operator with ``forward`` and ``adjoint``.
@@ -167,15 +111,7 @@ def richardson_lucy_with_operator(
         callback: Optional function called each iteration with ``(iter, x)``.
         eval_interval: Interval for computing and storing mean I-divergence.
         verbose: Print progress.
-        return_region: ``"full"`` returns the internal reconstruction domain.
-            ``"valid"`` crops the final result to the measured detector field
-            mapped onto the fine grid. Currently this is inferred for
-            ``compose(Crop, LinearFFTConvolver)`` or compositions with
-            ``FractionalAreaDownsample``.
     """
-    if return_region not in ("full", "valid"):
-        raise ValueError("return_region must be 'full' or 'valid'")
-
     if isinstance(observed, np.ndarray):
         observed = mx.array(observed.astype(np.float32))
     if init is not None and isinstance(init, np.ndarray):
@@ -230,23 +166,18 @@ def richardson_lucy_with_operator(
 
     mx.eval(x)
     full_shape = tuple(x.shape)
-    valid_slices = None
-    restored = x
-    if return_region == "valid":
-        valid_slices = _finite_detector_valid_slices(blur_op)
-        if valid_slices is None:
-            raise ValueError(
-                "return_region='valid' requires a forward operator shaped like "
-                "compose(Crop, LinearFFTConvolver) or "
-                "compose(Crop, FractionalAreaDownsample, LinearFFTConvolver)"
-            )
-        restored = x[valid_slices]
-        mx.eval(restored)
+    # Predicted data comes from the full internal reconstruction, not the
+    # (possibly valid-cropped) restored image below — the operator's forward()
+    # expects the full reconstruction domain as input.
+    pred = blur_op.forward(x) + background
+    mx.eval(pred)
 
     return RLResult(
-        restored=restored,
+        restored=x,
+        pred=pred,
         iterations=k + 1,
         loss_history=loss_history,
+        background=float(background),
         full_shape=full_shape,
-        valid_slices=valid_slices,
+        valid_slices=None,
     )

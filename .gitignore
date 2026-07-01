@@ -57,6 +57,7 @@ notes/
 sandbox/
 examples/sample_data/
 examples/output/
+scripts/output/
 
 # Generated documentation
 site/

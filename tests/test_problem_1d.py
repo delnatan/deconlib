@@ -103,9 +103,9 @@ def make_1d_test_problem(
 def test_1d_operators():
     """Test that 1D operators work correctly with test problem."""
     import mlx.core as mx
+    from deconlib.deconvolution.core_operators import Crop
     from deconlib.deconvolution.linops_mlx import (
         FFTConvolver,
-        FiniteDetector,
         Gradient1D,
     )
 
@@ -143,15 +143,15 @@ def test_1d_operators():
     )
     all_passed = all_passed and passed
 
-    # Test 2: FiniteDetector in 1D
-    print("\n  Testing FiniteDetector 1D:")
-    P = FiniteDetector((64,), padding=((2, 2),))
+    # Test 2: Crop in 1D
+    print("\n  Testing Crop 1D:")
+    P = Crop(original_shape=(68,), target_shape=(64,))
     print(
-        f"    detector_shape={P.detector_shape}, padded_shape={P.padded_shape}"
+        f"    target_shape={P.target_shape}, original_shape={P.original_shape}"
     )
 
-    x = mx.random.normal(P.padded_shape)
-    y = mx.random.normal(P.detector_shape)
+    x = mx.random.normal(P.original_shape)
+    y = mx.random.normal(P.target_shape)
 
     Px = P.forward(x)
     Pstar_y = P.adjoint(y)
@@ -193,28 +193,24 @@ def test_1d_operators():
 
 
 def test_1d_forward_model():
-    """Test the complete 1D forward model with FiniteDetector."""
+    """Test the complete 1D forward model with Crop."""
     import mlx.core as mx
-    from deconlib.deconvolution.linops_mlx import (
-        FFTConvolver,
-        FiniteDetector,
-    )
+    from deconlib.deconvolution.core_operators import Crop
+    from deconlib.deconvolution.linops_mlx import FFTConvolver
 
     print("\n" + "=" * 60)
-    print("Testing 1D forward model with FiniteDetector")
+    print("Testing 1D forward model with Crop")
     print("=" * 60)
 
     # Setup: detector sees 64 pixels, but we reconstruct on padded grid
     detector_n = 64
     kernel_width = 9  # Larger kernel to show effect
 
-    # Create FiniteDetector
-    detector_padding = ((kernel_width // 2, kernel_width // 2),)
-    P = FiniteDetector((detector_n,), padding=detector_padding)
-    padded_n = P.padded_shape[0]
-    print(
-        f"  Detector: {detector_n}, Padded: {padded_n}, Padding: {P.padding}"
-    )
+    # Create Crop (padded reconstruction grid -> detector)
+    pad = kernel_width // 2
+    padded_n = detector_n + 2 * pad
+    P = Crop(original_shape=(padded_n,), target_shape=(detector_n,))
+    print(f"  Detector: {detector_n}, Padded: {padded_n}, Padding: {pad}")
 
     # Create kernel at padded resolution (for FFT convolution)
     kernel = np.zeros(padded_n)

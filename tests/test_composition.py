@@ -6,8 +6,8 @@ import pytest
 
 from deconlib.deconvolution import (
     Compose,
+    Crop,
     FFTConvolver,
-    FiniteDetector,
     GaussianICF,
     LinearFFTConvolver,
     LinearOperator,
@@ -42,20 +42,20 @@ def test_existing_operators_satisfy_protocol():
     psf = _gaussian_kernel((16, 16), sigma=1.5)
     conv = FFTConvolver(psf)
     icf = GaussianICF((16, 16), sigmas=(0.8, 0.8), spacings=(1.0, 1.0))
-    det = FiniteDetector((12, 12), padding=((2, 2), (2, 2)))
+    det = Crop(original_shape=(16, 16), target_shape=(12, 12))
     for op in (conv, icf, det):
         assert isinstance(op, LinearOperator)
 
 
 def test_compose_two_ops_adjoint():
     # Forward model: object on padded grid -> FFT blur -> crop to detector.
-    det = FiniteDetector((24, 24), padding=((3, 3), (3, 3)))
-    psf = _gaussian_kernel(det.padded_shape, sigma=1.5)
+    det = Crop(original_shape=(30, 30), target_shape=(24, 24))
+    psf = _gaussian_kernel(det.original_shape, sigma=1.5)
     conv = FFTConvolver(psf)
     R = Compose(det, conv)
 
     err = _dot_product_error(
-        R.forward, R.adjoint, det.padded_shape, det.detector_shape
+        R.forward, R.adjoint, det.original_shape, det.target_shape
     )
     assert err < RTOL_F32, f"composed adjoint error {err:.2e} >= {RTOL_F32:.2e}"
 
@@ -71,8 +71,8 @@ def test_linear_fft_convolver_adjoint():
 
 
 def test_compose_norm_is_product():
-    det = FiniteDetector((24, 24), padding=((2, 2), (2, 2)))
-    psf = _gaussian_kernel(det.padded_shape, sigma=1.2)
+    det = Crop(original_shape=(28, 28), target_shape=(24, 24))
+    psf = _gaussian_kernel(det.original_shape, sigma=1.2)
     conv = FFTConvolver(psf)
     R = Compose(det, conv)
     expected = det.operator_norm_sq * conv.operator_norm_sq
@@ -80,17 +80,17 @@ def test_compose_norm_is_product():
 
 
 def test_compose_three_ops_via_helper():
-    det = FiniteDetector((20, 20), padding=((2, 2), (2, 2)))
-    psf = _gaussian_kernel(det.padded_shape, sigma=1.0)
+    det = Crop(original_shape=(24, 24), target_shape=(20, 20))
+    psf = _gaussian_kernel(det.original_shape, sigma=1.0)
     conv = FFTConvolver(psf)
-    icf = GaussianICF(det.padded_shape, sigmas=(0.7, 0.7), spacings=(1.0, 1.0))
+    icf = GaussianICF(det.original_shape, sigmas=(0.7, 0.7), spacings=(1.0, 1.0))
 
     # R(h) = det(conv(icf(h)))
     R = compose(det, conv, icf)
     assert isinstance(R, Compose)
 
     err = _dot_product_error(
-        R.forward, R.adjoint, det.padded_shape, det.detector_shape
+        R.forward, R.adjoint, det.original_shape, det.target_shape
     )
     assert err < RTOL_F32
 
@@ -107,23 +107,23 @@ def test_compose_empty_raises():
 
 
 def test_as_numpy_op_round_trip_matches_native():
-    det = FiniteDetector((24, 24), padding=((3, 3), (3, 3)))
-    psf = _gaussian_kernel(det.padded_shape, sigma=1.5)
+    det = Crop(original_shape=(30, 30), target_shape=(24, 24))
+    psf = _gaussian_kernel(det.original_shape, sigma=1.5)
     conv = FFTConvolver(psf)
     R_op = Compose(det, conv)
 
     R, Rt = as_numpy_op(R_op)
 
     rng = np.random.default_rng(1)
-    x = rng.standard_normal(det.padded_shape).astype(np.float32)
-    y = rng.standard_normal(det.detector_shape).astype(np.float32)
+    x = rng.standard_normal(det.original_shape).astype(np.float32)
+    y = rng.standard_normal(det.target_shape).astype(np.float32)
 
     Rx = R(x)
     Rty = Rt(y)
     assert isinstance(Rx, np.ndarray)
     assert isinstance(Rty, np.ndarray)
-    assert Rx.shape == det.detector_shape
-    assert Rty.shape == det.padded_shape
+    assert Rx.shape == det.target_shape
+    assert Rty.shape == det.original_shape
 
     # Numeric agreement with the underlying MLX path.
     Rx_mlx = np.asarray(R_op.forward(mx.array(x)))

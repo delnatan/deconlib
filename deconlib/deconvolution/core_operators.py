@@ -9,6 +9,7 @@ This module provides the fundamental linear transformations for building
 forward models in deconvolution and other image processing tasks.
 """
 
+import math
 from typing import Tuple, Union
 import mlx.core as mx
 import numpy as np
@@ -16,8 +17,6 @@ import numpy as np
 __all__ = [
     "Pad",
     "Crop",
-    "FFTConvolve",
-    "LinearConvolve",
     "FractionalAreaDownsample",
     "FractionalAreaUpsample",
 ]
@@ -115,137 +114,14 @@ class Crop:
 
 
 # =============================================================================
-# FFT Convolution
-# =============================================================================
-
-class FFTConvolve:
-    """Circular FFT-based convolution.
-
-    Forward: y = kernel * x (circular boundary)
-    Adjoint: x = kernel^* * y (correlation)
-
-    For linear (zero-boundary) convolution, use LinearConvolve.
-    """
-
-    def __init__(self, kernel: Union[np.ndarray, mx.array], *, normalize: bool = True):
-        """Initialize FFTConvolve operator.
-
-        Args:
-            kernel: Convolution kernel. Will be converted to mx.array if numpy.
-            normalize: If True, normalize kernel to sum to 1.
-        """
-        if isinstance(kernel, np.ndarray):
-            kernel = mx.array(kernel.astype(np.float32))
-
-        self.shape = kernel.shape
-        self.axes = tuple(range(-len(self.shape), 0))
-
-        if normalize:
-            kernel = kernel / mx.sum(kernel)
-
-        # Use rfftn for real-valued kernels to maintain precision
-        self.otf = mx.fft.rfftn(kernel)
-        self.operator_norm_sq = float(mx.max(mx.abs(self.otf) ** 2))
-
-    def forward(self, x: mx.array) -> mx.array:
-        """Apply circular convolution."""
-        # Ensure x is at least as large as kernel
-        if x.shape != self.shape:
-            raise ValueError(f"Input shape {x.shape} must match kernel shape {self.shape}")
-        x_ft = mx.fft.rfftn(x)
-        result = mx.fft.irfftn(x_ft * self.otf, axes=self.axes, s=self.shape)
-        return result
-
-    def adjoint(self, y: mx.array) -> mx.array:
-        """Apply correlation (adjoint of convolution)."""
-        # Ensure y is at least as large as kernel
-        if y.shape != self.shape:
-            raise ValueError(f"Input shape {y.shape} must match kernel shape {self.shape}")
-        y_ft = mx.fft.rfftn(y)
-        result = mx.fft.irfftn(y_ft * mx.conj(self.otf), axes=self.axes, s=self.shape)
-        return result
-
-    def __call__(self, x: mx.array) -> mx.array:
-        return self.forward(x)
-
-
-class LinearConvolve:
-    """Linear (zero-boundary) convolution via FFT.
-
-    Implements: y = kernel * x with zero padding at boundaries
-    by composing: Pad -> FFTConvolve -> Crop
-
-    This is equivalent to circular convolution on a padded domain
-    followed by cropping back to the original size.
-    """
-
-    def __init__(self, kernel: Union[np.ndarray, mx.array], signal_shape: Tuple[int, ...]):
-        """Initialize LinearConvolve operator.
-
-        Args:
-            kernel: Convolution kernel.
-            signal_shape: Shape of the input signal (before padding).
-
-        Raises:
-            ValueError: If kernel and signal_shape have different ndim.
-        """
-        if isinstance(kernel, np.ndarray):
-            kernel = mx.array(kernel.astype(np.float32))
-
-        self.kernel_shape = tuple(int(k) for k in kernel.shape)
-        self.signal_shape = tuple(int(s) for s in signal_shape)
-        ndim = len(self.signal_shape)
-
-        if len(self.kernel_shape) != ndim:
-            raise ValueError(
-                f"Kernel shape {self.kernel_shape} must match signal ndim {ndim}"
-            )
-
-        # Compute symmetric padding: (kernel_size - 1) total per axis
-        # This ensures linear convolution result fits
-        self._padding = tuple(
-            ((k - 1) // 2, k - 1 - (k - 1) // 2)
-            for k in self.kernel_shape
-        )
-        self._padded_shape = tuple(
-            s + pb + pa
-            for s, (pb, pa) in zip(self.signal_shape, self._padding)
-        )
-
-        # Pad kernel to padded_shape with corner-origin convention
-        kernel_np = np.array(kernel)
-        padded_kernel = pad_corner_origin_kernel(kernel_np, self._padded_shape)
-        self._kernel_array = mx.array(padded_kernel.astype(np.float32))
-
-        # Build the chain: Crop ∘ FFTConvolve ∘ Pad
-        self._pad = Pad(self._padding)
-        self._convolve = FFTConvolve(self._kernel_array, normalize=False)
-        self._crop = Crop(self._padded_shape, self.signal_shape)
-
-        # Operator norm is the convolve norm (pad and crop are projections)
-        self.operator_norm_sq = self._convolve.operator_norm_sq
-
-    def forward(self, x: mx.array) -> mx.array:
-        """Apply linear convolution with zero boundary."""
-        padded = self._pad.forward(x)
-        convolved = self._convolve.forward(padded)
-        return self._crop.forward(convolved)
-
-    def adjoint(self, y: mx.array) -> mx.array:
-        """Apply adjoint (correlation) with zero boundary."""
-        # Adjoint chain: Pad.adjoint ∘ FFTConvolve.adjoint ∘ Crop.adjoint
-        # = Crop ∘ Correlate ∘ Pad
-        padded_y = self._crop.adjoint(y)  # Pad from signal_shape to padded_shape
-        correlated = self._convolve.adjoint(padded_y)
-        return self._pad.adjoint(correlated)  # Crop back to signal_shape
-
-    def __call__(self, x: mx.array) -> mx.array:
-        return self.forward(x)
-
-
-# =============================================================================
 # Fractional-Area Resampling
 # =============================================================================
+#
+# For FFT-based convolution (circular or linear/zero-boundary), use
+# linops_mlx.FFTConvolver / linops_mlx.LinearFFTConvolver instead of
+# reimplementing it here — those are the versions every forward model in
+# this codebase is actually built from, with GPU-friendly FFT-shape sizing
+# (fast_padded_shape) that this module doesn't need to duplicate.
 
 
 def _overlap_weights_1d(input_size: int, output_size: int) -> mx.array:
@@ -317,6 +193,75 @@ def _apply_weights_1d(
     return mx.moveaxis(result_moved, -1, axis)
 
 
+def _banded_overlap_weights_1d(
+    n_large: int, n_small: int
+) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+    """Banded (fixed-window) overlap weights, equivalent to the dense
+    (n_small, n_large) matrix from :func:`_overlap_weights_1d` but
+    represented as small per-row windows so resampling can be applied with
+    a gather + weighted-sum instead of a matmul.
+
+    MLX's GPU (Metal) matmul kernel loses several digits of fp32 precision
+    once the batch dimension exceeds a few dozen rows -- empirically up to
+    ~1e-3 relative error, vs ~1e-7 for the same computation done as a plain
+    elementwise multiply + reduce (confirmed: CPU matmul, GPU elementwise,
+    and float64 numpy all agree to ~1e-7; only GPU matmul disagrees, by
+    ~1e-2 absolute, regardless of how heavily the batch is chunked). Gather
+    + multiply-sum sidesteps that GEMM code path entirely.
+
+    Returns ``(idx_fwd, weight_fwd, idx_adj, weight_adj)`` as mx.array,
+    where ``idx_fwd``/``weight_fwd`` have shape ``(n_small, w_fwd)`` for the
+    large -> small direction and ``idx_adj``/``weight_adj`` have shape
+    ``(n_large, w_adj)`` for the small -> large (adjoint) direction.
+    """
+    scale = n_large / n_small
+
+    # Forward: output cell i = [i*scale, (i+1)*scale) overlaps at most
+    # ceil(scale) + 1 unit input cells; +1 extra row of margin for safety.
+    w_f = min(n_large, int(math.ceil(scale)) + 2)
+    i = np.arange(n_small)
+    start_f = np.clip(np.floor(i * scale).astype(np.int64), 0, n_large - w_f)
+    idx_f = start_f[:, None] + np.arange(w_f)[None, :]
+    i_start, i_end = (i * scale)[:, None], ((i + 1) * scale)[:, None]
+    j_start = idx_f.astype(np.float64)
+    weight_f = np.maximum(0.0, np.minimum(i_end, j_start + 1) - np.maximum(i_start, j_start))
+
+    # Adjoint: input cell j is touched by at most ceil(1/scale) + 2 output
+    # cells (derived independently from the forward window, not by
+    # transposing it, so each direction is exact on its own).
+    w_a = min(n_small, int(math.ceil(1.0 / scale)) + 3)
+    j = np.arange(n_large)
+    start_a = np.clip(np.floor(j / scale).astype(np.int64) - 1, 0, n_small - w_a)
+    idx_a = start_a[:, None] + np.arange(w_a)[None, :]
+    a_start, a_end = idx_a.astype(np.float64) * scale, (idx_a.astype(np.float64) + 1) * scale
+    b_start = j[:, None].astype(np.float64)
+    weight_a = np.maximum(0.0, np.minimum(a_end, b_start + 1) - np.maximum(a_start, b_start))
+
+    return (
+        mx.array(idx_f.astype(np.int32)),
+        mx.array(weight_f.astype(np.float32)),
+        mx.array(idx_a.astype(np.int32)),
+        mx.array(weight_a.astype(np.float32)),
+    )
+
+
+def _apply_banded_1d(x: mx.array, idx: mx.array, weight: mx.array, axis: int) -> mx.array:
+    """Apply banded resampling weights along one axis via gather + weighted sum.
+
+    ``idx``/``weight`` have shape ``(out_size, window_width)``:
+    ``out[..., i, ...] = sum_k weight[i, k] * x[..., idx[i, k], ...]``.
+    """
+    axis = axis % x.ndim
+    x_moved = mx.moveaxis(x, axis, -1)
+    batch_shape = x_moved.shape[:-1]
+    x_flat = x_moved.reshape(-1, x_moved.shape[-1])
+    out_size, width = idx.shape
+    gathered = mx.take(x_flat, idx.reshape(-1), axis=1).reshape(x_flat.shape[0], out_size, width)
+    out_flat = mx.sum(gathered * weight[None, :, :], axis=-1)
+    out = out_flat.reshape(*batch_shape, out_size)
+    return mx.moveaxis(out, -1, axis)
+
+
 class FractionalAreaDownsample:
     """Fractional-area downsampling (coarse -> fine grid).
 
@@ -354,6 +299,10 @@ class FractionalAreaDownsample:
         # Cache: (N_large, N_small) -> mx.array of shape (N_small, N_large).
         # Both forward and adjoint share the same cache entry.
         self._weights_cache: dict = {}
+        # Cache: (N_large, N_small) -> banded gather indices/weights from
+        # _banded_overlap_weights_1d, used by the s >= 1.0 path instead of
+        # the dense-matmul weights above (see that function's docstring).
+        self._band_cache: dict = {}
 
         # Pin (n_large, n_small) per axis from in_shape so forward and adjoint
         # always agree on dimensions regardless of floating-point rounding.
@@ -377,6 +326,12 @@ class FractionalAreaDownsample:
             self._weights_cache[key] = _overlap_weights_1d(n_large, n_small)
         return self._weights_cache[key]
 
+    def _get_band(self, n_large: int, n_small: int):
+        key = (n_large, n_small)
+        if key not in self._band_cache:
+            self._band_cache[key] = _banded_overlap_weights_1d(n_large, n_small)
+        return self._band_cache[key]
+
     def forward(self, x: mx.array) -> mx.array:
         """Downsample input by scale factors."""
         result = x
@@ -396,8 +351,8 @@ class FractionalAreaDownsample:
                     n_small = max(1, int(round(n_large / s)))
                 if n_large == n_small:
                     continue  # identity — skip matmul (avoids Metal batch-size bug)
-                weights = self._get_weights(n_large, n_small)
-                result = _apply_weights_1d(result, weights, axis, adjoint=False)
+                idx_f, weight_f, _, _ = self._get_band(n_large, n_small)
+                result = _apply_banded_1d(result, idx_f, weight_f, axis)
         return result
 
     def adjoint(self, y: mx.array) -> mx.array:
@@ -419,8 +374,8 @@ class FractionalAreaDownsample:
                     n_large = max(1, int(round(n_small * s)))
                 if n_large == n_small:
                     continue  # identity — skip matmul (avoids Metal batch-size bug)
-                weights = self._get_weights(n_large, n_small)
-                result = _apply_weights_1d(result, weights, axis, adjoint=True)
+                _, _, idx_a, weight_a = self._get_band(n_large, n_small)
+                result = _apply_banded_1d(result, idx_a, weight_a, axis)
             else:
                 # s < 1.0: adjoint upsamples by 1/s
                 input_size = y.shape[axis]
@@ -529,13 +484,3 @@ class FractionalAreaUpsample:
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward(x)
-
-
-# =============================================================================
-# Utility import
-# =============================================================================
-
-try:
-    from ..utils.padding import pad_corner_origin_kernel
-except ImportError:
-    from deconlib.utils.padding import pad_corner_origin_kernel

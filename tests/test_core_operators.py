@@ -17,11 +17,10 @@ import mlx.core as mx
 from deconlib.deconvolution.core_operators import (
     Pad,
     Crop,
-    FFTConvolve,
-    LinearConvolve,
     FractionalAreaDownsample,
     FractionalAreaUpsample,
 )
+from deconlib.deconvolution.linops_mlx import LinearFFTConvolver
 from deconlib.deconvolution.composition import compose
 
 
@@ -137,90 +136,6 @@ class TestCrop(unittest.TestCase):
 
         ax = crop.forward(x)
         aty = crop.adjoint(y)
-
-        lhs = dot_product(ax, y)
-        rhs = dot_product(x, aty)
-        # Use relative tolerance for float32 precision
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-6)
-
-
-# =============================================================================
-# Test FFTConvolve
-# =============================================================================
-
-
-class TestFFTConvolve(unittest.TestCase):
-    """Tests for FFTConvolve operator."""
-
-    def test_forward_shape(self):
-        """Test forward produces same shape as input."""
-        x = random_array((64, 64))
-        kernel = random_array((64, 64))
-        conv = FFTConvolve(kernel)
-        y = conv.forward(x)
-        self.assertEqual(y.shape, (64, 64))
-
-    def test_adjoint_shape(self):
-        """Test adjoint produces same shape as input."""
-        y = random_array((64, 64))
-        kernel = random_array((64, 64))
-        conv = FFTConvolve(kernel)
-        x = conv.adjoint(y)
-        self.assertEqual(x.shape, (64, 64))
-
-    def test_adjoint_correctness(self):
-        """Test <A x, y> == <x, A^T y>."""
-        x = random_array((64, 64))
-        y = random_array((64, 64))
-        kernel = random_array((64, 64))
-        conv = FFTConvolve(kernel)
-
-        ax = conv.forward(x)
-        aty = conv.adjoint(y)
-
-        lhs = dot_product(ax, y)
-        rhs = dot_product(x, aty)
-        # Use relative tolerance for float32 precision
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-6)
-
-
-# =============================================================================
-# Test LinearConvolve
-# =============================================================================
-
-
-class TestLinearConvolve(unittest.TestCase):
-    """Tests for LinearConvolve operator."""
-
-    def test_forward_shape(self):
-        """Test forward produces same shape as signal_shape."""
-        signal_shape = (64, 64)
-        kernel = random_array((11, 11))
-        conv = LinearConvolve(kernel, signal_shape)
-        x = random_array(signal_shape)
-        y = conv.forward(x)
-        self.assertEqual(y.shape, signal_shape)
-
-    def test_adjoint_shape(self):
-        """Test adjoint produces same shape as signal_shape."""
-        signal_shape = (64, 64)
-        kernel = random_array((11, 11))
-        conv = LinearConvolve(kernel, signal_shape)
-        y = random_array(signal_shape)
-        x = conv.adjoint(y)
-        self.assertEqual(x.shape, signal_shape)
-
-    def test_adjoint_correctness(self):
-        """Test <A x, y> == <x, A^T y>."""
-        signal_shape = (64, 64)
-        kernel = random_array((11, 11))
-        conv = LinearConvolve(kernel, signal_shape)
-
-        x = random_array(signal_shape)
-        y = random_array(signal_shape)
-
-        ax = conv.forward(x)
-        aty = conv.adjoint(y)
 
         lhs = dot_product(ax, y)
         rhs = dot_product(x, aty)
@@ -350,7 +265,7 @@ class TestComposition(unittest.TestCase):
         psf = random_array((31, 31))
         psf = psf / mx.sum(psf)
 
-        linear_conv = LinearConvolve(psf, signal_shape)
+        linear_conv = LinearFFTConvolver(psf, signal_shape=signal_shape)
         downsample = FractionalAreaDownsample(scale=2.0)
         crop = Crop(original_shape=(128, 128), target_shape=(120, 120))
 
@@ -370,7 +285,7 @@ class TestComposition(unittest.TestCase):
         psf = random_array((31, 31))
         psf = psf / mx.sum(psf)
 
-        linear_conv = LinearConvolve(psf, signal_shape)
+        linear_conv = LinearFFTConvolver(psf, signal_shape=signal_shape)
         downsample = FractionalAreaDownsample(scale=2.0)
 
         forward_model = compose(downsample, linear_conv)
@@ -388,8 +303,8 @@ class TestComposition(unittest.TestCase):
 
     def test_intensity_preservation_full_chain(self):
         """Test intensity preservation through downsampling (linear convolution loses intensity at boundaries).
-        
-        Note: LinearConvolve with zero boundary does NOT preserve intensity.
+
+        Note: LinearFFTConvolver with zero boundary does NOT preserve intensity.
         Only FractionalAreaDownsample preserves intensity. We test that downsampling
         alone preserves intensity.
         """

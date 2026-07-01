@@ -335,76 +335,6 @@ def test_hessian_3d_adjoint():
     return all_passed
 
 
-def test_downsample_upsample_adjoint():
-    """Test downsample / upsample adjoint pair."""
-    from deconlib.deconvolution.linops_mlx import downsample, upsample
-
-    print("\n" + "=" * 60)
-    print("Testing downsample / upsample (sum-binning / replication)")
-    print("=" * 60)
-
-    all_passed = True
-
-    # Test cases: (highres_shape, factors, description)
-    test_cases = [
-        # 2D isotropic
-        ((16, 20), 2, "2D isotropic 2x"),
-        ((16, 20), 4, "2D isotropic 4x"),
-        # 2D anisotropic
-        ((16, 20), (2, 4), "2D anisotropic (2, 4)"),
-        ((16, 20), (1, 2), "2D anisotropic (1, 2) - no Y binning"),
-        # 3D isotropic
-        ((8, 12, 16), 2, "3D isotropic 2x"),
-        # 3D anisotropic (common for microscopy: bin XY but not Z)
-        ((8, 12, 16), (1, 2, 2), "3D anisotropic (1, 2, 2) - XY only"),
-        ((8, 12, 16), (2, 4, 4), "3D anisotropic (2, 4, 4)"),
-        # No binning case
-        ((8, 12), (1, 1), "2D no binning (1, 1)"),
-    ]
-
-    for highres_shape, factors, desc in test_cases:
-        # Compute lowres shape
-        if isinstance(factors, int):
-            lowres_shape = tuple(s // factors for s in highres_shape)
-        else:
-            lowres_shape = tuple(
-                s // f for s, f in zip(highres_shape, factors)
-            )
-
-        x = mx.random.normal(highres_shape)
-        y = mx.random.normal(lowres_shape)
-
-        # downsample: highres -> lowres
-        Dx = downsample(x, factors)
-        # upsample: lowres -> highres
-        Uy = upsample(y, factors)
-
-        # Adjoint test: <Dx, y> = <x, Uy>
-        lhs = mx.sum(Dx * y).item()
-        rhs = mx.sum(x * Uy).item()
-
-        denom = max(abs(lhs), abs(rhs), 1e-10)
-        err = abs(lhs - rhs) / denom
-
-        passed = err < RTOL
-        status = "PASS" if passed else "FAIL"
-        print(
-            f"  [{status}] {desc}: <Dx,y>={lhs:.8f}, <x,Uy>={rhs:.8f}, err={err:.2e}"
-        )
-
-        # Verify shapes
-        shape_ok = Dx.shape == lowres_shape and Uy.shape == highres_shape
-        if not shape_ok:
-            print(
-                f"       [FAIL] Shape mismatch: Dx={Dx.shape}, Uy={Uy.shape}"
-            )
-            passed = False
-
-        all_passed = all_passed and passed
-
-    return all_passed
-
-
 def test_fft_convolver_adjoint():
     """Test FFTConvolver forward/adjoint pair."""
     from deconlib.deconvolution.linops_mlx import FFTConvolver
@@ -469,60 +399,6 @@ def test_fft_convolver_adjoint():
     return all_passed
 
 
-def test_finite_detector_adjoint():
-    """Test FiniteDetector crop/zero-pad adjoint pair."""
-    from deconlib.deconvolution.linops_mlx import FiniteDetector
-
-    print("\n" + "=" * 60)
-    print("Testing FiniteDetector (crop / zero-pad)")
-    print("=" * 60)
-
-    cases = [
-        ((64,), ((7, 7),), (78,)),
-        ((64, 64), ((7, 7), (7, 7)), (78, 78)),
-        ((64, 64), ((8, 8), (8, 8)), (80, 80)),
-        ((20, 64, 64), ((2, 2), (7, 7), (7, 7)), (24, 78, 78)),
-        ((64, 64), ((10, 10), (10, 10)), (84, 84)),
-        ((64, 64), ((5, 10), (8, 12)), (79, 84)),
-        ((20, 64, 64), ((0, 0), (7, 7), (7, 7)), (20, 78, 78)),
-    ]
-
-    all_passed = True
-    for detector_shape, padding, expected_padded in cases:
-        print(f"  Testing detector_shape={detector_shape}, padding={padding}:")
-        P = FiniteDetector(detector_shape, padding=padding)
-
-        padding_ok = P.padded_shape == expected_padded
-        print(f"    Padded shape: {P.padded_shape} (expected {expected_padded})")
-        if not padding_ok:
-            print("    [FAIL] Padded shape mismatch")
-            all_passed = False
-
-        x = mx.random.normal(P.padded_shape)
-        y = mx.random.normal(P.detector_shape)
-        Px = P.forward(x)
-        Pstar_y = P.adjoint(y)
-        lhs = mx.sum(Px * y).item()
-        rhs = mx.sum(x * Pstar_y).item()
-        denom = max(abs(lhs), abs(rhs), 1e-10)
-        err = abs(lhs - rhs) / denom
-        passed = err < RTOL
-        shape_ok = Px.shape == P.detector_shape and Pstar_y.shape == P.padded_shape
-        if not shape_ok:
-            print(f"    [FAIL] Shape mismatch: Px={Px.shape}, P*y={Pstar_y.shape}")
-            passed = False
-        status = "PASS" if passed else "FAIL"
-        print(f"    [{status}] <Px,y>={lhs:.8f}, <x,P*y>={rhs:.8f}, err={err:.2e}")
-        all_passed = all_passed and passed
-
-    print(f"  operator_norm_sq = {P.operator_norm_sq}")
-    if P.operator_norm_sq != 1.0:
-        print("    [FAIL] operator_norm_sq should be 1.0")
-        all_passed = False
-
-    return all_passed
-
-
 def main():
     print("=" * 60)
     print("   MLX Linear Operators - Adjoint Correctness Tests")
@@ -539,9 +415,7 @@ def main():
     results["Hessian2D"] = test_hessian_2d_adjoint()
     results["Gradient3D"] = test_grad_3d_adjoint()
     results["Hessian3D"] = test_hessian_3d_adjoint()
-    results["downsample/upsample"] = test_downsample_upsample_adjoint()
     results["FFTConvolver"] = test_fft_convolver_adjoint()
-    results["FiniteDetector"] = test_finite_detector_adjoint()
 
     # Summary
     print("\n" + "=" * 60)
