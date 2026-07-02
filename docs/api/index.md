@@ -15,9 +15,13 @@ deconlib/
 │   └── aberrations/        # Aberration classes
 ├── deconvolution/          # Image restoration (MLX)
 │   ├── base.py             # Result dataclasses
-│   ├── linops_mlx.py       # Linear operators
+│   ├── composition.py      # LinearOperator protocol, compose()
+│   ├── core_operators.py   # Pad, Crop, FractionalArea{Down,Up}sample
+│   ├── linops_mlx.py       # LinearFFTConvolver, ICF, Gradient/Hessian
+│   ├── shapes.py           # data/visible/hidden three-space shape math
 │   ├── rl_mlx.py           # Richardson-Lucy
-│   └── pdhg_mlx.py         # PDHG (Chambolle-Pock)
+│   ├── pdhg_mlx.py         # PDHG (Chambolle-Pock)
+│   └── tile_processing.py  # Tiled deconvolution for large images
 └── utils/                  # Mathematical utilities
     ├── fourier.py          # FFT utilities
     ├── zernike.py          # Zernike polynomials
@@ -60,9 +64,12 @@ deconlib/
 | [`richardson_lucy_with_operator`](deconvolution.md) | Richardson-Lucy with explicit forward operator |
 | [`solve_pdhg_mlx`](deconvolution.md) | PDHG deconvolution |
 | [`solve_pdhg_with_operator`](deconvolution.md) | PDHG with custom operator |
-| [`FFTConvolver`](deconvolution.md) | FFT convolution operator |
-| [`IntegratedDetectorConvolver`](deconvolution.md) | Positive fractional pixel integration |
+| [`compose`](deconvolution.md) | Compose linear operators into a forward model |
+| [`LinearFFTConvolver`](deconvolution.md) | Wrap-free (linear) FFT convolution — the PSF blur operator |
+| [`Crop`](deconvolution.md) | Center-crop to detector shape, with proper adjoint |
+| [`FractionalAreaDownsample`](deconvolution.md) | Intensity-preserving resampling for super-resolution/coarse sampling |
 | [`MatrixOperator`](deconvolution.md) | Matrix-based linear operator |
+| [`process_tiles`](deconvolution.md) | Tiled deconvolution for large images |
 
 ### Utilities
 

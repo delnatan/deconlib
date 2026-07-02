@@ -1,319 +1,287 @@
-"""Tiled deconvolution for large 3D fluorescence microscopy images.
+"""Tiled deconvolution for images too large to process in one pass.
 
-For data too large to process in a single pass, this module tiles the image in
-the lateral (Y, X) dimensions and stitches core regions into the output. Z is
-kept whole when Nz is small (typical for widefield / confocal data).
+Three separate concerns, three separate pieces:
 
-Each tile has its own forward model (same PSF, tile-specific padded shape).
-Guard pixels in data space absorb boundary artifacts; only the core visible
-region is written to the output.
+  1. Physics — :class:`~.forward_model.ForwardModel`
+     (``make_forward_model(psf, tile_shape, zoom)``), built ONCE.
+  2. Geometry — :func:`plan_tiles`, pure shape arithmetic producing a
+     :class:`TilePlan` (no arrays touched).
+  3. Algorithm — any callable ``solve(data_tile, model) -> visible array``.
 
-Two overlaps work together:
+:func:`process_tiles` is just the loop gluing them together, so the solver
+you prototyped on a small crop runs tile-by-tile unchanged:
 
-  - Guard pixels (data space): extra data pulled in on each side of the tile's
-    core so that PSF blurring artifacts stay outside the write region.
+    >>> solve = richardson_lucy_solver(num_iter=100, background=100.0)
+    >>> small = solve(crop, make_forward_model(psf, crop.shape, zoom))  # prototype
+    >>> full = process_tiles(data, psf, zoom, solve)                    # scale up
 
-  - PSF-margin padding (visible space): the RL reconstruction domain is padded
-    by (psf_dim - 1) / 2 per side, exactly as in the full-image forward model,
-    so the sensitivity is well-defined at the edges of the visible tile.
+Fixed-shape sliding window (overlap-save)
+-----------------------------------------
+Every tile reads a data-space window of exactly the same shape
+(``TilePlan.tile_shape``), so a single ForwardModel serves all tiles.
+Interior tiles step by the core size (window minus a guard on each side);
+the last tile along an axis is shifted back so its window stays inside the
+image, overlapping its neighbor. Each tile *owns* a disjoint interval of the
+output — ownership intervals partition the image, so every visible pixel is
+written exactly once no matter how the windows overlap::
 
-After RL, valid_slices extracts the visible region from the padded domain,
-and result_crop_slice removes the guard border before stitching.
+    axis of length N, window T, guard g, core C = T - 2g
 
-                data_read_slice  (core + guard pixels)
-        ┌─────────────────────────────────────────────┐
-        │  guard  │         CORE DATA         │ guard │
-        └─────────────────────────────────────────────┘
-                             ↓  per-tile forward model + RL
-        ┌────────────────────────────────────────────────────────┐
-        │ PSF pad │ guard_vis │   CORE VISIBLE   │ guard_vis │ PSF pad │
-        └────────────────────────────────────────────────────────┘
-                              ↑ visible_write_slice  →  output array
+    tile 0   |<------- T ------->|
+             [ own [0, C) )
+    tile 1        |<------- T ------->|
+                    g [ own [C, 2C) ) g
+    last          |<------- T ------->|   <- shifted so window ends at N
+                     [ own [2C, N) )
+
+Guard pixels absorb the solver's boundary artifacts: each tile is
+deconvolved with real data context on both sides of its owned core, and the
+contaminated border is discarded by ``TileSpec.crop`` before writing.
 """
 
 from dataclasses import dataclass
+from itertools import product
 from typing import Callable, List, Optional, Tuple, Union
 
-import mlx.core as mx
 import numpy as np
 
-from .composition import compose
-from .core_operators import Crop, FractionalAreaDownsample
-from .linops_mlx import LinearFFTConvolver
-from .rl_mlx import richardson_lucy_with_operator
-from .shapes import compute_padded_shape, get_valid_slices
+from .forward_model import ForwardModel, make_forward_model
+from .linops_mlx import _next_smooth_number
 
-__all__ = ["TileSpec", "TileOperator", "compute_tiles", "make_tile_operator", "process_tiles"]
+__all__ = [
+    "TileSpec",
+    "TilePlan",
+    "plan_tiles",
+    "process_tiles",
+    "optimal_tile_size",
+]
+
+# solve(data_tile, model) -> visible-space array of model.visible_shape
+Solver = Callable[[np.ndarray, ForwardModel], np.ndarray]
 
 
-@dataclass
+@dataclass(frozen=True)
 class TileSpec:
-    """Coordinates for one tile, linking data space to visible output space.
+    """Coordinates for one tile.
 
-    data_read_slice:     what to extract from the input (core + guard pixels)
-    visible_write_slice: where in the output to write the deconvolved core
-    result_crop_slice:   how to trim the RL visible-space result before writing
+    read:  what to extract from the input (data space); every tile's read
+           window has the same shape (``TilePlan.tile_shape``).
+    write: where in the output the owned core goes (visible space).
+    crop:  the owned core within the tile's visible-space result.
     """
+
     index: Tuple[int, ...]
-    data_read_slice: Tuple[slice, ...]
-    visible_write_slice: Tuple[slice, ...]
-    result_crop_slice: Tuple[slice, ...]
+    read: Tuple[slice, ...]
+    write: Tuple[slice, ...]
+    crop: Tuple[slice, ...]
 
 
-@dataclass
-class TileOperator:
-    """Forward model and shape metadata for one tile.
+@dataclass(frozen=True)
+class TilePlan:
+    """Deterministic tiling of a data volume.
 
-    op:           Composed forward operator (padded_visible → data tile).
-    valid_slices: Slices that extract the visible region from the padded RL output.
-    padded_shape: Full RL reconstruction domain (padded visible space).
+    tile_shape:    Data-space read shape, identical for every tile — build
+                   one ``make_forward_model(psf, plan.tile_shape, zoom)``
+                   and reuse it for all of them.
+    visible_shape: Shape of the stitched output.
+    tiles:         One TileSpec per tile; write regions partition the output.
     """
-    op: object
-    valid_slices: Tuple[slice, ...]
-    padded_shape: Tuple[int, ...]
+
+    data_shape: Tuple[int, ...]
+    tile_shape: Tuple[int, ...]
+    visible_shape: Tuple[int, ...]
+    tiles: List[TileSpec]
 
 
-def _tiles_1d(
-    N: int, V: int, tile_size: int, guard: int, zoom: float
+def _axis_tiles(
+    N: int, V: int, T: int, guard: int, zoom: float
 ) -> List[Tuple[slice, slice, slice]]:
-    """1D tile specs: list of (data_read_slice, vis_write_slice, result_crop_slice).
+    """1D tile coordinates: list of (read, write, crop) slices.
 
-    Uses overlap-save tiling: splits N into as-even-as-possible core segments
-    (each no larger than tile_size - 2*guard), like cutting a brownie pan into
-    even squares rather than full-size pieces plus one odd-sized leftover.
+    Read windows all have width T. Ownership boundaries are rounded from
+    global data positions, so per-tile rounding never drifts.
     """
-    core_size = tile_size - 2 * guard
-    if core_size <= 0:
-        raise ValueError(
-            f"tile_size ({tile_size}) must be > 2 * guard ({2 * guard})"
-        )
+    if T >= N:
+        return [(slice(0, N), slice(0, V), slice(0, V))]
 
-    n_tiles = max(1, (N + core_size - 1) // core_size)
-    base, extra = divmod(N, n_tiles)
-    core_starts = []
-    pos = 0
-    for i in range(n_tiles):
-        core_starts.append(pos)
-        pos += base + (1 if i < extra else 0)
-    core_stops = core_starts[1:] + [N]
+    core = T - 2 * guard
+    if core <= 0:
+        raise ValueError(f"tile size ({T}) must be > 2 * guard ({2 * guard})")
 
-    # Visible boundaries computed once from global positions to avoid rounding drift
-    vis_starts = [round(s * zoom) for s in core_starts]
-    vis_stops = vis_starts[1:] + [V]
-
+    n_tiles = -(-N // core)  # ceil
     tiles = []
-    for cs, ce, vs, ve in zip(core_starts, core_stops, vis_starts, vis_stops):
-        rs = max(0, cs - guard)
-        re = min(N, ce + guard)
-        guard_before = cs - rs
-        vis_core = ve - vs
-        crop_s = round(guard_before * zoom)
-        crop_e = crop_s + vis_core
-        tiles.append((slice(rs, re), slice(vs, ve), slice(crop_s, crop_e)))
-
+    for i in range(n_tiles):
+        own0 = i * core
+        own1 = min(own0 + core, N)
+        r0 = min(max(own0 - guard, 0), N - T)  # clamp window inside image
+        w0, w1 = round(own0 * zoom), round(own1 * zoom)
+        v0 = round(r0 * zoom)  # visible-space offset of this tile's window
+        tiles.append((slice(r0, r0 + T), slice(w0, w1), slice(w0 - v0, w1 - v0)))
     return tiles
 
 
-def compute_tiles(
-    data_shape: Tuple[int, ...],
-    zoom_factors: Tuple[float, ...],
-    guard_px: int,
-    tile_yx_size: int = 512,
-    min_z_slices: int = 48,
-) -> List[TileSpec]:
-    """Compute tile specifications for tiled 3D deconvolution.
+def optimal_tile_size(N: int, guard: int, tile_size: int) -> int:
+    """FFT-friendly, balanced read-window size for one tiled axis.
 
-    Assumes (..., Z, Y, X) layout. Z is not tiled when Nz <= min_z_slices.
-    Y and X use overlap-save tiling with no sliver tiles.
+    ``tile_size`` is the *nominal* size of each tile's owned core (data
+    pixels, guard excluded) — not a hard cap on the read window. This
+    splits the axis into the number of tiles implied by
+    ``ceil(N / tile_size)``, then rebalances the core evenly across that
+    many tiles (``ceil(N / n_tiles)``) so no tile is left with a thin
+    trailing sliver the way naive ceil-division tiling can. The guard is
+    added on both sides, and the result is rounded up to the next 5-smooth
+    size (see :func:`~.linops_mlx.fast_padded_shape`) for peak GPU FFT
+    throughput.
+
+    Returns ``N`` unchanged when the whole axis already fits in one
+    (un-guarded) tile, i.e. ``N <= tile_size``.
+
+    Raises:
+        ValueError: if ``guard`` is too large for a balanced tile's core
+            plus guard to fit within the axis.
+    """
+    if N <= tile_size:
+        return N
+
+    n_tiles = -(-N // tile_size)  # ceil
+    core = -(-N // n_tiles)  # balanced core, <= tile_size
+    window = core + 2 * guard
+    if window > N:
+        raise ValueError(
+            f"guard ({guard}) too large for tile_size ({tile_size}) on an "
+            f"axis of length {N}: balanced core {core} + 2*guard = {window} "
+            f"would exceed the axis"
+        )
+    return min(_next_smooth_number(window), N)
+
+
+def plan_tiles(
+    data_shape: Tuple[int, ...],
+    zoom: Union[float, Tuple[float, ...]],
+    guard: int,
+    tile_size: int = 512,
+    min_z_slices: int = 48,
+) -> TilePlan:
+    """Plan a fixed-shape tiling of a data volume.
+
+    Assumes (..., Z, Y, X) layout. Y and X are always tiled; Z only when
+    Nz > min_z_slices. Axes shorter than tile_size get a single whole-axis
+    tile (their window is the full axis), so the read shape stays uniform.
 
     Args:
-        data_shape:    Shape of the full input (Z, Y, X).
-        zoom_factors:  Visible / data pixel ratio per dimension (>1 = super-res).
-        guard_px:      Guard pixels in data space on each lateral side of a tile.
-        tile_yx_size:  Y and X tile size in data pixels (includes guard both sides).
-        min_z_slices:  Keep full Z when Nz <= this; tile Z only if larger.
+        data_shape: Shape of the full input (Z, Y, X).
+        zoom:       Visible pixels per data pixel, >= 1. Scalar or per-axis.
+        guard:      Guard pixels (data space) on each side of a tile's core.
+        tile_size:  Nominal core size for tiled axes, in data pixels (guard
+                    excluded). See :func:`optimal_tile_size` for how the
+                    actual read window is derived from it.
+        min_z_slices: Keep full Z when Nz <= this value.
 
     Returns:
-        List of TileSpec, one entry per tile.
+        TilePlan with a uniform ``tile_shape`` and one TileSpec per tile.
     """
     ndim = len(data_shape)
     if ndim < 2:
         raise ValueError("data_shape must be at least 2D")
+    if isinstance(zoom, (int, float)):
+        zoom = (float(zoom),) * ndim
+    else:
+        zoom = tuple(float(z) for z in zoom)
 
-    visible_shape = tuple(max(1, round(d * z)) for d, z in zip(data_shape, zoom_factors))
+    data_shape = tuple(int(n) for n in data_shape)
+    visible_shape = tuple(max(1, round(n * z)) for n, z in zip(data_shape, zoom))
 
-    # Axes to tile: always Y (ndim-2) and X (ndim-1); Z (ndim-3) only if large
     tile_axes = {ndim - 1, ndim - 2}
     if ndim >= 3 and data_shape[ndim - 3] > min_z_slices:
         tile_axes.add(ndim - 3)
 
-    per_axis: List[List[Tuple[slice, slice, slice]]] = []
-    for i in range(ndim):
-        N, V, z = data_shape[i], visible_shape[i], zoom_factors[i]
-        if i in tile_axes:
-            per_axis.append(_tiles_1d(N, V, tile_yx_size, guard_px, z))
-        else:
-            per_axis.append([(slice(0, N), slice(0, V), slice(0, V))])
+    per_axis = []
+    tile_shape = []
+    for i, (N, V, z) in enumerate(zip(data_shape, visible_shape, zoom)):
+        T = optimal_tile_size(N, guard, tile_size) if i in tile_axes else N
+        tile_shape.append(T)
+        per_axis.append(_axis_tiles(N, V, T, guard, z))
 
-    # Cartesian product of per-axis tiles
-    tiles: List[TileSpec] = []
-
-    def _product(dim, idx, d_slices, v_slices, r_slices):
-        if dim == ndim:
-            tiles.append(TileSpec(
-                index=tuple(idx),
-                data_read_slice=tuple(d_slices),
-                visible_write_slice=tuple(v_slices),
-                result_crop_slice=tuple(r_slices),
-            ))
-            return
-        for j, (ds, vs, rs) in enumerate(per_axis[dim]):
-            _product(dim + 1, idx + [j], d_slices + [ds], v_slices + [vs], r_slices + [rs])
-
-    _product(0, [], [], [], [])
-    return tiles
-
-
-def make_tile_operator(
-    psf: np.ndarray,
-    tile_data_shape: Tuple[int, ...],
-    zoom_factors: Tuple[float, ...],
-) -> TileOperator:
-    """Build the forward model for one tile.
-
-    Mirrors the full-image operator chain:
-        tile_padded_visible → convolve → downsample → crop → tile_data
-
-    The padded domain is (tile_visible + PSF margins), which guarantees that
-    tile_downsampled >= tile_data_shape so the Crop is always valid.
-
-    Args:
-        psf:             Point spread function at visible-space pixel spacing.
-        tile_data_shape: Shape of the data tile (including guard pixels).
-        zoom_factors:    Visible / data pixel ratio per dimension.
-
-    Returns:
-        TileOperator with op, valid_slices, and padded_shape.
-        padded_shape is the RL reconstruction domain; use it to build a flat
-        initial estimate: mx.full(tile_op.padded_shape, init_val).
-    """
-    tile_visible = tuple(
-        max(1, round(d * z)) for d, z in zip(tile_data_shape, zoom_factors)
+    tiles = [
+        TileSpec(
+            index=tuple(i for i, _ in combo),
+            read=tuple(t[0] for _, t in combo),
+            write=tuple(t[1] for _, t in combo),
+            crop=tuple(t[2] for _, t in combo),
+        )
+        for combo in product(*(list(enumerate(a)) for a in per_axis))
+    ]
+    return TilePlan(
+        data_shape=data_shape,
+        tile_shape=tuple(tile_shape),
+        visible_shape=visible_shape,
+        tiles=tiles,
     )
-    tile_padded, tile_padding = compute_padded_shape(tile_visible, psf.shape)
-    tile_valid_slices = get_valid_slices(tile_padded, tile_visible, tile_padding)
-    # Downsampled padded domain; always > tile_data_shape due to PSF margins
-    tile_downsampled = tuple(
-        max(1, round(p / z)) for p, z in zip(tile_padded, zoom_factors)
-    )
-
-    convolver = LinearFFTConvolver(psf, signal_shape=tile_padded, normalize=True)
-    downsampler = FractionalAreaDownsample(scale=zoom_factors, in_shape=tile_padded)
-    detector = Crop(tile_downsampled, tile_data_shape)
-    op = compose(detector, downsampler, convolver)
-
-    return TileOperator(op=op, valid_slices=tile_valid_slices, padded_shape=tile_padded)
 
 
 def process_tiles(
     data: np.ndarray,
     psf: np.ndarray,
-    zoom_factors: Union[float, Tuple[float, ...]],
-    num_iter: int,
-    background: float = 0.0,
+    zoom: Union[float, Tuple[float, ...]],
+    solve: Solver,
     *,
-    guard_px: Optional[int] = None,
-    tile_yx_size: int = 512,
+    guard: Optional[int] = None,
+    tile_size: int = 512,
     min_z_slices: int = 48,
-    init_value: Optional[float] = None,
-    rl_kwargs: Optional[dict] = None,
     on_tile_done: Optional[Callable] = None,
     verbose: bool = False,
 ) -> np.ndarray:
-    """Tiled Richardson-Lucy deconvolution for large 3D images.
+    """Deconvolve a large image tile by tile with any solver.
 
-    Tiles the data in Y and X (and optionally Z), deconvolves each tile with
-    a per-tile forward model, and stitches the core visible regions.
+    Plans a fixed-shape tiling, builds ONE forward model shared by every
+    tile, runs ``solve(data_tile, model)`` per tile, and stitches the owned
+    cores into the output.
 
     Args:
-        data:          Input array (Z, Y, X) in data space.
-        psf:           Point spread function at visible-space pixel spacing.
-        zoom_factors:  Visible / data pixel ratio per dimension (>1 = super-res).
-        num_iter:      RL iterations per tile.
-        background:    Constant background in data-space counts.
-        guard_px:      Guard pixels in data space per lateral side.
-                       Defaults to half the PSF lateral width.
-        tile_yx_size:  Tile size in Y and X including guard (data pixels).
-        min_z_slices:  Keep full Z when Nz <= this value.
-        init_value:    Optional flat initial estimate (counts/voxel in visible
-                       space) for every tile's padded reconstruction domain,
-                       e.g. ``background / prod(zoom_factors)``. Defaults to
-                       RL's own ``blur_op.adjoint(data)`` initialization.
-        rl_kwargs:     Extra keyword arguments forwarded to
-                       richardson_lucy_with_operator (e.g. eval_interval).
-        on_tile_done:  Optional callback(spec, output_so_far). Return truthy
-                       to stop early (e.g. to write to an ImageBuffer for live
-                       preview without importing pyvistra here).
-        verbose:       Print per-tile progress.
+        data:      Input array (Z, Y, X) in data space.
+        psf:       Point spread function at visible-space pixel spacing.
+        zoom:      Visible pixels per data pixel, >= 1. Scalar or per-axis.
+        solve:     Callable ``(data_tile, model) -> visible-space array`` of
+                   ``model.visible_shape``, e.g. ``richardson_lucy_solver(...)``
+                   or any prototype developed on a small crop.
+        guard:     Guard pixels (data space) per side of a tile's core.
+                   Defaults to half the PSF lateral width.
+        tile_size: Nominal core size for tiled axes, in data pixels (guard
+                   excluded). See :func:`optimal_tile_size`.
+        min_z_slices: Keep full Z when Nz <= this value.
+        on_tile_done: Optional callback ``(spec, output_so_far)``; return
+                   truthy to stop early (e.g. for live preview).
+        verbose:   Print per-tile progress.
 
     Returns:
-        Reconstructed array in visible space (float32).
+        Stitched reconstruction in visible space (float32).
     """
-    data_shape = data.shape
-    ndim = len(data_shape)
+    if guard is None:
+        guard = max(psf.shape[-2:]) // 2
 
-    if isinstance(zoom_factors, (int, float)):
-        zoom_factors = (float(zoom_factors),) * ndim
-    else:
-        zoom_factors = tuple(float(z) for z in zoom_factors)
+    plan = plan_tiles(data.shape, zoom, guard, tile_size, min_z_slices)
+    model = make_forward_model(psf, plan.tile_shape, zoom)
+    output = np.zeros(plan.visible_shape, dtype=np.float32)
 
-    if guard_px is None:
-        guard_px = max(psf.shape[-2:]) // 2
+    n = len(plan.tiles)
+    for i, spec in enumerate(plan.tiles):
+        tile = np.asarray(data[spec.read], dtype=np.float32)
+        restored = np.asarray(solve(tile, model))
 
-    visible_shape = tuple(max(1, round(d * z)) for d, z in zip(data_shape, zoom_factors))
-    output = np.zeros(visible_shape, dtype=np.float32)
-
-    tiles = compute_tiles(data_shape, zoom_factors, guard_px, tile_yx_size, min_z_slices)
-    n = len(tiles)
-    extra_rl = rl_kwargs or {}
-
-    for i, spec in enumerate(tiles):
-        data_tile = np.asarray(data[spec.data_read_slice], dtype=np.float32)
-        tile_op = make_tile_operator(psf, data_tile.shape, zoom_factors)
-
-        call_kwargs = dict(extra_rl)
-        if init_value is not None:
-            call_kwargs.setdefault(
-                "init", mx.full(tile_op.padded_shape, float(init_value), dtype=mx.float32)
-            )
-
-        result = richardson_lucy_with_operator(
-            observed=data_tile,
-            blur_op=tile_op.op,
-            num_iter=num_iter,
-            background=background,
-            **call_kwargs,
-        )
-
-        # Extract visible region from padded RL output, then remove guard border.
-        # Clip crop_e to actual dimension in case of ±1 rounding at image edges.
-        visible_result = np.asarray(result.restored[tile_op.valid_slices])
+        # ±1 rounding defense: clip crop to the result, match write to core.
         crop = tuple(
-            slice(s.start, min(s.stop, visible_result.shape[j]))
-            for j, s in enumerate(spec.result_crop_slice)
+            slice(c.start, min(c.stop, restored.shape[j]))
+            for j, c in enumerate(spec.crop)
         )
-        core = visible_result[crop]
-
-        # Write to output; adjust stop to match actual core size (±1 rounding)
+        core = restored[crop]
         write = tuple(
-            slice(s.start, s.start + core.shape[j])
-            for j, s in enumerate(spec.visible_write_slice)
+            slice(w.start, w.start + core.shape[j])
+            for j, w in enumerate(spec.write)
         )
         output[write] = core
 
         if verbose:
             print(f"  tile {i + 1}/{n} {spec.index} done")
-
         if on_tile_done is not None and on_tile_done(spec, output):
             break
 

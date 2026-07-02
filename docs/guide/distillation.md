@@ -82,7 +82,7 @@ print(det.amplitudes[:5])          # matched-filter amplitude estimate
 | --- | --- | --- |
 | `background` | `np.median(image)` for sparse beads | Internal `np.median` of a dim image is dominated by camera baseline. |
 | `noise_floor` | Same as `background` (default) | Camera read-noise variance floor for the Poisson model. |
-| `init_psf` | Theoretical widefield PSF on the distillation grid | Use [`compute_widefield_psf`](widefield.md) with `fft_coords` for the Z axis. |
+| `init_psf` | Theoretical widefield PSF on the distillation grid | Use [`compute_widefield_psf`](../api/psf/widefield.md) with `fft_coords` for the Z axis. |
 | `psf_shape` | Compact box containing the diffraction extent + a bit | `(40, 160, 160)` works for 60× oil at λ=0.6 µm, dx≈0.1 µm. |
 | `min_separation` | ~2× lateral PSF FWHM in pixels | Avoids picking the same bead twice from sidelobes. |
 | `min_intensity` | Tune with `detect_beads` — pick a value between bead peaks and the noise floor | Use the GUI / histogram. |

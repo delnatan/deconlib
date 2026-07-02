@@ -12,9 +12,12 @@ Using this module is a two-step process:
 
        >>> R = compose(Crop(...), LinearFFTConvolver(...))   # object -> blur -> crop
 
-   ``R.forward(x)`` simulates the camera; ``R.adjoint(y)`` is its transpose
-   (used internally by every solver below, and by external ones via
-   :func:`as_numpy_op`).
+   For the standard chain (convolve -> downsample -> crop on a PSF-padded
+   reconstruction domain), :func:`make_forward_model` builds it for you and
+   returns a :class:`ForwardModel` bundling the operator with its shape
+   bookkeeping. ``R.forward(x)`` simulates the camera; ``R.adjoint(y)`` is
+   its transpose (used internally by every solver below, and by external
+   ones via :func:`as_numpy_op`).
 
 2. **Hand ``R`` to a solver entry point** — this module has exactly two:
 
@@ -47,7 +50,7 @@ overlap, then crop back down to ``N``. :class:`LinearFFTConvolver` does
 exactly this — pad, circularly convolve via :class:`FFTConvolver`, crop —
 and its adjoint runs the same three steps in reverse (pad, correlate, crop),
 so ``compose(Crop(...), LinearFFTConvolver(...))`` is a valid adjoint pair
-end to end. This is the operator every recipe in ``examples/RECIPES.md``
+end to end. This is the operator every recipe in ``RECIPES.md`` (repo root)
 builds the forward model around, since it is the physically correct model
 for how a PSF actually blurs a finite object.
 
@@ -86,7 +89,13 @@ from .pdhg_mlx import (
 )
 from .rl_mlx import (
     richardson_lucy_with_operator,
+    richardson_lucy_solver,
     RLResult,
+)
+from .nlcg_mlx import (
+    nlcg_with_operator,
+    nlcg_solver,
+    NLCGResult,
 )
 
 from .linops_mlx import (
@@ -121,18 +130,23 @@ from .shapes import (
     compute_padded_shape,
     get_valid_slices,
 )
+from .forward_model import (
+    ForwardModel,
+    make_forward_model,
+)
 from .tile_processing import (
     TileSpec,
-    TileOperator,
-    compute_tiles,
-    make_tile_operator,
+    TilePlan,
+    plan_tiles,
     process_tiles,
+    optimal_tile_size,
 )
 
 __all__ = [
     # Result types
     "MLXDeconvolutionResult",
     "RLResult",
+    "NLCGResult",
     # MLX Algorithms - PDHG
     "solve_pdhg_mlx",
     "solve_pdhg_with_operator",
@@ -141,6 +155,10 @@ __all__ = [
     "HessianRegularizer",
     # MLX Algorithms - Richardson-Lucy
     "richardson_lucy_with_operator",
+    "richardson_lucy_solver",
+    # MLX Algorithms - Nonlinear conjugate gradient (Schaefer 2001)
+    "nlcg_with_operator",
+    "nlcg_solver",
     # Shape utilities
     "compute_visible_shape",
     "compute_padded_shape",
@@ -170,10 +188,13 @@ __all__ = [
     "Crop",
     "FractionalAreaDownsample",
     "FractionalAreaUpsample",
+    # Forward model
+    "ForwardModel",
+    "make_forward_model",
     # Tile processing
     "TileSpec",
-    "TileOperator",
-    "compute_tiles",
-    "make_tile_operator",
+    "TilePlan",
+    "plan_tiles",
     "process_tiles",
+    "optimal_tile_size",
 ]

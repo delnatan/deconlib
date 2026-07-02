@@ -24,10 +24,12 @@ or ``False`` to continue.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
+
+from .composition import LinearOperator
 
 
 @dataclass
@@ -80,7 +82,7 @@ def poisson_i_divergence(
 
 def richardson_lucy_with_operator(
     observed: Union[np.ndarray, mx.array],
-    blur_op,
+    blur_op: LinearOperator,
     num_iter: int = 50,
     background: float = 0.0,
     init: Optional[Union[np.ndarray, mx.array]] = None,
@@ -181,3 +183,44 @@ def richardson_lucy_with_operator(
         full_shape=full_shape,
         valid_slices=None,
     )
+
+
+def richardson_lucy_solver(
+    num_iter: int = 50,
+    background: float = 0.0,
+    init_value: Optional[float] = None,
+    **rl_kwargs: Any,
+) -> Callable[[np.ndarray, "ForwardModel"], np.ndarray]:
+    """Adapt Richardson-Lucy to the ``solve(data, model)`` contract.
+
+    Returns a callable that deconvolves one image (or tile) against a
+    :class:`~.forward_model.ForwardModel` and returns the visible-space
+    result — the signature :func:`~.tile_processing.process_tiles` expects,
+    and equally usable standalone on a small crop for prototyping.
+
+    Args:
+        num_iter: RL iterations.
+        background: Constant background in data-space counts.
+        init_value: Optional flat initial estimate (counts/voxel in visible
+            space) on the padded reconstruction domain, e.g.
+            ``data_mean / prod(zoom)``. Defaults to RL's own
+            ``adjoint(data)`` initialization.
+        **rl_kwargs: Extra keyword arguments forwarded to
+            :func:`richardson_lucy_with_operator` (e.g. eval_interval).
+    """
+
+    def solve(data: np.ndarray, model) -> np.ndarray:
+        init = None
+        if init_value is not None:
+            init = mx.full(model.padded_shape, float(init_value), dtype=mx.float32)
+        result = richardson_lucy_with_operator(
+            observed=data,
+            blur_op=model.op,
+            num_iter=num_iter,
+            background=background,
+            init=init,
+            **rl_kwargs,
+        )
+        return np.asarray(result.restored[model.valid_slices])
+
+    return solve

@@ -1,10 +1,14 @@
 """Tile-based super-resolution deconvolution with memsolve and Cauchy ICF.
 
-Same per-tile forward model and tiling infrastructure as tiled_rl_demo.py
-(compute_tiles / make_tile_operator, guard pixels in data space, PSF-margin
-padding in visible space), but the per-tile solver is memsolve's Bayesian
-MaxEnt (Poisson likelihood + Cauchy ICF) instead of Richardson-Lucy — the
-same model as the single-pass memsolve_gaussian_icf.py, run tile by tile.
+Same tiling infrastructure as tiled_rl_demo.py (plan_tiles /
+make_forward_model, guard pixels in data space, PSF-margin padding in
+visible space), but the per-tile solver is memsolve's Bayesian MaxEnt
+(Poisson likelihood + Cauchy ICF) instead of Richardson-Lucy — the same
+model as the single-pass memsolve_gaussian_icf.py, run tile by tile.
+
+Because every tile reads a window of the same shape, the forward model,
+the Cauchy ICF, and the flat prior are all built ONCE and reused for every
+tile; the loop body only swaps in each tile's data.
 
 Same dataset/PSF/ICF parameters as memsolve_gaussian_icf.py, so the tiled
 and non-tiled MEM results can be compared directly against each other, and
@@ -21,8 +25,8 @@ from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
     CauchyICF,
     as_numpy_op,
-    compute_tiles,
-    make_tile_operator,
+    make_forward_model,
+    plan_tiles,
 )
 from pyvistra.io import load_image, normalize_to_5d, save_imaris
 
@@ -58,7 +62,10 @@ icf_gamma = 0.07  # micron (physical units, matches visible_pixel_spacing)
 
 max_iter = 40  # MEM solver iterations per tile
 
-tile_yx_size = 140  # lateral tile size in data pixels (incl. guard) -> 2x2 tiles
+tile_yx_size = 140  # nominal lateral tile core size in data pixels (guard
+                    # excluded); see plan_tiles/optimal_tile_size. Actual
+                    # tile count/shape is balanced + rounded to a 5-smooth
+                    # FFT size, reported below from plan.tile_shape.
 # See tiled_rl_demo.py for guard_px tradeoffs (0 = fewest tiles, seam risk
 # is low since LinearFFTConvolver's zero-boundary is physically correct).
 guard_px_override = 4
@@ -101,18 +108,37 @@ psf = compute_widefield_psf(
 print(f"PSF:     {psf.shape}  (visible-space pixels)")
 
 # =============================================================================
-# TILE GRID
+# TILE GRID + SHARED FORWARD MODEL (built once — all tiles have equal shape)
 # =============================================================================
-tiles = compute_tiles(
+plan = plan_tiles(
     data_shape,
     zoom_factors,
-    guard_px=guard_px_override,
-    tile_yx_size=tile_yx_size,
+    guard=guard_px_override,
+    tile_size=tile_yx_size,
     min_z_slices=Nz,  # keep full Z extent
 )
-visible_shape = tuple(max(1, round(d * z)) for d, z in zip(data_shape, zoom_factors))
+visible_shape = plan.visible_shape
 print(f"visible: {visible_shape}")
-print(f"tiles:   {len(tiles)}  (tile_yx={tile_yx_size}, guard={guard_px_override})")
+print(f"tiles:   {len(plan.tiles)} of shape {plan.tile_shape}  (nominal_core={tile_yx_size}, guard={guard_px_override})")
+
+model = make_forward_model(psf, plan.tile_shape, zoom_factors)
+R, Rt = as_numpy_op(model.op)
+
+icf = CauchyICF(
+    shape=model.padded_shape,
+    gammas=(icf_gamma, icf_gamma, icf_gamma),
+    spacings=visible_pixel_spacing,
+    normalize=True,
+)
+C, Ct = as_numpy_op(icf)  # C == Ct (self-adjoint)
+
+
+def RC(h):
+    return R(C(h))
+
+
+def RCt(u):
+    return Ct(Rt(u))
 
 # =============================================================================
 # OUTPUT BUFFER
@@ -140,6 +166,11 @@ print(
     f"prior:   {prior_value:.2f} counts/voxel  (data mean {data_mean:.2f} ÷ zoom {np.prod(zoom_factors):.4f})"
 )
 
+# Flat prior, valid region only (mirrors memsolve_gaussian_icf.py); shared by
+# every tile since they all reconstruct on the same padded domain.
+tile_prior = np.full(model.padded_shape, 1e-10, dtype=np.float32)
+tile_prior[model.valid_slices] = prior_value
+
 mem_config = mem.InferenceConfig(
     map_space="data",
     map_config=mem.MaxEntConfig(
@@ -161,32 +192,12 @@ mem_config = mem.InferenceConfig(
 # PROCESS TILES
 # =============================================================================
 print()
-n = len(tiles)
+n = len(plan.tiles)
 t_start = time.time()
 
-for i, spec in enumerate(tiles):
-    data_tile = raw[spec.data_read_slice]
+for i, spec in enumerate(plan.tiles):
+    data_tile = raw[spec.read]
     print(f"\n--- [{i + 1}/{n}] tile {spec.index}  data {data_tile.shape} ---")
-    tile_op = make_tile_operator(psf, data_tile.shape, zoom_factors)
-    R, Rt = as_numpy_op(tile_op.op)
-
-    icf = CauchyICF(
-        shape=tile_op.padded_shape,
-        gammas=(icf_gamma, icf_gamma, icf_gamma),
-        spacings=visible_pixel_spacing,
-        normalize=True,
-    )
-    C, Ct = as_numpy_op(icf)  # C == Ct (self-adjoint)
-
-    def RC(h):
-        return R(C(h))
-
-    def RCt(u):
-        return Ct(Rt(u))
-
-    # Flat prior, valid region only (mirrors memsolve_gaussian_icf.py)
-    tile_prior = np.full(tile_op.padded_shape, 1e-10, dtype=np.float32)
-    tile_prior[tile_op.valid_slices] = prior_value
 
     problem = mem.LinearInverseProblem(
         y=data_tile.astype(np.float32),
@@ -202,7 +213,7 @@ for i, spec in enumerate(tiles):
     )
 
     if i == 0:
-        # One-time adjoint sanity check on the first tile's operator.
+        # One-time adjoint sanity check on the shared operator.
         validation = mem.validate_problem(problem)
         print(
             f"  [validate] adjoint err {validation.adjoint_rel_error:.2e}, "
@@ -213,16 +224,16 @@ for i, spec in enumerate(tiles):
     mem_result = result.map.result
     f_map = np.asarray(result.map.f, dtype=np.float32)  # visible-space: C(h_map)
 
-    # Extract visible region then trim guard border (mirrors tiled_rl_demo.py)
-    visible_result = f_map[tile_op.valid_slices]
+    # Extract visible region then trim guard border (mirrors process_tiles)
+    visible_result = f_map[model.valid_slices]
     crop = tuple(
         slice(s.start, min(s.stop, visible_result.shape[j]))
-        for j, s in enumerate(spec.result_crop_slice)
+        for j, s in enumerate(spec.crop)
     )
     core = visible_result[crop]
     write = tuple(
         slice(s.start, s.start + core.shape[j])
-        for j, s in enumerate(spec.visible_write_slice)
+        for j, s in enumerate(spec.write)
     )
     output[write] = core
 

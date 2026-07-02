@@ -259,6 +259,8 @@ class FFTConvolver:
             kernel = mx.array(kernel)
 
         self.shape = kernel.shape
+        self.in_shape = tuple(int(s) for s in self.shape)
+        self.out_shape = self.in_shape
         self.axes = tuple(range(-len(self.shape), 0))
 
         if normalize:
@@ -290,6 +292,11 @@ class FFTConvolver:
 
 class LinearFFTConvolver:
     """Wrap-free (linear) convolution, simulated via zero-padded circular FFT.
+
+    Contract: domain and range are both ``signal_shape``. The ``N + M - 1``
+    padding required for wrap-free FFT convolution happens *inside* this
+    operator — never pad its input yourself (that produces a differently
+    blurred, shifted result, the classic "double padding" bug).
 
     FFT convolution is inherently *circular*: multiplying two spectra and
     inverting wraps whatever would fall off one edge back onto the opposite
@@ -334,6 +341,8 @@ class LinearFFTConvolver:
             kernel_np = np.asarray(kernel)
 
         self.signal_shape = tuple(int(s) for s in signal_shape)
+        self.in_shape = self.signal_shape
+        self.out_shape = self.signal_shape
         self.kernel_shape = tuple(int(s) for s in kernel_np.shape)
         if len(self.signal_shape) != len(self.kernel_shape):
             raise ValueError(
@@ -581,6 +590,8 @@ class GaussianICF:
         normalize: bool = True,
     ):
         self.shape = tuple(shape)
+        self.in_shape = tuple(int(s) for s in shape)
+        self.out_shape = self.in_shape
         self.sigmas = tuple(float(s) for s in sigmas)
         self.spacings = tuple(float(s) for s in spacings)
         self.axes = tuple(range(-len(shape), 0))
@@ -649,6 +660,8 @@ class CauchyICF:
         normalize: bool = True,
     ):
         self.shape = tuple(shape)
+        self.in_shape = tuple(int(s) for s in shape)
+        self.out_shape = self.in_shape
         self.gammas = tuple(float(g) for g in gammas)
         self.spacings = tuple(float(s) for s in spacings)
         self.axes = tuple(range(-len(shape), 0))

@@ -47,10 +47,10 @@ psf_axial_halfrange_px = 10        # data z-pixels on each side of focus
 psf_lateral_halfrange_px = 25      # data xy-pixels on each side of axis
 
 # ICF parameters
-icf_gamma = 0.09  # micron (physical units, matches visible_pixel_spacing)
+icf_gamma = 0.085  # micron (physical units, matches visible_pixel_spacing)
 
 # MEM solver parameters
-max_iter = 60
+max_iter = 50
 
 # Output
 output_dir = Path(__file__).parent / "output"
@@ -155,9 +155,15 @@ def RCt(u):
 # integrates flux, so a flat hidden image at mean(data) / prod(zoom_factors) is the
 # default model whose forward prediction matches the data's mean intensity. The flat
 # value is restricted to the valid (unpadded) region; PSF-support padding margins
-# carry no data, so they're left near-zero to tell MEM no flux is expected there.
+# carry no data, so they're set to a small value to tell MEM no flux is expected
+# there. That floor must stay comfortably inside float32 range: memsolve's entropy
+# metric uses mu_diag = max(h, m * 1e-10), so an absurdly small m (e.g. 1e-10)
+# pushes the padding-region h floor down to ~1e-20 -- 20+ orders of magnitude below
+# the valid-region prior -- which blows up the dynamic range of the entropy-metric
+# whitening (sqrt_mu) applied inside the CG operator and degrades its conditioning.
+padding_prior_value = 1e-3
 prior_value = data_np.mean() / np.prod(zoom_factors)
-prior = np.full(padded_visible_shape, 1e-10, dtype=data_np.dtype)
+prior = np.full(padded_visible_shape, padding_prior_value, dtype=data_np.dtype)
 prior[valid_slices] = prior_value
 
 print("\nPrior setup (flat, valid-region only):")

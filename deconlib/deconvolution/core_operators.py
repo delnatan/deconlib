@@ -84,6 +84,8 @@ class Crop:
 
         self.original_shape = tuple(int(s) for s in original_shape)
         self.target_shape = tuple(int(s) for s in target_shape)
+        self.in_shape = self.original_shape
+        self.out_shape = self.target_shape
         self.operator_norm_sq = 1.0
 
         # Compute center crop slices and padding for adjoint
@@ -124,81 +126,14 @@ class Crop:
 # (fast_padded_shape) that this module doesn't need to duplicate.
 
 
-def _overlap_weights_1d(input_size: int, output_size: int) -> mx.array:
-    """Fractional overlap weights for 1D resampling: shape (output_size, input_size).
-
-    Computes the fractional area overlap between output pixels (intervals)
-    and input pixels (intervals) for area-preserving resampling.
-    """
-    scale = input_size / output_size
-
-    # Output pixel boundaries in input coordinate space
-    i = mx.arange(output_size, dtype=mx.float32)
-    i_start = i * scale
-    i_end = (i + 1) * scale
-
-    # Input pixel boundaries (always [j, j+1) in input coordinates)
-    j = mx.arange(input_size, dtype=mx.float32)
-    j_start = j
-    j_end = j + 1.0
-
-    # overlap[i,j] = intersection length of [i_start, i_end) and [j_start, j_end)
-    return mx.maximum(
-        0.0,
-        mx.minimum(i_end[:, None], j_end[None, :]) -
-        mx.maximum(i_start[:, None], j_start[None, :])
-    )
-
-
-# MLX Metal matmul silently returns zeros for the first (B - 65536) rows when
-# the batch dimension B exceeds ~65536. Chunking into smaller calls avoids this.
-_MATMUL_CHUNK = 32768
-
-
-def _apply_weights_1d(
-    x: mx.array,
-    weights: mx.array,
-    axis: int,
-    adjoint: bool
-) -> mx.array:
-    """Apply 1D resampling weights via matrix multiply.
-
-    W has shape (M, N) where M = output_size, N = input_size.
-
-    Forward  (adjoint=False): y[b,i] = sum_j W[i,j] * x[b,j]  →  x_flat @ W.T
-    Adjoint  (adjoint=True):  y[b,j] = sum_i W[i,j] * x[b,i]  →  x_flat @ W
-
-    Using matmul avoids the O(B*M*N) intermediate that the broadcast+sum approach
-    allocates, and lets the Metal back-end use hardware matrix-multiply shaders.
-    Large batches are split into chunks to work around a Metal matmul size limit.
-    """
-    axis = axis % x.ndim
-    x_moved = mx.moveaxis(x, axis, -1)  # (..., N or M)
-    batch_shape = x_moved.shape[:-1]
-    x_flat = x_moved.reshape(-1, x_moved.shape[-1])  # (B, N or M)
-
-    n_batch = x_flat.shape[0]
-    if n_batch > _MATMUL_CHUNK:
-        chunks = []
-        for start in range(0, n_batch, _MATMUL_CHUNK):
-            c = x_flat[start : start + _MATMUL_CHUNK]
-            chunks.append(c @ weights if adjoint else c @ weights.T)
-        result_flat = mx.concatenate(chunks, axis=0)
-    elif adjoint:
-        result_flat = x_flat @ weights        # (B, M) @ (M, N) → (B, N)
-    else:
-        result_flat = x_flat @ weights.T      # (B, N) @ (N, M) → (B, M)
-
-    result_moved = result_flat.reshape(*batch_shape, -1)
-    return mx.moveaxis(result_moved, -1, axis)
-
-
 def _banded_overlap_weights_1d(
     n_large: int, n_small: int
 ) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
-    """Banded (fixed-window) overlap weights, equivalent to the dense
-    (n_small, n_large) matrix from :func:`_overlap_weights_1d` but
-    represented as small per-row windows so resampling can be applied with
+    """Banded (fixed-window) fractional-area overlap weights.
+
+    Equivalent to the dense (n_small, n_large) matrix W of interval overlaps
+    ``W[i, j] = |[i*scale, (i+1)*scale) ∩ [j, j+1)|`` (large-grid coordinates)
+    but represented as small per-row windows so resampling can be applied with
     a gather + weighted-sum instead of a matmul.
 
     MLX's GPU (Metal) matmul kernel loses several digits of fp32 precision
@@ -263,13 +198,17 @@ def _apply_banded_1d(x: mx.array, idx: mx.array, weight: mx.array, axis: int) ->
 
 
 class FractionalAreaDownsample:
-    """Fractional-area downsampling (coarse -> fine grid).
+    """Fractional-area downsampling (fine -> coarse grid).
 
     Preserves intensity: sum(output) ≈ sum(input)
     Preserves non-negativity: input >= 0 -> output >= 0
 
     Forward: downsample by scale factors
-    Adjoint: upsample by same scale factors (intensity-preserving)
+    Adjoint: exact transpose (spreads each coarse value over the fine pixels
+    it covers; scales total intensity by the per-axis grid ratio)
+
+    Requires ``scale >= 1`` on every axis; use :class:`FractionalAreaUpsample`
+    to go coarse -> fine.
     """
 
     def __init__(
@@ -281,7 +220,7 @@ class FractionalAreaDownsample:
         """Initialize downsampling operator.
 
         Args:
-            scale: Scale factor(s). > 1 means downsample (output is smaller).
+            scale: Scale factor(s), each >= 1 (output is smaller by that factor).
                    Can be single float (same for all axes) or tuple per axis.
             axes: Axes to resample. None means all spatial axes.
             in_shape: Shape of the forward-pass input (e.g. padded_shape). When
@@ -289,24 +228,27 @@ class FractionalAreaDownsample:
                 pinned at construction time. This avoids the rounding ambiguity
                 where round(round(n/s)*s) != n for non-integer scale factors
                 (e.g. 1.325), which would cause the adjoint to produce a
-                different shape than the original input.
+                different shape than the original input. It also makes
+                ``operator_norm_sq`` exact.
         """
         if isinstance(scale, (int, float)):
             scale = (float(scale),)
         self.scale = tuple(float(s) for s in scale)
+        if any(s < 1.0 for s in self.scale):
+            raise ValueError(
+                f"FractionalAreaDownsample requires scale >= 1 (fine -> coarse); "
+                f"got {self.scale}. Use FractionalAreaUpsample to upsample."
+            )
         self.axes = axes
-        self.operator_norm_sq = 1.0
-        # Cache: (N_large, N_small) -> mx.array of shape (N_small, N_large).
-        # Both forward and adjoint share the same cache entry.
-        self._weights_cache: dict = {}
-        # Cache: (N_large, N_small) -> banded gather indices/weights from
-        # _banded_overlap_weights_1d, used by the s >= 1.0 path instead of
-        # the dense-matmul weights above (see that function's docstring).
+        # Cache: (n_large, n_small) -> banded gather indices/weights from
+        # _banded_overlap_weights_1d. Both forward and adjoint share an entry.
         self._band_cache: dict = {}
 
         # Pin (n_large, n_small) per axis from in_shape so forward and adjoint
         # always agree on dimensions regardless of floating-point rounding.
         self._axis_map: dict = {}  # axis -> (n_large, n_small)
+        self.in_shape = None
+        self.out_shape = None
         if in_shape is not None:
             _axes = axes if axes is not None else tuple(range(len(in_shape)))
             _scale = (
@@ -315,16 +257,28 @@ class FractionalAreaDownsample:
                 else self.scale
             )
             for ax, s in zip(_axes, _scale):
-                if s >= 1.0:
-                    n_large = in_shape[ax]
-                    n_small = max(1, int(round(n_large / s)))
-                    self._axis_map[ax] = (n_large, n_small)
+                n_large = in_shape[ax]
+                n_small = max(1, int(round(n_large / s)))
+                self._axis_map[ax] = (n_large, n_small)
+            self.in_shape = tuple(int(s) for s in in_shape)
+            out_shape = list(self.in_shape)
+            for ax, (_, n_small) in self._axis_map.items():
+                out_shape[ax % len(out_shape)] = n_small
+            self.out_shape = tuple(out_shape)
 
-    def _get_weights(self, n_large: int, n_small: int) -> mx.array:
-        key = (n_large, n_small)
-        if key not in self._weights_cache:
-            self._weights_cache[key] = _overlap_weights_1d(n_large, n_small)
-        return self._weights_cache[key]
+        # ||W||^2 <= (max row sum)(max col sum) = (n_large/n_small) * 1 per axis
+        # (Schur test), tight for integer ratios. With in_shape pinned the exact
+        # per-axis grid ratios are known; otherwise fall back to the nominal
+        # scale per entry. Caveat: a scalar scale with axes=None and no in_shape
+        # counts as one axis because the input ndim is unknown here — pass
+        # in_shape or a per-axis tuple for a reliable bound.
+        if self._axis_map:
+            norm_sq = 1.0
+            for n_large, n_small in self._axis_map.values():
+                norm_sq *= n_large / n_small
+        else:
+            norm_sq = math.prod(self.scale)
+        self.operator_norm_sq = float(norm_sq)
 
     def _get_band(self, n_large: int, n_small: int):
         key = (n_large, n_small)
@@ -341,22 +295,19 @@ class FractionalAreaDownsample:
         else:
             scale = self.scale
         for axis, s in zip(axes, scale):
-            if s <= 0:
-                raise ValueError(f"Scale must be positive, got {s}")
-            if s >= 1.0:
-                if axis in self._axis_map:
-                    n_large, n_small = self._axis_map[axis]
-                else:
-                    n_large = result.shape[axis]
-                    n_small = max(1, int(round(n_large / s)))
-                if n_large == n_small:
-                    continue  # identity — skip matmul (avoids Metal batch-size bug)
-                idx_f, weight_f, _, _ = self._get_band(n_large, n_small)
-                result = _apply_banded_1d(result, idx_f, weight_f, axis)
+            if axis in self._axis_map:
+                n_large, n_small = self._axis_map[axis]
+            else:
+                n_large = result.shape[axis]
+                n_small = max(1, int(round(n_large / s)))
+            if n_large == n_small:
+                continue  # identity
+            idx_f, weight_f, _, _ = self._get_band(n_large, n_small)
+            result = _apply_banded_1d(result, idx_f, weight_f, axis)
         return result
 
     def adjoint(self, y: mx.array) -> mx.array:
-        """Upsample by the same scale factors (adjoint of downsampling)."""
+        """Apply the exact transpose (coarse -> fine spreading)."""
         result = y
         axes = self.axes if self.axes is not None else tuple(range(y.ndim))
         if len(self.scale) == 1 and len(axes) > 1:
@@ -364,24 +315,15 @@ class FractionalAreaDownsample:
         else:
             scale = self.scale
         for axis, s in zip(axes, scale):
-            if s <= 0:
-                raise ValueError(f"Scale must be positive, got {s}")
-            if s >= 1.0:
-                if axis in self._axis_map:
-                    n_large, n_small = self._axis_map[axis]
-                else:
-                    n_small = result.shape[axis]
-                    n_large = max(1, int(round(n_small * s)))
-                if n_large == n_small:
-                    continue  # identity — skip matmul (avoids Metal batch-size bug)
-                _, _, idx_a, weight_a = self._get_band(n_large, n_small)
-                result = _apply_banded_1d(result, idx_a, weight_a, axis)
+            if axis in self._axis_map:
+                n_large, n_small = self._axis_map[axis]
             else:
-                # s < 1.0: adjoint upsamples by 1/s
-                input_size = y.shape[axis]
-                output_size = max(1, int(round(input_size / s)))
-                weights = _overlap_weights_1d(input_size, output_size)
-                result = _apply_weights_1d(result, weights, axis, adjoint=False)
+                n_small = result.shape[axis]
+                n_large = max(1, int(round(n_small * s)))
+            if n_large == n_small:
+                continue  # identity
+            _, _, idx_a, weight_a = self._get_band(n_large, n_small)
+            result = _apply_banded_1d(result, idx_a, weight_a, axis)
         return result
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -389,13 +331,22 @@ class FractionalAreaDownsample:
 
 
 class FractionalAreaUpsample:
-    """Fractional-area upsampling (fine -> coarse grid).
+    """Fractional-area upsampling (coarse -> fine grid).
 
-    This is the *forward* operation of upsampling, which is the adjoint
-    of FractionalAreaDownsample.
+    Forward spreads each input pixel's intensity over the finer output pixels
+    it covers:
+        Preserves intensity: sum(output) == sum(input)
+        Preserves non-negativity: input >= 0 -> output >= 0
+    Adjoint is the exact transpose (a mean-style pooling back to the coarse
+    grid), so ``<A x, y> == <x, A^T y>`` holds to float32 precision.
 
-    Forward: upsample by scale factors
-    Adjoint: downsample by same scale factors
+    Relationship to :class:`FractionalAreaDownsample`: with ``W_dn`` the
+    downsample matrix for the same ``(n_large, n_small)`` grid pair, the
+    upsample matrix is ``(n_small / n_large) * W_dn^T``, so both classes share
+    the same banded overlap weights.
+
+    Requires ``scale >= 1`` on every axis; use :class:`FractionalAreaDownsample`
+    to go fine -> coarse.
     """
 
     def __init__(
@@ -406,80 +357,71 @@ class FractionalAreaUpsample:
         """Initialize upsampling operator.
 
         Args:
-            scale: Scale factor(s). > 1 means upsample (output is larger).
+            scale: Scale factor(s), each >= 1 (output is larger by that factor).
                    Can be single float (same for all axes) or tuple per axis.
             axes: Axes to resample. None means all spatial axes.
         """
         if isinstance(scale, (int, float)):
             scale = (float(scale),)
         self.scale = tuple(float(s) for s in scale)
+        if any(s < 1.0 for s in self.scale):
+            raise ValueError(
+                f"FractionalAreaUpsample requires scale >= 1 (coarse -> fine); "
+                f"got {self.scale}. Use FractionalAreaDownsample to downsample."
+            )
         self.axes = axes
+        # Schur test per axis: ||W_up||^2 <= (max row sum)(max col sum)
+        # = (n_small/n_large) * 1 <= 1, so 1.0 is a valid upper bound.
         self.operator_norm_sq = 1.0
+        # Cache: (n_large, n_small) -> banded weights pre-scaled by the grid
+        # ratio n_small/n_large (W_up = ratio * W_dn^T, W_up^T = ratio * W_dn).
+        self._band_cache: dict = {}
+
+    def _get_band(self, n_large: int, n_small: int):
+        key = (n_large, n_small)
+        if key not in self._band_cache:
+            idx_f, weight_f, idx_a, weight_a = _banded_overlap_weights_1d(
+                n_large, n_small
+            )
+            ratio = n_small / n_large
+            # (upsample-forward, upsample-adjoint) = ratio * (W_dn^T, W_dn)
+            self._band_cache[key] = (
+                idx_a, weight_a * ratio, idx_f, weight_f * ratio
+            )
+        return self._band_cache[key]
 
     def forward(self, x: mx.array) -> mx.array:
-        """Upsample input by scale factors.
-        
-        This is mathematically the adjoint of FractionalAreaDownsample.forward.
-        """
+        """Upsample input by scale factors (intensity-preserving)."""
         result = x
         axes = self.axes if self.axes is not None else tuple(range(x.ndim))
-        # If scale has length 1, replicate it for all axes
         if len(self.scale) == 1 and len(axes) > 1:
             scale = self.scale * len(axes)
         else:
             scale = self.scale
         for axis, s in zip(axes, scale):
-            if s <= 0:
-                raise ValueError(f"Scale must be positive, got {s}")
-            if s >= 1.0:
-                # Upsample by scale s
-                input_size = x.shape[axis]  # N (smaller)
-                output_size = max(1, int(round(input_size * s)))  # M (larger)
-                if input_size == output_size:
-                    continue  # identity — skip matmul (avoids Metal batch-size bug)
-                # For upsampling N -> M, use weights (M, N)
-                # and apply with adjoint=False: out[i] = sum_j in[j] * W[i,j]
-                weights = _overlap_weights_1d(input_size, output_size)  # (M, N)
-                result = _apply_weights_1d(result, weights, axis, adjoint=False)
-            else:
-                # s < 1.0: Downsample by scale (1/s) in forward direction
-                # This handles the case where FractionalAreaUpsample(scale=0.8).forward()
-                # should downsample by 1/0.8 = 1.25
-                input_size = x.shape[axis]
-                downsample_factor = 1.0 / s
-                output_size = max(1, int(round(input_size / downsample_factor)))
-                weights = _overlap_weights_1d(input_size, output_size)  # (N, M)
-                result = _apply_weights_1d(result, weights, axis, adjoint=False)
+            n_small = result.shape[axis]
+            n_large = max(1, int(round(n_small * s)))
+            if n_large == n_small:
+                continue  # identity
+            idx_up, weight_up, _, _ = self._get_band(n_large, n_small)
+            result = _apply_banded_1d(result, idx_up, weight_up, axis)
         return result
 
     def adjoint(self, y: mx.array) -> mx.array:
-        """Apply adjoint: downsample by same scale factors."""
+        """Apply the exact transpose (fine -> coarse mean-style pooling)."""
         result = y
         axes = self.axes if self.axes is not None else tuple(range(y.ndim))
-        # If scale has length 1, replicate it for all axes
         if len(self.scale) == 1 and len(axes) > 1:
             scale = self.scale * len(axes)
         else:
             scale = self.scale
         for axis, s in zip(axes, scale):
-            if s <= 0:
-                raise ValueError(f"Scale must be positive, got {s}")
-            if s >= 1.0:
-                # Adjoint of upsampling: downsample by scale s
-                input_size = y.shape[axis]  # M (larger)
-                output_size = max(1, int(round(input_size / s)))  # N (smaller)
-                if input_size == output_size:
-                    continue  # identity — skip matmul (avoids Metal batch-size bug)
-                # For downsampling M -> N, weights = _overlap_weights_1d(M, N) = (N, M)
-                weights = _overlap_weights_1d(input_size, output_size)  # (N, M)
-                result = _apply_weights_1d(result, weights, axis, adjoint=False)
-            else:
-                # s < 1.0: For adjoint, upsample by inverse scale (1/s)
-                input_size = y.shape[axis]
-                upsample_factor = 1.0 / s
-                output_size = max(1, int(round(input_size * upsample_factor)))
-                weights = _overlap_weights_1d(output_size, input_size)  # (N, M)
-                result = _apply_weights_1d(result, weights, axis, adjoint=True)
+            n_large = result.shape[axis]
+            n_small = max(1, int(round(n_large / s)))
+            if n_large == n_small:
+                continue  # identity
+            _, _, idx_dn, weight_dn = self._get_band(n_large, n_small)
+            result = _apply_banded_1d(result, idx_dn, weight_dn, axis)
         return result
 
     def __call__(self, x: mx.array) -> mx.array:

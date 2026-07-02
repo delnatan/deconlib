@@ -30,6 +30,14 @@ class LinearOperator(Protocol):
     (``FFTConvolver``, ``GaussianICF``, ``LinearFFTConvolver``,
     ``Crop``, ``Pad``, ``MatrixOperator``, the gradients, the Hessians) conforms to this
     protocol structurally; nothing needs to subclass it.
+
+    Operators whose domain/range shapes are fixed at construction may
+    additionally declare ``in_shape`` (forward input shape) and ``out_shape``
+    (forward output shape). :class:`Compose` checks these at construction and
+    raises immediately on a mismatch, so shape bugs (e.g. padding the input of
+    ``LinearFFTConvolver``, which already pads internally) fail loudly instead
+    of producing wrong numbers. Shape-agnostic operators (``Pad``, the
+    gradients/Hessians) simply omit the attributes and compose unchecked.
     """
 
     operator_norm_sq: float
@@ -48,11 +56,42 @@ class Compose:
     ``operator_norm_sq`` is the product of the component bounds — it is an
     upper bound on the true spectral norm, tight when both operators share
     their dominant singular direction.
+
+    If both operators declare their domain/range (``inner.out_shape`` and
+    ``outer.in_shape``), the shapes are checked here and a mismatch raises
+    ``ValueError`` at construction time. The composition inherits
+    ``in_shape`` from ``inner`` and ``out_shape`` from ``outer`` (``None``
+    when the respective operator does not declare it).
     """
 
     def __init__(self, outer: LinearOperator, inner: LinearOperator):
+        outer_in = getattr(outer, "in_shape", None)
+        inner_out = getattr(inner, "out_shape", None)
+        if (
+            outer_in is not None
+            and inner_out is not None
+            and tuple(outer_in) != tuple(inner_out)
+        ):
+            hint = ""
+            if "LinearFFTConvolver" in (
+                type(outer).__name__,
+                type(inner).__name__,
+            ):
+                hint = (
+                    " Note: LinearFFTConvolver pads internally for wrap-free "
+                    "convolution — its input and output are both signal_shape; "
+                    "do not pad its input or output yourself."
+                )
+            raise ValueError(
+                f"Cannot compose {type(outer).__name__} after "
+                f"{type(inner).__name__}: {type(outer).__name__} expects "
+                f"input of shape {tuple(outer_in)} but "
+                f"{type(inner).__name__} produces {tuple(inner_out)}.{hint}"
+            )
         self.outer = outer
         self.inner = inner
+        self.in_shape = getattr(inner, "in_shape", None)
+        self.out_shape = getattr(outer, "out_shape", None)
         self.operator_norm_sq = float(
             outer.operator_norm_sq * inner.operator_norm_sq
         )

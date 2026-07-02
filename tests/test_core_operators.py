@@ -210,8 +210,44 @@ class TestFractionalAreaDownsample(unittest.TestCase):
 
         lhs = dot_product(ax, y)
         rhs = dot_product(x, aty)
-        # Metal GPU uses float16 accumulation; rtol~1e-3 is realistic for float32 matmul
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-3)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-5)
+
+    def test_adjoint_correctness_non_integer_scale(self):
+        """Test <A x, y> == <x, A^T y> for a non-integer scale."""
+        down = FractionalAreaDownsample(scale=1.325, in_shape=(53, 53))
+        x = random_array((53, 53))
+        ax = down.forward(x)
+        y = random_array(ax.shape, seed=7)
+        aty = down.adjoint(y)
+
+        lhs = dot_product(ax, y)
+        rhs = dot_product(x, aty)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-5)
+
+    def test_scale_below_one_raises(self):
+        """Downsampling requires scale >= 1."""
+        with self.assertRaises(ValueError):
+            FractionalAreaDownsample(scale=0.5)
+        with self.assertRaises(ValueError):
+            FractionalAreaDownsample(scale=(2.0, 0.9))
+
+    def test_operator_norm_sq(self):
+        """operator_norm_sq is the product of per-axis grid ratios."""
+        down = FractionalAreaDownsample(scale=(2.0, 4.0))
+        self.assertAlmostEqual(down.operator_norm_sq, 8.0)
+
+        down = FractionalAreaDownsample(scale=2.0, in_shape=(128, 128))
+        self.assertAlmostEqual(down.operator_norm_sq, 4.0)
+
+    def test_operator_norm_sq_is_upper_bound(self):
+        """Power iteration must not exceed the claimed operator_norm_sq."""
+        down = FractionalAreaDownsample(scale=1.5, in_shape=(60, 60))
+        x = random_array((60, 60))
+        for _ in range(50):
+            x = down.adjoint(down.forward(x))
+            norm = float(mx.sqrt(mx.sum(x * x)).item())
+            x = x / norm
+        self.assertLessEqual(norm, down.operator_norm_sq * (1 + 1e-4))
 
     def test_3d(self):
         """Test 3D downsampling."""
@@ -247,8 +283,33 @@ class TestFractionalAreaUpsample(unittest.TestCase):
 
         lhs = dot_product(ax, y)
         rhs = dot_product(x, aty)
-        # Metal GPU uses float16 accumulation; rtol~1e-3 is realistic for float32 matmul
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-3)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-5)
+
+    def test_adjoint_correctness_non_integer_scale(self):
+        """Test <A x, y> == <x, A^T y> for a non-integer scale."""
+        up = FractionalAreaUpsample(scale=1.5)
+        x = random_array((32, 32))
+        ax = up.forward(x)
+        y = random_array(ax.shape, seed=7)
+        aty = up.adjoint(y)
+
+        lhs = dot_product(ax, y)
+        rhs = dot_product(x, aty)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-5)
+
+    def test_intensity_preservation(self):
+        """Upsampling forward preserves total intensity."""
+        x = random_array((64, 64))
+        up = FractionalAreaUpsample(scale=1.7)
+        y = up.forward(x)
+        np.testing.assert_allclose(
+            float(mx.sum(x).item()), float(mx.sum(y).item()), rtol=1e-5
+        )
+
+    def test_scale_below_one_raises(self):
+        """Upsampling requires scale >= 1."""
+        with self.assertRaises(ValueError):
+            FractionalAreaUpsample(scale=0.8)
 
 
 # =============================================================================
@@ -298,8 +359,7 @@ class TestComposition(unittest.TestCase):
 
         lhs = dot_product(fx, y)
         rhs = dot_product(x, ay)
-        # Metal GPU uses float16 accumulation; rtol~1e-3 is realistic for float32 matmul
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-3)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-5)
 
     def test_intensity_preservation_full_chain(self):
         """Test intensity preservation through downsampling (linear convolution loses intensity at boundaries).

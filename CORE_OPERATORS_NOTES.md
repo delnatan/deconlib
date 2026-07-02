@@ -57,11 +57,15 @@ R = compose(
 
 ### 3. Fractional-Area Resampling
 
-- Uses broadcasting-based weight application (not matrix multiplication)
-- Preserves total intensity: `sum(output) ≈ sum(input)`
+- Applied per axis as banded (fixed-window) gather + weighted sum — no matmul,
+  which sidesteps a Metal GPU GEMM precision issue (~1e-3 relative error)
+- Forward preserves total intensity: `sum(output) ≈ sum(input)`
 - Preserves non-negativity: input ≥ 0 → output ≥ 0
-- Supports arbitrary scale factors (integer and non-integer)
-- GPU-efficient via MLX broadcasting
+- Supports arbitrary scale factors >= 1 (integer and non-integer); each class
+  raises `ValueError` for `scale < 1` — use the other class for that direction
+- Adjoints are exact transposes: `<A x, y> == <x, A^T y>` to float32 precision
+- `operator_norm_sq` is a true upper bound (`prod(scale)` for downsampling,
+  exact per-axis grid ratios when `in_shape` is pinned; `1.0` for upsampling)
 
 ## Operator Details
 
@@ -87,22 +91,28 @@ padded = crop.adjoint(cropped)  # Shape restored (zero-pads back)
 
 ### FractionalAreaDownsample
 
-Downsampling that preserves intensity.
+Downsampling (fine -> coarse) whose forward preserves intensity. Requires
+`scale >= 1`. Pass `in_shape` to pin per-axis sizes (avoids rounding
+ambiguity for non-integer scales and makes `operator_norm_sq` exact).
 
 ```python
 down = FractionalAreaDownsample(scale=2.0)  # or scale=(2.0, 2.0)
 downsampled = down.forward(x)   # Shape: (128, 128) -> (64, 64)
-upsampled = down.adjoint(y)      # Shape: (64, 64) -> (128, 128)
+spread = down.adjoint(y)        # Shape: (64, 64) -> (128, 128), exact transpose
 ```
 
 ### FractionalAreaUpsample
 
-Upsampling (adjoint of downsampling).
+Upsampling (coarse -> fine) whose forward preserves intensity. Requires
+`scale >= 1`. Note this is *not* the adjoint of `FractionalAreaDownsample` —
+the upsample matrix is the downsample transpose scaled by the grid ratio
+(`W_up = (n_small/n_large) * W_dn^T`), so each class carries its own exact
+transpose as its adjoint.
 
 ```python
 up = FractionalAreaUpsample(scale=2.0)
 upsampled = up.forward(x)   # Shape: (64, 64) -> (128, 128)
-downsampled = up.adjoint(y)  # Shape: (128, 128) -> (64, 64)
+pooled = up.adjoint(y)      # Shape: (128, 128) -> (64, 64), exact transpose
 ```
 
 ## Building Forward Models

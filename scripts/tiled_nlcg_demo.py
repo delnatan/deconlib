@@ -1,13 +1,15 @@
-"""Tile-based 3D widefield deconvolution — RMM_512x512.ims.
+"""Tile-based 3D widefield deconvolution with NLCG — RMM_512x512.ims.
 
-Three-space model (same as widefield_rl_demo.py) but processed tile by tile via
-``deconlib.deconvolution.process_tiles`` so that only one YX tile lives in GPU
-memory at a time.
+Same tile grid and stitching as ``tiled_rl_demo.py`` (``process_tiles``, one
+shared forward model, guard pixels absorbing PSF boundary artifacts), but each
+tile is solved with ``nlcg_solver`` instead of Richardson-Lucy -- see
+``widefield_nlcg_demo.py`` for the single-volume version and
+``deconlib.deconvolution.nlcg_mlx`` for the algorithm.
 
-Every tile reads a window of the same shape, so ONE forward model
-(padded_visible → convolve → downsample → crop → tile_data) is built once
-and shared by all tiles. Guard pixels in data space absorb PSF boundary
-artifacts; only the owned core region is stitched into the output.
+Every tile is solved independently and identically-sized, so nothing here is
+NLCG-tiling-specific beyond swapping the solver: the per-tile convergence
+tests (discrepancy principle when unregularized, Eq. 17 when regularized) run
+per tile, same as they would for a single volume.
 """
 
 from pathlib import Path
@@ -15,7 +17,7 @@ import time
 import numpy as np
 
 from deconlib import compute_widefield_psf, fft_coords
-from deconlib.deconvolution import plan_tiles, process_tiles, richardson_lucy_solver
+from deconlib.deconvolution import plan_tiles, process_tiles, nlcg_solver, Hessian3D
 
 from pyvistra.io import load_image, save_imaris, normalize_to_5d
 
@@ -32,7 +34,7 @@ datapath = Path("/Users/delnatan/Projects/Deconvolution/RMM_ASM_sample/")
 image_file = "RMM_512x512.ims"
 
 zoom_factors = (1.0, 1.25, 1.25)   # visible / data pixel ratio
-num_iter = 150
+num_iter = 25
 background_data = 100.0             # camera background counts per data pixel
 
 psf_nz = 32                         # PSF Z samples in visible space
@@ -48,8 +50,14 @@ tile_yx_size = 256                  # nominal lateral tile core size in data pix
 # 26 → full PSF array half-width; overkill for most data.
 guard_px_override = 4
 
+# NLCG regularization (optional; see widefield_nlcg_demo.py). Off by default --
+# early stopping (the discrepancy principle) is usually enough on its own.
+reg_weight = 0.0
+tol = 0.0      # Eq. 17 threshold; primary test when reg_weight > 0
+slack = 1.25    # discrepancy-principle target multiplier (unregularized only)
+
 output_dir = Path(__file__).parent / "output"
-output_file = "restored_tiled_rl_demo_RMM_512x512.ims"
+output_file = "restored_tiled_nlcg_demo_RMM_512x512.ims"
 
 # =============================================================================
 # LOAD DATA
@@ -126,10 +134,18 @@ def _on_tile_done(spec, output_so_far):
     return False
 
 
-solve = richardson_lucy_solver(
+use_reg = reg_weight > 0.0
+reg_r = visible_pixel_spacing[1] / visible_pixel_spacing[0]
+regularizer = Hessian3D(r=reg_r) if use_reg else None
+
+solve = nlcg_solver(
     num_iter=num_iter,
     background=background_data,
+    regularizer=regularizer,
+    reg_weight=reg_weight,
     init_value=init_value,
+    tol=tol,
+    slack=slack,
     eval_interval=10,
 )
 
@@ -153,7 +169,7 @@ output_dir.mkdir(parents=True, exist_ok=True)
 restored_5d = normalize_to_5d(output, dims="zyx")
 metadata = {
     "scale": visible_pixel_spacing,
-    "channels": [{"name": "Deconvolved (tiled)"}],
+    "channels": [{"name": "Deconvolved (tiled NLCG)"}],
 }
 save_imaris(
     str(output_dir / output_file),

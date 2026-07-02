@@ -58,6 +58,7 @@ sandbox/
 examples/sample_data/
 examples/output/
 scripts/output/
+scripts/toy_missing_cone/output/
 
 # Generated documentation
 site/

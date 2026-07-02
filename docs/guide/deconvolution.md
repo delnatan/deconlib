@@ -5,18 +5,27 @@ Image deconvolution algorithms using Apple MLX for GPU-accelerated computation o
 !!! note "Apple Silicon Required"
     Deconvolution uses Apple MLX and requires an Apple Silicon Mac (M1/M2/M3/M4).
 
+Using this module is a two-step process: **compose linear operators into a
+forward model** (blur, resample, crop — see [Linear Operators](#linear-operators)
+below), then **hand that forward model to a solver** — either
+`richardson_lucy_with_operator` or `solve_pdhg_mlx`/`solve_pdhg_with_operator`.
+Both solvers only ever call the operator's `forward`/`adjoint`, so the same
+forward model works with either one. See `RECIPES.md` (repo root) for a full
+set of worked examples, and the `deconlib.deconvolution` module docstring for
+the underlying operator-composition model in more detail.
+
 ## Basic Usage
 
 ```python
 import numpy as np
-from deconlib.deconvolution import FFTConvolver, richardson_lucy_with_operator
+from deconlib.deconvolution import LinearFFTConvolver, richardson_lucy_with_operator
 
 # Load your image and PSF (as numpy arrays)
 # observed: (H, W) or (D, H, W)
 # psf: same dimensions as observed
 
 # Run Richardson-Lucy deconvolution
-forward_op = FFTConvolver(psf)
+forward_op = LinearFFTConvolver(psf, signal_shape=observed.shape, normalize=True)
 result = richardson_lucy_with_operator(
     observed,
     forward_op,
@@ -48,9 +57,9 @@ Where:
 ### Operator-Based Richardson-Lucy
 
 ```python
-from deconlib.deconvolution import FFTConvolver, richardson_lucy_with_operator
+from deconlib.deconvolution import LinearFFTConvolver, richardson_lucy_with_operator
 
-forward_op = FFTConvolver(psf)
+forward_op = LinearFFTConvolver(psf, signal_shape=observed.shape, normalize=True)
 result = richardson_lucy_with_operator(
     observed,            # Observed (blurred) image
     forward_op,          # Explicit image-formation operator
@@ -65,44 +74,58 @@ print(f"Iterations: {result.iterations}")
 
 ### Super-Resolution RL
 
-For super-resolution deconvolution, model the padded object domain explicitly
-and return only the valid fine-grid region:
+For super-resolution deconvolution, build the forward model on a padded
+object domain — blur, then downsample to the data's pixel size, then crop
+to the detector — and crop the result back to the valid region yourself
+after the solver returns:
 
 ```python
 from deconlib.deconvolution import (
     Crop,
-    IntegratedDetectorConvolver,
+    FractionalAreaDownsample,
+    LinearFFTConvolver,
     compose,
+    compute_padded_shape,
+    get_valid_slices,
     richardson_lucy_with_operator,
 )
 
-# Compute padded shape for PSF padding
-psf_padding = tuple((psf_n // 2, psf_n // 2) for psf_n in psf_fine.shape)
-padded_visible_shape = tuple(
-    obs_n + pb + pa for obs_n, (pb, pa) in zip(observed.shape, psf_padding)
+zoom_factors = (1.25, 1.25)  # visible / data pixel ratio, >1 = super-resolution
+visible_shape = tuple(
+    int(round(n * z)) for n, z in zip(observed.shape, zoom_factors)
 )
 
-# Build operator chain: Crop(IntegratedDetectorConvolver(x))
-downsample = IntegratedDetectorConvolver(
-    psf_fine,
-    output_shape=observed.shape,
-    normalize=True,
+# Pad the visible domain by (psf_dim - 1) per axis for wrap-free convolution
+padded_shape, padding = compute_padded_shape(visible_shape, psf_fine.shape)
+valid_slices = get_valid_slices(padded_shape, visible_shape, padding)
+downsampled_shape = tuple(
+    int(round(p / z)) for p, z in zip(padded_shape, zoom_factors)
 )
-crop = Crop(padded_visible_shape, observed.shape)
-forward_op = compose(crop, downsample)
+
+# Forward model: padded visible -> blur -> downsample -> crop -> data
+convolver = LinearFFTConvolver(psf_fine, signal_shape=padded_shape, normalize=True)
+downsampler = FractionalAreaDownsample(scale=zoom_factors, in_shape=padded_shape)
+detector = Crop(downsampled_shape, observed.shape)
+forward_op = compose(detector, downsampler, convolver)
 
 result = richardson_lucy_with_operator(
     observed,
     forward_op,
     num_iter=50,
     background=0.0,
-    return_region="valid",
 )
+
+# result.restored is the full padded domain — crop to the valid region
+restored = np.array(result.restored[valid_slices])
 ```
 
 The padded region remains part of the unknown during the RL updates, so edge
-photons are handled by the sensitivity term. The final `restored` array is
-cropped only after convergence.
+photons are handled by the sensitivity term (`A^T 1`). Only the final
+`restored` array is cropped, via `valid_slices` computed up front from
+`compute_padded_shape`/`get_valid_slices` — the same pattern every recipe
+in `RECIPES.md` (repo root) and `deconlib.deconvolution`'s module docstring
+uses. See there for the full explanation of why the padding is needed (the
+"zero-padding trick" for simulating linear, wrap-free convolution via FFT).
 
 ## PDHG (Chambolle-Pock) Algorithm
 
@@ -193,8 +216,8 @@ Returned by Richardson-Lucy functions:
 | `restored` | Deconvolved image (mx.array) |
 | `iterations` | Number of iterations performed |
 | `loss_history` | Mean Poisson I-divergence at each eval_interval |
-| `full_shape` | Internal reconstruction shape before any output crop |
-| `valid_slices` | Crop slices used when `return_region="valid"` |
+| `full_shape` | Internal reconstruction shape (same as `restored.shape`) |
+| `valid_slices` | Unused by the solver; present for callers who want to stash their own crop slices alongside the result |
 
 ### MLXDeconvolutionResult
 
@@ -212,36 +235,51 @@ Returned by PDHG functions:
 
 ## Linear Operators
 
+### LinearFFTConvolver
+
+Wrap-free (linear) convolution — the operator every deconvolution forward
+model in this library is built around. Circular FFT convolution wraps signal
+that falls off one edge back onto the opposite edge; `LinearFFTConvolver`
+avoids that by zero-padding to a canvas at least `N + M - 1` samples wide
+before convolving, then cropping back down (the "zero-padding trick" — see
+the `deconlib.deconvolution` module docstring for the full explanation with
+a diagram):
+
+```python
+from deconlib.deconvolution import LinearFFTConvolver
+
+convolver = LinearFFTConvolver(psf, signal_shape=image.shape, normalize=True)
+
+blurred = convolver.forward(image)
+correlated = convolver.adjoint(image)  # adjoint = correlation
+```
+
 ### FFTConvolver
 
-FFT-based convolution for standard deconvolution:
+The raw *circular* FFT convolution that `LinearFFTConvolver` composes
+internally. Rarely used directly — reach for it only when circular boundary
+behavior is actually what you want:
 
 ```python
 from deconlib.deconvolution import FFTConvolver
 
 convolver = FFTConvolver(psf, normalize=True)
-
-# Apply convolution
 blurred = convolver.forward(image)
-
-# Apply correlation (adjoint)
 correlated = convolver.adjoint(image)
 ```
 
-### IntegratedDetectorConvolver
+### Super-Resolution / Coarse Sampling in PDHG
 
-For super-resolution with finite pixel area integration:
+`solve_pdhg_mlx`'s `bin_factors`/`sampling_factors` arguments build the same
+`compose(LinearFFTConvolver(...), FractionalAreaDownsample(...))` forward
+model internally that you'd otherwise assemble by hand for RL (see
+[Super-Resolution RL](#super-resolution-rl) above) — you just hand it a PSF
+and a ratio instead of pre-composing the operator yourself:
 
 ```python
-from deconlib.deconvolution import IntegratedDetectorConvolver
+from deconlib.deconvolution import solve_pdhg_mlx
 
-# PSF at high resolution, observed at low resolution
-convolver = IntegratedDetectorConvolver(
-    psf_fine,
-    output_shape=observed_lowres.shape,
-    normalize=True,
-)
-
+# PSF at high resolution, observed at low resolution, integer bin factor
 result = solve_pdhg_mlx(
     observed_lowres,
     psf_fine,
@@ -251,12 +289,10 @@ result = solve_pdhg_mlx(
 )
 ```
 
-The same operator handles integer, non-integer, and anisotropic detector
-sampling with nonnegative area-overlap weights:
+Non-integer or anisotropic ratios use `sampling_factors` instead (mutually
+exclusive with `bin_factors`):
 
 ```python
-from deconlib.deconvolution import solve_pdhg_mlx
-
 result = solve_pdhg_mlx(
     observed,
     psf_fine,
@@ -266,6 +302,10 @@ result = solve_pdhg_mlx(
     num_iter=300,
 )
 ```
+
+For Richardson-Lucy, or for full control over the operator (e.g. adding a
+detector crop or an ICF), compose the forward model explicitly instead —
+see [Super-Resolution RL](#super-resolution-rl) and `RECIPES.md` (repo root).
 
 ### MatrixOperator
 

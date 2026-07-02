@@ -70,6 +70,18 @@ def create_3d_sphere(shape=(50, 50, 50), center=None, radius=15):
     return field
 
 
+def create_3d_shell(shape=(50, 50, 50), center=None, outer_radius=15, inner_radius=10):
+    """
+    Creates a smooth 3D hollow-sphere (shell) field: create_3d_sphere(outer)
+    minus create_3d_sphere(inner). ~1 in the shell band, ~0 inside and outside.
+    Clips to [0, inf) since the sigmoid difference can dip marginally negative
+    right at the inner boundary.
+    """
+    outer = create_3d_sphere(shape, center, outer_radius)
+    inner = create_3d_sphere(shape, center, inner_radius)
+    return np.clip(outer - inner, 0.0, None)
+
+
 def create_3d_corner(shape=(50, 50, 50)):
     """
     Creates a corner shape to test mixed partial derivatives.

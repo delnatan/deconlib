@@ -23,7 +23,7 @@ import mlx.core as mx
 import numpy as np
 
 from .base import MLXDeconvolutionResult
-from .composition import compose
+from .composition import LinearOperator, compose
 from .linops_mlx import (
     FFTConvolver,
     Gradient1D,
@@ -927,7 +927,7 @@ def solve_pdhg_mlx(
 
 def solve_pdhg_with_operator(
     observed: mx.array,
-    blur_op,
+    blur_op: LinearOperator,
     alpha: float = 0.01,
     regularization: Literal["identity", "gradient", "hessian"] = "identity",
     norm: Literal["L1", "L1_2"] = "L1",
