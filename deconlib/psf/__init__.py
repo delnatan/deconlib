@@ -56,6 +56,9 @@ from .aberrations import (
     Defocus,
     ZernikeAberration,
     ZernikeMode,
+    ZernikeRefineConfig,
+    ZernikeRefineResult,
+    refine_zernike_wiener,
 )
 
 # PSF distillation from bead data
@@ -106,6 +109,9 @@ __all__ = [
     "Defocus",
     "ZernikeAberration",
     "ZernikeMode",
+    "ZernikeRefineConfig",
+    "ZernikeRefineResult",
+    "refine_zernike_wiener",
     # PSF distillation
     "BeadDetectionResult",
     "PsfDistillationResult",

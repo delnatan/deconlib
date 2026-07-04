@@ -3,6 +3,11 @@
 from .base import Aberration, apply_aberrations
 from .geometric import IndexMismatch, Defocus
 from .zernike import ZernikeAberration, ZernikeMode
+from .zernike_refine_mlx import (
+    ZernikeRefineConfig,
+    ZernikeRefineResult,
+    refine_zernike_wiener,
+)
 
 __all__ = [
     "Aberration",
@@ -11,4 +16,7 @@ __all__ = [
     "Defocus",
     "ZernikeAberration",
     "ZernikeMode",
+    "ZernikeRefineConfig",
+    "ZernikeRefineResult",
+    "refine_zernike_wiener",
 ]

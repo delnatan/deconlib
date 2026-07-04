@@ -244,6 +244,7 @@ def compute_widefield_psf(
     z: np.ndarray = None,
     normalize: bool = True,
     aberrations: Optional[List["Aberration"]] = None,
+    zernike: Optional[Union[dict, np.ndarray]] = None,
     vectorial: bool = False,
 ) -> np.ndarray:
     """Compute 3D widefield PSF with convenient defaults.
@@ -263,6 +264,9 @@ def compute_widefield_psf(
         z: Axial positions (μm). Default: ±3.2 μm range at 0.1 μm steps.
         normalize: If True, normalize PSF to sum to 1. Default True.
         aberrations: Optional list of Aberration objects (e.g., IndexMismatch).
+        zernike: Optional Zernike coefficients (OSA/ANSI order, radians of
+            phase) as a ``{ZernikeMode: coef}`` dict or coefficient array.
+            Applied as a ZernikeAberration before any ``aberrations``.
         vectorial: If True, use vectorial diffraction model accounting for
             polarization effects. Recommended for high-NA objectives with
             refractive index mismatch. Default False.
@@ -303,6 +307,7 @@ def compute_widefield_psf(
     """
     # Import here to avoid circular import
     from .aberrations.base import Aberration, apply_aberrations
+    from .aberrations.zernike import ZernikeAberration
 
     if ns is None:
         ns = ni
@@ -328,9 +333,12 @@ def compute_widefield_psf(
     geom = make_geometry(shape, spacing, optics)
     pupil = make_pupil(geom)
 
-    # Apply aberrations if provided
-    if aberrations:
-        pupil = apply_aberrations(pupil, geom, optics, aberrations)
+    # Apply aberrations if provided (zernike sugar prepends a ZernikeAberration)
+    aberr_list = list(aberrations) if aberrations else []
+    if zernike is not None:
+        aberr_list = [ZernikeAberration(zernike)] + aberr_list
+    if aberr_list:
+        pupil = apply_aberrations(pupil, geom, optics, aberr_list)
 
     # Compute PSF
     if vectorial:

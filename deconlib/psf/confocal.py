@@ -24,6 +24,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 
 from .aberrations.base import Aberration, apply_aberrations
+from .aberrations.zernike import ZernikeAberration
 from .optics import Geometry, Optics, make_geometry
 from .pupil import make_pupil
 from .widefield import pupil_to_psf, pupil_to_vectorial_psf
@@ -46,10 +47,15 @@ class ConfocalOptics:
 
     All physical dimensions are in microns.
 
-    Pinhole can be specified in several ways (in order of priority):
-    1. pinhole_radius_au: Pinhole RADIUS in Airy units (as in Andor metadata)
-    2. pinhole_au: Pinhole DIAMETER in Airy units (traditional convention)
-    3. pinhole_radius: Back-projected pinhole radius in μm
+    The pinhole is described by a single canonical quantity, ``pinhole_radius_au``
+    — the pinhole RADIUS in Airy units (matching Andor Dragonfly's
+    ``SpinningDiskPinholeRadius`` metadata). Use the named constructors to
+    specify the pinhole in other conventions:
+
+    - :meth:`from_diameter_au` — pinhole DIAMETER in Airy units (textbook
+      "1 AU pinhole" convention).
+    - :meth:`from_physical` — physical pinhole diameter on the disk plus system
+      magnification.
 
     Attributes:
         wavelength_exc: Excitation wavelength (μm).
@@ -57,15 +63,11 @@ class ConfocalOptics:
         na: Numerical aperture of the objective.
         ni: Refractive index of immersion medium.
         ns: Refractive index of sample medium. Defaults to ni.
-        pinhole_radius_au: Pinhole RADIUS in Airy units. This matches the
-            format used by Andor Dragonfly metadata (SpinningDiskPinholeRadius).
-        pinhole_au: Pinhole DIAMETER in Airy units (AU). 1 AU is typical.
-        pinhole_radius: Back-projected pinhole radius at sample plane (μm).
-        magnification: Total system magnification (objective × relay optics).
-            Only needed if converting from physical pinhole size.
+        pinhole_radius_au: Pinhole RADIUS in Airy units. Default 0.5, which
+            equals the classic 1.0 Airy-unit *diameter* pinhole.
 
     Examples:
-        Using Andor-style metadata (radius in AU):
+        Andor-style metadata (radius in AU):
 
         ```python
         optics = ConfocalOptics(
@@ -80,12 +82,12 @@ class ConfocalOptics:
         Traditional diameter specification:
 
         ```python
-        optics = ConfocalOptics(
+        optics = ConfocalOptics.from_diameter_au(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=1.0,  # 1 Airy unit diameter
+            diameter_au=1.0,  # 1 Airy unit diameter
         )
         ```
     """
@@ -95,12 +97,7 @@ class ConfocalOptics:
     na: float
     ni: float
     ns: float = None
-    pinhole_radius_au: float = (
-        None  # Pinhole RADIUS in Airy units (Andor style)
-    )
-    pinhole_au: float = None  # Pinhole DIAMETER in Airy units (traditional)
-    pinhole_radius: float = None  # Back-projected radius in μm
-    magnification: float = None
+    pinhole_radius_au: float = 0.5  # RADIUS in Airy units (= 1.0 AU diameter)
 
     def __post_init__(self) -> None:
         """Validate and set defaults."""
@@ -117,13 +114,58 @@ class ConfocalOptics:
                 f"Excitation wavelength ({self.wavelength_exc}) should be "
                 f"less than emission wavelength ({self.wavelength_em})"
             )
-        # Default to 1 Airy unit diameter if nothing specified
-        if (
-            self.pinhole_radius_au is None
-            and self.pinhole_au is None
-            and self.pinhole_radius is None
-        ):
-            object.__setattr__(self, "pinhole_au", 1.0)
+
+    @classmethod
+    def from_diameter_au(
+        cls,
+        *,
+        wavelength_exc: float,
+        wavelength_em: float,
+        na: float,
+        ni: float,
+        ns: float = None,
+        diameter_au: float = 1.0,
+    ) -> "ConfocalOptics":
+        """Build from a pinhole DIAMETER in Airy units (textbook convention)."""
+        return cls(
+            wavelength_exc=wavelength_exc,
+            wavelength_em=wavelength_em,
+            na=na,
+            ni=ni,
+            ns=ns,
+            pinhole_radius_au=diameter_au / 2.0,
+        )
+
+    @classmethod
+    def from_physical(
+        cls,
+        *,
+        wavelength_exc: float,
+        wavelength_em: float,
+        na: float,
+        ni: float,
+        ns: float = None,
+        pinhole_um: float,
+        magnification: float,
+        disk_magnification: float = 1.0,
+    ) -> "ConfocalOptics":
+        """Build from a physical pinhole diameter and system magnification.
+
+        The physical pinhole diameter on the disk is back-projected to the
+        sample plane through the total magnification, then converted to Airy
+        units of the emission wavelength.
+        """
+        total_mag = magnification * disk_magnification
+        radius_bp = (pinhole_um / 2.0) / total_mag
+        airy_radius = compute_airy_radius(wavelength_em, na)
+        return cls(
+            wavelength_exc=wavelength_exc,
+            wavelength_em=wavelength_em,
+            na=na,
+            ni=ni,
+            ns=ns,
+            pinhole_radius_au=radius_bp / airy_radius,
+        )
 
     @property
     def exc_optics(self) -> Optics:
@@ -148,22 +190,12 @@ class ConfocalOptics:
     def get_pinhole_radius(self) -> float:
         """Get back-projected pinhole radius in μm.
 
-        Converts from the specified pinhole format to physical radius.
-        Priority: pinhole_radius_au > pinhole_au > pinhole_radius
-
         Returns:
             Back-projected pinhole radius at sample plane (μm).
         """
-        airy_radius = compute_airy_radius(self.wavelength_em, self.na)
-
-        if self.pinhole_radius_au is not None:
-            # Andor-style: radius in Airy units
-            return self.pinhole_radius_au * airy_radius
-        elif self.pinhole_au is not None:
-            # Traditional: diameter in Airy units → convert to radius
-            return (self.pinhole_au / 2.0) * airy_radius
-        else:
-            return self.pinhole_radius
+        return self.pinhole_radius_au * compute_airy_radius(
+            self.wavelength_em, self.na
+        )
 
 
 def compute_airy_radius(wavelength: float, na: float) -> float:
@@ -239,6 +271,7 @@ def compute_confocal_psf(
     normalize: bool = True,
     include_stokes_shift: bool = True,
     aberrations: Optional[List[Aberration]] = None,
+    zernike: Optional[Union[dict, np.ndarray]] = None,
     vectorial: bool = False,
 ) -> np.ndarray:
     """Compute 3D confocal PSF.
@@ -261,6 +294,9 @@ def compute_confocal_psf(
         aberrations: Optional list of Aberration objects to apply to both
             excitation and emission pupils. Common aberrations include
             IndexMismatch for spherical aberration from RI mismatch.
+        zernike: Optional Zernike coefficients (OSA/ANSI order, radians of
+            phase) as a ``{ZernikeMode: coef}`` dict or coefficient array.
+            Applied to both pupils as a ZernikeAberration before ``aberrations``.
         vectorial: If True, use vectorial diffraction model for the emission
             PSF, accounting for polarization-dependent Fresnel transmission
             at the sample/immersion interface. Recommended for high-NA
@@ -303,12 +339,15 @@ def compute_confocal_psf(
     geom_em = make_geometry(shape, spacing, em_optics)
     pupil_em = make_pupil(geom_em)
 
-    # Apply aberrations if provided
-    if aberrations:
+    # Apply aberrations if provided (zernike sugar prepends a ZernikeAberration)
+    aberr_list = list(aberrations) if aberrations else []
+    if zernike is not None:
+        aberr_list = [ZernikeAberration(zernike)] + aberr_list
+    if aberr_list:
         pupil_exc = apply_aberrations(
-            pupil_exc, geom_exc, exc_optics, aberrations
+            pupil_exc, geom_exc, exc_optics, aberr_list
         )
-        pupil_em = apply_aberrations(pupil_em, geom_em, em_optics, aberrations)
+        pupil_em = apply_aberrations(pupil_em, geom_em, em_optics, aberr_list)
 
     # Compute excitation PSF (DC at corner)
     # Scalar model is sufficient for illumination
@@ -367,6 +406,7 @@ def compute_spinning_disk_psf(
     z: np.ndarray = None,
     normalize: bool = True,
     aberrations: Optional[List[Aberration]] = None,
+    zernike: Optional[Union[dict, np.ndarray]] = None,
     vectorial: bool = False,
 ) -> np.ndarray:
     """Compute PSF for spinning disk confocal microscope.
@@ -389,6 +429,8 @@ def compute_spinning_disk_psf(
         z: Axial positions (μm). Default: ±3.2 μm range at 0.1 μm steps.
         normalize: If True, normalize PSF to sum to 1.
         aberrations: Optional list of Aberration objects (e.g., IndexMismatch).
+        zernike: Optional Zernike coefficients (OSA/ANSI order, radians of
+            phase) as a ``{ZernikeMode: coef}`` dict or coefficient array.
         vectorial: If True, use vectorial diffraction model for the emission
             PSF. Recommended for high-NA with refractive index mismatch.
 
@@ -410,23 +452,16 @@ def compute_spinning_disk_psf(
     if ns is None:
         ns = ni
 
-    # Calculate back-projected pinhole radius
-    # Physical pinhole diameter → radius → back-projected
-    total_mag = magnification * disk_magnification
-    pinhole_radius_bp = (pinhole_um / 2.0) / total_mag
-
-    # Convert to Airy units for ConfocalOptics
-    airy_radius = compute_airy_radius(wavelength_em, na)
-    pinhole_radius_au = pinhole_radius_bp / airy_radius
-
-    confocal_optics = ConfocalOptics(
+    # Physical pinhole diameter → back-projected radius in Airy units.
+    confocal_optics = ConfocalOptics.from_physical(
         wavelength_exc=wavelength_exc,
         wavelength_em=wavelength_em,
         na=na,
         ni=ni,
         ns=ns,
-        pinhole_radius_au=pinhole_radius_au,
-        magnification=total_mag,
+        pinhole_um=pinhole_um,
+        magnification=magnification,
+        disk_magnification=disk_magnification,
     )
 
     # Default shape
@@ -450,5 +485,6 @@ def compute_spinning_disk_psf(
         z,
         normalize=normalize,
         aberrations=aberrations,
+        zernike=zernike,
         vectorial=vectorial,
     )

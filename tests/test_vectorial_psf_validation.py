@@ -34,32 +34,40 @@ def _richards_wolf_isotropic_profile(
 ) -> np.ndarray:
     """Compute in-focus isotropic profile from I0/I1/I2 radial integrals.
 
-    This uses the same Hanser-style flat-(kx, ky) pupil convention as the
-    implementation under test, where the forward model apodization is
-    1/sqrt(cos(theta)).
+    The reference is the standard Richards-Wolf integral with the physical
+    aplanatic apodization sqrt(cos(theta)) and the spherical measure sin(theta).
+
+    The implementation under test uses the Hanser-style flat-(kx, ky) pupil
+    with apodization 1/sqrt(cos(theta)) and a flat 2D FFT. That FFT carries the
+    area element dkx dky = (ni/lambda)^2 sin(theta) cos(theta) dtheta dphi, so
+    the flat model's effective amplitude weight is
+    (1/sqrt(cos theta)) * cos(theta) = sqrt(cos theta) against the spherical
+    sin(theta) measure — i.e. it reproduces exactly this standard integral. The
+    extra cos(theta) Jacobian must NOT be double-counted by squaring the pupil
+    apodization into 1/cos(theta).
     """
     alpha = np.arcsin(na / ni)
     theta = np.linspace(0.0, alpha, 6000)
     sin_t = np.sin(theta)
     cos_t = np.cos(theta)
-    inv_cos = 1.0 / np.maximum(cos_t, np.finfo(np.float64).eps)
+    sqrt_cos = np.sqrt(np.maximum(cos_t, 0.0))
 
     u = 2.0 * np.pi * ni * r / wavelength
     I0 = np.array(
         [
             np.trapezoid(
-                inv_cos * sin_t * (1.0 + cos_t) * jv(0, ui * sin_t), theta
+                sqrt_cos * sin_t * (1.0 + cos_t) * jv(0, ui * sin_t), theta
             )
             for ui in u
         ]
     )
     I1 = np.array(
-        [np.trapezoid(inv_cos * sin_t**2 * jv(1, ui * sin_t), theta) for ui in u]
+        [np.trapezoid(sqrt_cos * sin_t**2 * jv(1, ui * sin_t), theta) for ui in u]
     )
     I2 = np.array(
         [
             np.trapezoid(
-                inv_cos * sin_t * (1.0 - cos_t) * jv(2, ui * sin_t), theta
+                sqrt_cos * sin_t * (1.0 - cos_t) * jv(2, ui * sin_t), theta
             )
             for ui in u
         ]
@@ -83,16 +91,16 @@ def test_born_wolf_onaxis():
     profile_num = profile_num / np.maximum(profile_num[0], np.finfo(np.float64).eps)
     profile_ref = profile_ref / np.maximum(profile_ref[0], np.finfo(np.float64).eps)
 
-    # Compare over central lobe and first ring.
-    # Tolerance is set at the discretization floor for this grid: the
-    # stair-stepped NA mask combined with the 1/sqrt(cos theta) divergence
-    # at the pupil edge concentrates error at a few pixels near sharp
-    # features. Under the wrong apodization convention the max error is
-    # ~5x larger, so this still discriminates the bug.
+    # Compare over central lobe and first ring. Against the correct
+    # sqrt(cos theta) reference the numerical PSF agrees to ~0.3% over this
+    # ROI, and the residual does not shrink with grid refinement — it is the
+    # stair-stepped-NA-mask floor, not an apodization error. Using the wrong
+    # 1/cos(theta) reference (double-counting the flat-FFT Jacobian) pushes the
+    # error to ~0.05, so this tolerance still discriminates that mistake.
     first_ring = 1.12 * optics.wavelength / optics.na
     roi = r <= (1.4 * first_ring)
     max_abs_err = np.max(np.abs(profile_num[roi] - profile_ref[roi]))
-    assert max_abs_err < 0.05
+    assert max_abs_err < 0.01
 
 
 def test_energy_sum_rule():

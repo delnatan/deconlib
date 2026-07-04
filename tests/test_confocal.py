@@ -30,26 +30,26 @@ class TestConfocalOptics:
         assert optics.ni == 1.515
         assert optics.ns == 1.515  # defaults to ni
 
-    def test_default_pinhole_is_1_au(self):
-        """Test that default pinhole is 1 Airy unit."""
+    def test_default_pinhole_is_1_au_diameter(self):
+        """Test that default pinhole is 0.5 AU radius (= 1 AU diameter)."""
         optics = ConfocalOptics(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
         )
-        assert optics.pinhole_au == 1.0
+        assert optics.pinhole_radius_au == 0.5
 
-    def test_explicit_pinhole_au(self):
+    def test_from_diameter_au(self):
         """Test explicit pinhole diameter in Airy units."""
-        optics = ConfocalOptics(
+        optics = ConfocalOptics.from_diameter_au(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=0.5,
+            diameter_au=0.5,
         )
-        assert optics.pinhole_au == 0.5
+        assert optics.pinhole_radius_au == 0.25
 
     def test_pinhole_radius_au(self):
         """Test pinhole radius in Airy units (Andor-style metadata)."""
@@ -85,12 +85,12 @@ class TestConfocalOptics:
 
     def test_get_pinhole_radius_from_diameter_au(self):
         """Test pinhole radius calculation from diameter in AU."""
-        optics = ConfocalOptics(
+        optics = ConfocalOptics.from_diameter_au(
             wavelength_exc=0.488,
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=2.0,  # 2 AU diameter
+            diameter_au=2.0,  # 2 AU diameter
         )
         radius = optics.get_pinhole_radius()
         # Diameter of 2 AU → radius of 1 AU
@@ -190,7 +190,7 @@ class TestComputeConfocalPSF:
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=1.0,
+            pinhole_radius_au=0.5,
         )
 
     @pytest.fixture
@@ -254,7 +254,7 @@ class TestComputeConfocalPSF:
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=0.1,  # Very small
+            pinhole_radius_au=0.05,  # Very small
         )
 
         z = np.array([0.0])
@@ -387,7 +387,7 @@ class TestPhysicalProperties:
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=1.0,
+            pinhole_radius_au=0.5,
         )
         shape = (64, 64)
         spacing = 0.05
@@ -427,7 +427,7 @@ class TestPhysicalProperties:
             wavelength_em=0.525,
             na=1.4,
             ni=1.515,
-            pinhole_au=1.0,
+            pinhole_radius_au=0.5,
         )
         shape = (64, 64)
         spacing = 0.02
@@ -690,3 +690,32 @@ class TestVectorialConfocalPSF:
         )
         assert psf.shape == (1, 64, 64)
         assert np.all(psf >= 0)
+
+
+class TestZernikeKwarg:
+    """The zernike= convenience kwarg equals the explicit aberration path."""
+
+    def test_confocal_zernike_matches_aberration(self):
+        from deconlib import ZernikeAberration, ZernikeMode
+
+        optics = ConfocalOptics(
+            wavelength_exc=0.488, wavelength_em=0.525, na=1.4, ni=1.515
+        )
+        z = np.linspace(-0.5, 0.5, 5)
+        coeffs = {ZernikeMode.SPHERICAL: 0.5, ZernikeMode.COMA_X: -0.3}
+
+        via_kwarg = compute_confocal_psf(optics, (64, 64), 0.05, z, zernike=coeffs)
+        via_aberr = compute_confocal_psf(
+            optics, (64, 64), 0.05, z, aberrations=[ZernikeAberration(coeffs)]
+        )
+        assert np.allclose(via_kwarg, via_aberr)
+
+    def test_zernike_none_is_unaberrated(self):
+        optics = ConfocalOptics(
+            wavelength_exc=0.488, wavelength_em=0.525, na=1.4, ni=1.515
+        )
+        z = np.array([0.0])
+        assert np.allclose(
+            compute_confocal_psf(optics, (64, 64), 0.05, z),
+            compute_confocal_psf(optics, (64, 64), 0.05, z, zernike=None),
+        )
