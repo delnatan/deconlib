@@ -91,17 +91,26 @@ def make_forward_model(
     visible_shape = tuple(max(1, round(d * z)) for d, z in zip(data_shape, zoom))
     padded_shape, padding = compute_padded_shape(visible_shape, psf.shape)
     valid_slices = get_valid_slices(padded_shape, visible_shape, padding)
-    # Downsampled padded domain; always >= data_shape due to PSF margins
-    downsampled = tuple(max(1, round(p / z)) for p, z in zip(padded_shape, zoom))
 
     convolver = LinearFFTConvolver(psf, signal_shape=padded_shape, normalize=True)
-    detector = Crop(downsampled, data_shape)
-    if all(z == 1.0 for z in zoom):
+    # Crop padded -> visible on the fine grid first, using the exact
+    # (possibly asymmetric, for even-sized PSFs) pad_before offset. Doing
+    # this before downsampling -- rather than downsampling the whole padded
+    # domain and center-cropping the coarse result -- avoids a sub-pixel
+    # registration shift: a naive center-crop of the downsampled *padded*
+    # domain has no knowledge of padding's asymmetry and assumes the visible
+    # content sits exactly centered, which only holds for odd-sized PSFs.
+    crop_start = tuple(pad_before for pad_before, _ in padding)
+    visible_crop = Crop(padded_shape, visible_shape, start=crop_start)
+    if visible_shape == data_shape:
         # Data at/above Nyquist: the downsample stage is identity, skip it.
-        op = compose(detector, convolver)
+        op = compose(visible_crop, convolver)
     else:
-        downsampler = FractionalAreaDownsample(scale=zoom, in_shape=padded_shape)
-        op = compose(detector, downsampler, convolver)
+        # Effective ratio (not the nominal zoom) so downsampling visible_shape
+        # lands on data_shape exactly, with no further crop needed.
+        eff_scale = tuple(v / d for v, d in zip(visible_shape, data_shape))
+        downsampler = FractionalAreaDownsample(scale=eff_scale, in_shape=visible_shape)
+        op = compose(downsampler, visible_crop, convolver)
 
     return ForwardModel(
         op=op,

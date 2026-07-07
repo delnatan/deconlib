@@ -66,12 +66,19 @@ class Crop:
     Adjoint: pad input from target_shape back to original_shape
     """
 
-    def __init__(self, original_shape: Tuple[int, ...], target_shape: Tuple[int, ...]):
+    def __init__(
+        self,
+        original_shape: Tuple[int, ...],
+        target_shape: Tuple[int, ...],
+        start: Tuple[int, ...] = None,
+    ):
         """Initialize Crop operator.
 
         Args:
             original_shape: Shape of the input before cropping.
             target_shape: Desired output shape (must be <= original_shape in all dims).
+            start: Optional per-axis crop start. Defaults to a centered crop
+                (``(orig - tgt) // 2``) when omitted.
 
         Raises:
             ValueError: If target_shape > original_shape in any dimension.
@@ -88,20 +95,35 @@ class Crop:
         self.out_shape = self.target_shape
         self.operator_norm_sq = 1.0
 
-        # Compute center crop slices and padding for adjoint
+        if start is not None and len(start) != len(self.original_shape):
+            raise ValueError(
+                f"start {start} must have same number of dimensions as "
+                f"original_shape {self.original_shape}"
+            )
+
+        # Compute crop slices and padding for adjoint
         self._slices: Tuple[slice, ...] = ()
         self._padding: Tuple[Tuple[int, int], ...] = ()
 
-        for orig, tgt in zip(self.original_shape, self.target_shape):
+        for i, (orig, tgt) in enumerate(zip(self.original_shape, self.target_shape)):
             if tgt > orig:
                 raise ValueError(
                     f"Target size {tgt} > original size {orig}. "
                     "Use Pad for upsizing."
                 )
-            start = (orig - tgt) // 2
-            stop = start + tgt
-            self._slices += (slice(start, stop),)
-            self._padding += ((start, orig - stop),)
+            if start is None:
+                axis_start = (orig - tgt) // 2
+            else:
+                axis_start = int(start[i])
+                if axis_start < 0 or axis_start + tgt > orig:
+                    raise ValueError(
+                        f"start {axis_start} on axis {i} puts crop window "
+                        f"[{axis_start}, {axis_start + tgt}) outside "
+                        f"original size {orig}"
+                    )
+            stop = axis_start + tgt
+            self._slices += (slice(axis_start, stop),)
+            self._padding += ((axis_start, orig - stop),)
 
     def forward(self, x: mx.array) -> mx.array:
         """Crop input to target_shape from center of original_shape."""
