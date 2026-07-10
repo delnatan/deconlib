@@ -123,7 +123,7 @@ from .composition import (
     as_numpy_op,
     compose,
 )
-from .wavelets import AtrousTransform
+from .wavelets import AtrousAnalysisOperator, AtrousTransform, calibrate_noise_weights
 from .core_operators import (
     Pad,
     Crop,
@@ -192,6 +192,8 @@ __all__ = [
     "compose",
     "as_numpy_op",
     "AtrousTransform",
+    "AtrousAnalysisOperator",
+    "calibrate_noise_weights",
     # Core operators
     "Pad",
     "Crop",

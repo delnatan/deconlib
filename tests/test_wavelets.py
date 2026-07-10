@@ -1,7 +1,11 @@
 import numpy as np
 import mlx.core as mx
 
-from deconlib.deconvolution.wavelets import AtrousTransform
+from deconlib.deconvolution.wavelets import (
+    AtrousAnalysisOperator,
+    AtrousTransform,
+    calibrate_noise_weights,
+)
 
 
 def test_atrous_transform_forward_adjoint_pair():
@@ -94,3 +98,43 @@ def test_atrous_transform_mlx_forward_adjoint_pair():
     rhs = float(mx.sum(mx.array(coeffs) * transform.adjoint(mx.array(image))))
 
     assert abs(lhs - rhs) < 1e-4 * max(abs(lhs), abs(rhs), 1.0)
+
+
+def test_calibrate_noise_weights_zeros_smooth_channel_and_normalizes_detail():
+    weights = calibrate_noise_weights(levels=3, ndim=2, n_trials=32, seed=0)
+    assert weights.shape == (4,)
+    assert weights[-1] == 0.0
+    assert np.all(weights[:-1] > 0.0)
+
+    transform = AtrousTransform(levels=3, weights=weights, backend="numpy")
+    rng = np.random.default_rng(1)
+    noise = rng.standard_normal((64, 64))
+    coeffs = transform.analysis_numpy(noise)
+    stds = coeffs.reshape(4, -1).std(axis=1)
+    # Detail channels normalized close to unit std; smooth channel zeroed out.
+    np.testing.assert_allclose(stds[:-1], 1.0, rtol=0.15)
+    assert stds[-1] == 0.0
+
+
+def test_atrous_analysis_operator_forward_is_analysis_adjoint_is_synthesis():
+    transform = AtrousTransform(levels=2, kernel="b3spline", backend="numpy")
+    op = AtrousAnalysisOperator(transform)
+    rng = np.random.default_rng(2)
+    image = rng.standard_normal((16, 16))
+
+    np.testing.assert_allclose(op.forward(image), transform.analysis_numpy(image))
+
+    coeffs = rng.standard_normal(transform.hidden_shape(image.shape))
+    np.testing.assert_allclose(op.adjoint(coeffs), transform.synthesis_numpy(coeffs))
+
+
+def test_atrous_analysis_operator_adjoint_pair():
+    transform = AtrousTransform(levels=2, kernel="b3spline", backend="numpy")
+    op = AtrousAnalysisOperator(transform)
+    rng = np.random.default_rng(3)
+    image = rng.standard_normal((17, 19))
+    coeffs = rng.standard_normal(op.forward(image).shape)
+
+    lhs = float(np.sum(op.forward(image) * coeffs))
+    rhs = float(np.sum(image * op.adjoint(coeffs)))
+    assert abs(lhs - rhs) < 1e-10 * max(abs(lhs), abs(rhs), 1.0)

@@ -132,6 +132,8 @@ from .deconvolution import (
     Hessian3D,
     # Wavelets
     AtrousTransform,
+    AtrousAnalysisOperator,
+    calibrate_noise_weights,
     # Solvers (low-level)
     solve_pdhg_mlx,
     solve_pdhg_with_operator,
@@ -219,6 +221,8 @@ __all__ = [
     "Hessian2D",
     "Hessian3D",
     "AtrousTransform",
+    "AtrousAnalysisOperator",
+    "calibrate_noise_weights",
     "solve_pdhg_mlx",
     "solve_pdhg_with_operator",
     "IdentityRegularizer",

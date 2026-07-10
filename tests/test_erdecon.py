@@ -16,9 +16,12 @@ except ImportError:
     mx = None
 
 from deconlib.deconvolution import (
+    AtrousAnalysisOperator,
+    AtrousTransform,
     ERDeconResult,
     Hessian2D,
     LinearFFTConvolver,
+    calibrate_noise_weights,
     erdecon_solver,
     erdecon_with_operator,
     make_forward_model,
@@ -112,7 +115,7 @@ class TestMath:
         Hsv = hess.forward(sv)
         explicit = (
             8.0 * float(mx.sum(Ksv * Ksv))
-            + 4.0 * float(mx.sum(w[None] * Hsv * Hsv))
+            + 4.0 * float(mx.sum(w * Hsv * Hsv))
         )
         assert abs(quad - explicit) <= 1e-3 * (abs(explicit) + 1.0)
         # PSD: the quadratic form is non-negative.
@@ -130,6 +133,97 @@ class TestMath:
         uHv = float(mx.sum(u * erdecon_gn_hvp(s, v, blur, hess, w, 2.0)))
         vHu = float(mx.sum(v * erdecon_gn_hvp(s, u, blur, hess, w, 2.0)))
         assert abs(uHv - vHu) <= 1e-3 * (abs(uHv) + 1.0)
+
+    def test_gradient_matches_finite_difference_combine_channels_false(self):
+        # Independent per-channel thresholding (combine_channels=False) must
+        # stay a correct gradient of its own objective, not just of the
+        # combine_channels=True one.
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg, bg = 0.1, 1e-2, 0.05
+        grad, _ = erdecon_gradient(
+            s, blur, observed, hess, bg, lam, eps_reg, "gaussian", False
+        )
+
+        np.random.seed(1)
+        e = mx.array(np.random.randn(*s.shape).astype(np.float32))
+        h = 1e-3
+        phi_p = erdecon_objective(
+            s + h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian", False
+        )
+        phi_m = erdecon_objective(
+            s - h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian", False
+        )
+        fd = (phi_p - phi_m) / (2 * h)
+        analytic = float(mx.sum(grad * e))
+        assert abs(fd - analytic) <= 1e-2 * (abs(analytic) + 1.0)
+
+    def test_gn_hvp_quadratic_form_identity_combine_channels_false(self):
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg = 0.1, 1e-2
+        g = s * s
+        _, _, w = _weights(g, hess, lam, eps_reg, combine_channels=False)
+
+        np.random.seed(2)
+        v = mx.array(np.random.randn(*s.shape).astype(np.float32))
+        quad = float(mx.sum(v * erdecon_gn_hvp(s, v, blur, hess, w, 2.0)))
+
+        sv = s * v
+        Ksv = blur.forward(sv)
+        Hsv = hess.forward(sv)
+        explicit = (
+            8.0 * float(mx.sum(Ksv * Ksv))
+            + 4.0 * float(mx.sum(w * Hsv * Hsv))
+        )
+        assert abs(quad - explicit) <= 1e-3 * (abs(explicit) + 1.0)
+        assert quad >= -1e-4 * (abs(explicit) + 1.0)
+
+    def test_gradient_matches_finite_difference_floor_frac(self):
+        # The quadratic floor term added to the objective must match the
+        # extra `w_floor * Hg` term _weights adds to the IRLS weight.
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg, bg = 0.1, 1e-2, 0.05
+        floor_frac = 0.05
+        grad, _ = erdecon_gradient(
+            s, blur, observed, hess, bg, lam, eps_reg, "gaussian", True,
+            floor_frac,
+        )
+
+        np.random.seed(1)
+        e = mx.array(np.random.randn(*s.shape).astype(np.float32))
+        h = 1e-3
+        phi_p = erdecon_objective(
+            s + h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian",
+            True, floor_frac,
+        )
+        phi_m = erdecon_objective(
+            s - h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian",
+            True, floor_frac,
+        )
+        fd = (phi_p - phi_m) / (2 * h)
+        analytic = float(mx.sum(grad * e))
+        assert abs(fd - analytic) <= 1e-2 * (abs(analytic) + 1.0)
+
+    def test_floor_frac_raises_weight_at_high_curvature(self):
+        # The whole point: without the floor, w -> 0 as q -> inf; with it,
+        # w is bounded below by floor_frac * lam / eps regardless of q.
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg = 0.1, 1e-2
+        g = s * s
+
+        _, q, w_plain = _weights(g, hess, lam, eps_reg, floor_frac=0.0)
+        _, _, w_floored = _weights(g, hess, lam, eps_reg, floor_frac=0.05)
+
+        w_floor = 0.05 * lam / eps_reg
+        np.testing.assert_allclose(
+            np.asarray(w_floored), np.asarray(w_plain) + w_floor, rtol=1e-5
+        )
+        # At a huge curvature value, the plain weight collapses toward 0 but
+        # the floored one stays bounded below.
+        huge_q = mx.full(q.shape, 1e6)
+        w_plain_huge = lam / (eps_reg + huge_q)
+        w_floored_huge = w_plain_huge + w_floor
+        assert float(mx.max(w_plain_huge)) < 1e-4
+        assert float(mx.min(w_floored_huge)) >= w_floor * 0.999
 
     def test_gradient_step_is_descent(self):
         # A small step along -grad must decrease phi.
@@ -236,6 +330,99 @@ class TestReconstruction:
         )
         assert result.converged
         assert result.iterations < 500
+
+
+@pytest.mark.skipif(mx is None, reason="MLX not available")
+class TestWaveletRegularizer:
+    """AtrousAnalysisOperator as ``hessian``: multiscale curvature instead of
+    one fixed second-difference stencil (see ``wavelets.py`` module notes).
+
+    ``combine_channels=False`` is required -- letting scales share one IRLS
+    weight (the ``Hessian2D``/``Hessian3D`` default) lets a coarse scale's
+    "this is an edge" verdict leak into finer scales and rings badly.
+    """
+
+    def _make_ramp_and_edge_problem(self, seed=0):
+        # A smooth linear ramp (should stay perfectly smooth -- no
+        # staircasing) plus one sharp square bump (a real edge, should not
+        # ring/overshoot). Exercises exactly the failure mode a single-scale
+        # curvature regularizer struggles with.
+        shape = (96, 96)
+        _, xx = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing="ij")
+        ramp = (0.3 + 0.6 * (xx / shape[1])).astype(np.float32)
+        truth = ramp.copy()
+        truth[20:40, 60:80] += 0.8
+
+        psf = _gaussian_psf((15, 15), 1.8)
+        fm = make_forward_model(psf, shape, zoom=1.0)
+        truth_padded = np.zeros(fm.padded_shape, dtype=np.float32)
+        truth_padded[fm.valid_slices] = truth
+        clean = np.asarray(fm.op.forward(mx.array(truth_padded)))
+        rng = np.random.default_rng(seed)
+        observed = (clean + 0.01 * rng.standard_normal(clean.shape)).astype(np.float32)
+        return fm, truth, np.maximum(observed, 0.0)
+
+    def test_multiscale_reduces_edge_overshoot_at_matched_accuracy(self):
+        fm, truth, observed = self._make_ramp_and_edge_problem()
+
+        hessian_result = erdecon_with_operator(
+            observed=observed, blur_op=fm.op, hessian=Hessian2D(),
+            reg_weight=0.05, eps_reg=0.01, num_iter=60,
+        )
+
+        levels = 2
+        weights = calibrate_noise_weights(levels=levels, ndim=2, n_trials=16)
+        transform = AtrousTransform(levels=levels, weights=weights, backend="mlx")
+        wavelet_result = erdecon_with_operator(
+            observed=observed, blur_op=fm.op,
+            hessian=AtrousAnalysisOperator(transform),
+            reg_weight=0.05, eps_reg=0.1, num_iter=60,
+            combine_channels=False,
+        )
+
+        hessian_restored = np.asarray(hessian_result.restored[fm.valid_slices])
+        wavelet_restored = np.asarray(wavelet_result.restored[fm.valid_slices])
+
+        # Matched (or better) overall accuracy...
+        hessian_rmse = np.linalg.norm(hessian_restored - truth)
+        wavelet_rmse = np.linalg.norm(wavelet_restored - truth)
+        assert wavelet_rmse <= 1.1 * hessian_rmse
+
+        # ...with far less edge overshoot (ringing) beyond the true peak.
+        hessian_overshoot = hessian_restored.max() - truth.max()
+        wavelet_overshoot = wavelet_restored.max() - truth.max()
+        assert wavelet_overshoot < 0.5 * hessian_overshoot
+
+    def test_single_level_dominates_hessian_on_smooth_ramp(self):
+        # levels=1 (one detail scale) should beat Hessian2D on both ramp
+        # smoothness and overall accuracy, with comparable edge fidelity --
+        # the clean win identified before the levels>=2 ringing tradeoff.
+        fm, truth, observed = self._make_ramp_and_edge_problem()
+
+        def ramp_roughness(restored_full):
+            a = np.asarray(restored_full[fm.valid_slices])
+            ramp_region = a[50:90, 5:55]  # smooth region, away from the bump
+            d2 = np.diff(np.diff(ramp_region, axis=1), axis=1)
+            return float(np.mean(d2**2))
+
+        hessian_result = erdecon_with_operator(
+            observed=observed, blur_op=fm.op, hessian=Hessian2D(),
+            reg_weight=0.01, eps_reg=0.1, num_iter=60,
+        )
+
+        weights = calibrate_noise_weights(levels=1, ndim=2, n_trials=16)
+        transform = AtrousTransform(levels=1, weights=weights, backend="mlx")
+        wavelet_result = erdecon_with_operator(
+            observed=observed, blur_op=fm.op,
+            hessian=AtrousAnalysisOperator(transform),
+            reg_weight=0.01, eps_reg=0.001, num_iter=60,
+        )
+
+        hessian_restored = np.asarray(hessian_result.restored[fm.valid_slices])
+        wavelet_restored = np.asarray(wavelet_result.restored[fm.valid_slices])
+
+        assert ramp_roughness(wavelet_result.restored) < ramp_roughness(hessian_result.restored)
+        assert np.linalg.norm(wavelet_restored - truth) < np.linalg.norm(hessian_restored - truth)
 
 
 @pytest.mark.skipif(mx is None, reason="MLX not available")

@@ -233,3 +233,88 @@ class AtrousTransform:
 
     def __call__(self, coeffs: Any) -> Any:
         return self.forward(coeffs)
+
+
+def calibrate_noise_weights(
+    levels: int,
+    ndim: int,
+    kernel: KernelName = "b3spline",
+    axes: Sequence[int] | None = None,
+    probe_size: int = 64,
+    n_trials: int = 8,
+    seed: int = 0,
+) -> Array:
+    """Per-scale weights normalizing a trous detail channels to unit noise std.
+
+    Probes the (shift-invariant, periodic-boundary) transform with white
+    noise and measures each channel's response std, returning ``1 / std`` for
+    the ``levels`` detail channels and ``0.0`` for the smooth residual
+    channel. Multiplying ``AtrousTransform.weights`` by this array makes a
+    single scalar ``eps``/``lambda`` threshold mean the same curvature scale
+    at every level, and drops the residual out of any regularizer built on
+    top of the transform (mirroring why ER-Decon's own Hessian regularizer
+    carries no intensity/DC term -- see ``erdecon_mlx`` module docstring).
+    This is the standard multiresolution-support noise normalization from
+    astronomical wavelet denoising (e.g. Starck & Murtagh), estimated
+    empirically here so it adapts to any kernel/levels/axes combination
+    instead of relying on a fixed literature table.
+
+    Use with :class:`AtrousAnalysisOperator` and
+    ``erdecon_with_operator(..., combine_channels=False)``. Validated (see
+    ``tests/test_erdecon.py``) up to ``levels=2``: a real edge's wavelet
+    coefficients are significant across many scales at once, and independent
+    per-scale thresholding has no mechanism forcing those scales to agree, so
+    at ``levels>=3`` several simultaneously "preserved" scales can stack
+    constructively into edge ringing/overshoot that no amount of
+    ``reg_weight``/``eps_reg`` retuning fixes. Fixing that for deeper stacks
+    needs a structure-consistency step (tracking a feature across scales, as
+    in astronomical multi-resolution-support methods) that this module does
+    not implement.
+    """
+    rng = np.random.default_rng(seed)
+    shape = tuple(probe_size for _ in range(ndim))
+    probe = AtrousTransform(levels=levels, kernel=kernel, axes=axes, backend="numpy")
+    stds = np.zeros(levels + 1, dtype=float)
+    for _ in range(n_trials):
+        noise = rng.standard_normal(shape)
+        coeffs = probe.analysis_numpy(noise)
+        stds += coeffs.reshape(levels + 1, -1).std(axis=1)
+    stds /= n_trials
+    weights = np.zeros(levels + 1, dtype=float)
+    weights[:-1] = 1.0 / stds[:-1]
+    return weights
+
+
+@dataclass(frozen=True)
+class AtrousAnalysisOperator:
+    """Adapts :class:`AtrousTransform` to ER-Decon's Hessian-operator convention.
+
+    ``Hessian2D``/``Hessian3D`` expose ``forward``: image -> stacked detail
+    channels, and ``adjoint``: channels -> image. ``AtrousTransform`` uses the
+    opposite naming (``forward`` = synthesis, coeffs -> image, for use as a
+    hidden-space ``C``). This wrapper swaps the two so an ``AtrousTransform``
+    can be passed directly as ``hessian=`` to ``erdecon_with_operator``: the
+    existing log(eps + q) IRLS regularizer then measures curvature across all
+    wavelet scales at once instead of one fixed second-difference stencil,
+    which avoids the single-scale staircasing that the pure Hessian
+    regularizer can leave in smooth gradients. Build the wrapped transform's
+    ``weights`` with :func:`calibrate_noise_weights` to normalize scales and
+    exclude the smooth residual from the penalty.
+    """
+
+    transform: AtrousTransform
+
+    @property
+    def operator_norm_sq(self) -> float:
+        return self.transform.operator_norm_sq
+
+    def forward(self, x: Any) -> Any:
+        """Analysis: image -> stacked wavelet channels."""
+        return self.transform.adjoint(x)
+
+    def adjoint(self, y: Any) -> Any:
+        """Synthesis: stacked wavelet channels -> image."""
+        return self.transform.forward(y)
+
+    def __call__(self, x: Any) -> Any:
+        return self.forward(x)

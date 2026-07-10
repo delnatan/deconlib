@@ -34,10 +34,12 @@ import mlx.core as mx
 import numpy as np
 from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
+    AtrousAnalysisOperator,
+    AtrousTransform,
     Crop,
     FractionalAreaDownsample,
-    Hessian3D,
     LinearFFTConvolver,
+    calibrate_noise_weights,
     compose,
     compute_padded_shape,
     compute_visible_shape,
@@ -54,16 +56,34 @@ image_file = "inner_box_100x100.ims"
 
 # Reconstruction
 zoom_factors = (1.0, 1.26, 1.26)  # visible / data pixel ratio (>1 = super-res)
-num_iter = 30
+num_iter = 50
 background_data = 100.0  # background counts per camera pixel (data space)
 
-# Hessian-log knobs (on ~[0, 1]-normalized data; see "Data scaling" above).
-# The regularizer is a non-convex log of Hessian (curvature) magnitude only --
-# no intensity term, so no axial flux-collapse in the widefield missing cone and
+# Regularizer knobs (on ~[0, 1]-normalized data; see "Data scaling" above).
+# The regularizer is a non-convex log of curvature magnitude only -- no
+# intensity term, so no axial flux-collapse in the widefield missing cone and
 # no coercivity floor needed (see erdecon_mlx docstring). eps is a curvature
 # threshold; tune it up until noise is controlled (broad, flat optimum).
-reg_weight = 6e-4  # lambda -- smoothness weight
-eps_reg = 0.25 # epsilon -- curvature threshold (edge vs noise)
+# NOTE: these values were tuned for the discrete Hessian stencil, carried over
+# unchanged as a starting point for the a-trous wavelet regularizer below (see
+# REGULARIZER section) -- the two operators' `|Hg|^2` live in different units
+# (wavelet channels are noise-normalized to ~unit variance by
+# `calibrate_noise_weights`, so `eps` reads as "how many noise sigma of
+# curvature counts as an edge"), so they likely need re-tuning; re-run with
+# eval_interval/verbose to check the loss/I-div trend before trusting output.
+reg_weight = 3e-4  # lambda -- smoothness weight
+eps_reg = 0.1  # epsilon -- curvature threshold (edge vs noise)
+
+# Quadratic-in-curvature IRLS floor: without it, once a voxel's curvature
+# crosses eps_reg the log penalty's weight keeps falling all the way to 0 as
+# curvature grows further, so nothing pulls flux back -- the optimizer can
+# over-sharpen a real-but-modest bump into an isolated near-delta "hot pixel"
+# spike (verified on this dataset: a single 3D voxel reaching ~30000 counts
+# sandwiched between neighbors of ~2500-2700). floor_frac=0.1 tamed that
+# spike ~3.7x (30249 -> 9497) for a ~1.5% I-divergence cost in a sweep on
+# this dataset; push higher (0.2-0.3) if spikes are still bothersome, at a
+# steeper (but still modest) I-div cost. See erdecon_mlx._weights docstring.
+floor_frac = 0.5
 
 # PSF optics
 psf_wavelength = 0.6  # μm
@@ -160,9 +180,34 @@ initial = mx.full(padded_shape, float(background_visible), dtype=mxdata.dtype)
 # (normalize=True), so lambda/eps stay in [0, 1] amplitude units and the
 # restoration comes back in original counts -- no scale/rescale bookkeeping.
 
-# Anisotropic Hessian: weight axial curvature to the same physical unit as
-# lateral (see Hessian3D.from_spacing docstring).
-regularizer = Hessian3D.from_spacing(visible_pixel_spacing)
+# =============================================================================
+# REGULARIZER
+# =============================================================================
+# Single-scale a-trous wavelet regularizer instead of the discrete Hessian
+# stencil: `AtrousAnalysisOperator` reuses ER-Decon's log(eps + q) IRLS
+# machinery unchanged, but measures curvature via "image minus one smoothed
+# copy of itself" rather than a fixed second-difference stencil, which tests
+# on synthetic data found dominates the Hessian on both smoothness and
+# accuracy at levels=1 (see erdecon_wavelet_regularizer memory / test_erdecon
+# TestWaveletRegularizer). `calibrate_noise_weights` normalizes the one
+# detail channel to ~unit noise std and zeros the smooth/residual channel so
+# it is never penalized (no DC/flux-collapse driver, matching why the
+# Hessian-log regularizer itself carries no intensity term).
+#
+# CAVEAT: unlike `Hessian3D.from_spacing`, this does not correct for the
+# axial/lateral physical anisotropy (r = lateral/axial ~= 0.42 here, i.e.
+# axial spacing is ~2.4x coarser) -- the transform dilates by the same
+# pixel-index step on every axis, so its one axial "detail" scale is
+# physically coarser than its lateral one. Bounded at levels=1 (a single
+# smoothing pass, not a cascade of mismatched scales); verified against
+# `Hessian3D.from_spacing(visible_pixel_spacing)` on this exact dataset
+# (2026-07-10): comparable axial-collapse diagnostic (2.68 vs 2.44 -- a
+# property of this data, not a wavelet-induced regression) and slightly
+# better I-divergence fit (0.778 vs 0.826) at the same iteration budget.
+levels = 1
+wavelet_weights = calibrate_noise_weights(levels=levels, ndim=3, n_trials=16)
+transform = AtrousTransform(levels=levels, weights=wavelet_weights, backend="mlx")
+regularizer = AtrousAnalysisOperator(transform)
 
 
 def _timed(fn):
@@ -185,6 +230,7 @@ result, elapsed = _timed(
         hessian=regularizer,
         reg_weight=reg_weight,
         eps_reg=eps_reg,
+        floor_frac=floor_frac,
         newton_tol=1e-4,
         num_iter=num_iter,
         background=background_data,
