@@ -11,12 +11,13 @@ Mirroring widefield_rl_demo.py structure:
 from pathlib import Path
 
 import mem
+import mlx.core as mx
 import numpy as np
 from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
-    GaussianICF,
     Crop,
     FractionalAreaDownsample,
+    GaussianICF,
     LinearFFTConvolver,
     as_numpy_op,
     compose,
@@ -26,28 +27,28 @@ from pyvistra.io import load_image, normalize_to_5d, save_imaris
 # =============================================================================
 # PARAMETERS
 # =============================================================================
-datapath = Path("/Users/delnatan/Projects/Deconvolution/RMM_ASM_sample/")
-image_file = "inner_box_100x100.ims"
+datapath = Path("/Users/delnatan/Desktop/untitled folder")
+image_file = "dapi_crop.ims"
 
 # Deconvolution parameters
 zoom_factors = (1.0, 1.25, 1.25)
 
 # PSF parameters
 psf_params = {
-    "wavelength": 0.6,
-    "na": 1.4,
-    "ni": 1.515,
-    "ns": 1.45,
+    "wavelength": 0.45,
+    "na": 0.95,
+    "ni": 1.0,
+    "ns": 1.33,
 }
 
 # PSF support in data pixels — independent of pixel spacing, so the physical
 # extent scales correctly with the metadata. Converted to visible-space pixels
 # via: n_visible = halfrange_px * data_spacing / visible_spacing = halfrange_px * zoom.
-psf_axial_halfrange_px = 10        # data z-pixels on each side of focus
-psf_lateral_halfrange_px = 25      # data xy-pixels on each side of axis
+psf_axial_halfrange_px = 10  # data z-pixels on each side of focus
+psf_lateral_halfrange_px = 25  # data xy-pixels on each side of axis
 
 # ICF parameters
-icf_gamma = 0.085  # micron (physical units, matches visible_pixel_spacing)
+icf_gamma = 0.1  # micron (physical units, matches visible_pixel_spacing)
 
 # MEM solver parameters
 max_iter = 50
@@ -81,8 +82,28 @@ base_visible_shape = tuple(
 # PSF: truncated support (see widefield_rl_demo.py) — sizing the PSF to the whole
 # reconstruction domain instead of a physical extent makes every convolution
 # pay for an FFT domain as large as the untiled image.
-psf_nz = 2 * int(round(psf_axial_halfrange_px * data_pixel_spacing[0] / visible_pixel_spacing[0])) + 1
-psf_nxy = 2 * int(round(psf_lateral_halfrange_px * data_pixel_spacing[1] / visible_pixel_spacing[1])) + 1
+psf_nz = (
+    2
+    * int(
+        round(
+            psf_axial_halfrange_px
+            * data_pixel_spacing[0]
+            / visible_pixel_spacing[0]
+        )
+    )
+    + 1
+)
+psf_nxy = (
+    2
+    * int(
+        round(
+            psf_lateral_halfrange_px
+            * data_pixel_spacing[1]
+            / visible_pixel_spacing[1]
+        )
+    )
+    + 1
+)
 psf_z = fft_coords(psf_nz, spacing=visible_pixel_spacing[0])
 psf = compute_widefield_psf(
     z=psf_z,
@@ -118,7 +139,9 @@ valid_slices = tuple(
 convolver = LinearFFTConvolver(
     psf, signal_shape=padded_visible_shape, normalize=True
 )
-downsample = FractionalAreaDownsample(scale=zoom_factors, in_shape=padded_visible_shape)
+downsample = FractionalAreaDownsample(
+    scale=zoom_factors, in_shape=padded_visible_shape
+)
 detector = Crop(downsampled_shape, (Nz, Ny, Nx))
 operator = compose(detector, downsample, convolver)
 
@@ -161,17 +184,19 @@ def RCt(u):
 # pushes the padding-region h floor down to ~1e-20 -- 20+ orders of magnitude below
 # the valid-region prior -- which blows up the dynamic range of the entropy-metric
 # whitening (sqrt_mu) applied inside the CG operator and degrades its conditioning.
-padding_prior_value = 1e-3
-prior_value = data_np.mean() / np.prod(zoom_factors)
-prior = np.full(padded_visible_shape, padding_prior_value, dtype=data_np.dtype)
-prior[valid_slices] = prior_value
+# padding_prior_value = 1e-3
+# prior_value = data_np.mean() / np.prod(zoom_factors)
+# prior = np.full(padded_visible_shape, padding_prior_value, dtype=data_np.dtype)
+# prior[valid_slices] = prior_value
+
+prior = RCt(mx.array(data_np))
 
 print("\nPrior setup (flat, valid-region only):")
-print(f"  hidden space: {padded_visible_shape}")
-print(f"  valid-region value: {prior_value:.6f}")
-print(f"  prior min/max: [{prior.min():.6f}, {prior.max():.6f}]")
-print(f"  prior mean: {prior.mean():.6f}")
-print(f"  prior total: {np.sum(prior):.2f}")
+# print(f"  hidden space: {padded_visible_shape}")
+# print(f"  valid-region value: {prior_value:.6f}")
+# print(f"  prior min/max: [{prior.min():.6f}, {prior.max():.6f}]")
+# print(f"  prior mean: {prior.mean():.6f}")
+# print(f"  prior total: {np.sum(prior):.2f}")
 
 # =============================================================================
 # BUILD PROBLEM
@@ -227,6 +252,7 @@ config = mem.InferenceConfig(
     map_config=mem.MaxEntConfig(
         max_iter=max_iter,
         tol_omega=0.05,
+        aim=5.0,
         rate=0.2,
         omega_mode="classic",  # "auto" noise scaling for Gaussian
         cg_epsilon=1e-2,
@@ -338,6 +364,4 @@ save_imaris(
     resolution_levels=True,
 )
 print(f"Saved visible: {restored_visible_path}")
-print(
-    "Note: Results are in visible-space (both with padding preserved)."
-)
+print("Note: Results are in visible-space (both with padding preserved).")

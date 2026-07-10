@@ -7,6 +7,7 @@ from .zernike_refine_mlx import (
     ZernikeRefineConfig,
     ZernikeRefineResult,
     refine_zernike_wiener,
+    refine_zernike_sharpness,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "ZernikeRefineConfig",
     "ZernikeRefineResult",
     "refine_zernike_wiener",
+    "refine_zernike_sharpness",
 ]

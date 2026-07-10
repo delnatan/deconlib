@@ -182,16 +182,44 @@ class Hessian2D:
 class Hessian3D:
     """3D Hessian operator with anisotropic voxel spacing.
 
-    Computes all 6 unique Hessian components with appropriate weighting.
+    Computes all 6 unique Hessian components, each weighted so the discrete
+    curvature is expressed in a common physical unit (lateral pixel area)
+    regardless of axis -- verified exactly reproducing the true (scaled)
+    Hessian Frobenius norm on a quadratic test phantom, up to the constant
+    ``dy^2`` factor absorbed into the regularizer's ``lambda``. Concretely,
+    weighting ``H_zz`` by ``r^2`` converts a raw index-unit second difference
+    ``d2_z(g)`` (which approximates ``(d^2g/dz^2) * dz^2``) into
+    ``(d^2g/dz^2) * dy^2``, matching ``H_yy = d2_y(g) ~ (d^2g/dy^2) * dy^2``
+    unweighted -- so the same physical curvature reads the same regardless of
+    which axis it's measured along, and the log-Hessian regularizer's ``eps``
+    threshold means the same curvature magnitude on every axis.
 
     Attributes:
-        r: Voxel spacing ratio (lateral/axial).
+        r: Voxel spacing ratio (lateral/axial, i.e. ``dy / dz``).
         operator_norm_sq: Spectral norm squared = 16r^4 + 4r^2 + 34.
     """
 
     def __init__(self, r: float = 1.0):
         self.r = r
         self.operator_norm_sq = 16.0 * (r**4) + 4.0 * (r**2) + 34.0
+
+    @classmethod
+    def from_spacing(cls, spacing: Tuple[float, float, float]) -> "Hessian3D":
+        """Build a physically-weighted Hessian3D from voxel spacing ``(dz, dy, dx)``.
+
+        Computes ``r = dy / dz``, assuming isotropic lateral sampling
+        (``dy == dx``, standard for widefield/confocal cameras). This is the
+        one ratio the class can weight by; construct ``Hessian3D(r=...)``
+        directly if lateral spacing is itself anisotropic.
+        """
+        dz, dy, dx = spacing
+        if abs(dy - dx) > 1e-2 * max(dy, dx):
+            raise ValueError(
+                f"Hessian3D.from_spacing assumes isotropic lateral sampling "
+                f"(dy == dx); got dy={dy}, dx={dx}. Construct Hessian3D(r=...) "
+                f"directly for anisotropic lateral spacing."
+            )
+        return cls(r=dy / dz)
 
     def forward(self, f: mx.array) -> mx.array:
         """Compute weighted Hessian. Returns shape (6, Z, Y, X)."""

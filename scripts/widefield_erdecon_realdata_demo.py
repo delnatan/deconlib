@@ -1,19 +1,19 @@
-"""3D widefield deconvolution with the accelerated ML NLCG solver.
+"""3D widefield deconvolution with ER-Decon on the same data as the NLCG demo.
 
-Minimal usage example: build a three-space forward model (padded reconstruction
-domain -> convolve -> downsample -> crop -> data), then restore with
-``nlcg_with_operator`` -- nonlinear conjugate gradients (Fletcher-Reeves) on the
-Poisson negative log-likelihood, with the exact Newton-Raphson step length of
-Valdimarsson & Preza's COSM (``estimateCGMLpoisson.h``) rather than a
-locally-quadratic approximation. See ``deconlib.deconvolution.nlcg_mlx`` for the
-algorithm.
+Same three-space forward model, PSF, and dataset as ``widefield_nlcg_demo.py``,
+but restored with ``erdecon_with_operator`` -- the curvature-only Hessian-log
+restoration (Poisson shot-noise I-divergence data term + non-convex log-Hessian
+regularizer) solved by Gauss-Newton-CG. See
+``deconlib.deconvolution.erdecon_mlx`` for the algorithm.
 
-Early stopping (Eq. 17 of Schaefer et al. 2001) is the implicit regularizer: the
-unregularized ML solution is ill-posed, so *converging* to it amplifies noise.
-An explicit smoothness prior (Hessian3D/Gradient3D) is available below and
-composes with early stopping, but its weight is scene/SNR/scale dependent and
-must be tuned per dataset -- leave it off (``reg_weight = 0.0``) unless you need
-it.
+Data scaling
+------------
+The Poisson I-divergence data term is degree-1 homogeneous (scale-equivariant),
+so no manual "scale then unscale" bookkeeping is needed: ``erdecon_with_operator``
+normalizes the counts to ~[0, 1] internally (``normalize=True``), solves with
+``lambda``/``eps`` in those units, and returns the restoration in original
+counts. ``eps`` is a curvature threshold on ``|H g|^2`` (edge vs noise), tuned to
+the reconstruction, not the data amplitude.
 
 Three-space model
 ------------------
@@ -22,6 +22,9 @@ Three-space model
   padded  (Pz, Py, Px)  - convolution domain (visible + PSF support margins)
 
 Forward operator:  padded -> convolve -> downsample -> crop -> data
+
+Background is modeled properly (m = K g + b, b a data-space pedestal) on the raw
+counts, not subtracted; see the BACKGROUND section.
 """
 
 import time
@@ -33,14 +36,13 @@ from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
     Crop,
     FractionalAreaDownsample,
-    Gradient3D,  # first-order alternative to Hessian3D
     Hessian3D,
     LinearFFTConvolver,
     compose,
     compute_padded_shape,
     compute_visible_shape,
+    erdecon_with_operator,
     get_valid_slices,
-    nlcg_with_operator,
 )
 from pyvistra.io import load_image, normalize_to_5d, save_imaris
 
@@ -52,8 +54,16 @@ image_file = "inner_box_100x100.ims"
 
 # Reconstruction
 zoom_factors = (1.0, 1.26, 1.26)  # visible / data pixel ratio (>1 = super-res)
-num_iter = 150
+num_iter = 30
 background_data = 100.0  # background counts per camera pixel (data space)
+
+# Hessian-log knobs (on ~[0, 1]-normalized data; see "Data scaling" above).
+# The regularizer is a non-convex log of Hessian (curvature) magnitude only --
+# no intensity term, so no axial flux-collapse in the widefield missing cone and
+# no coercivity floor needed (see erdecon_mlx docstring). eps is a curvature
+# threshold; tune it up until noise is controlled (broad, flat optimum).
+reg_weight = 6e-4  # lambda -- smoothness weight
+eps_reg = 0.25 # epsilon -- curvature threshold (edge vs noise)
 
 # PSF optics
 psf_wavelength = 0.6  # μm
@@ -62,12 +72,11 @@ psf_ni = 1.515  # immersion medium refractive index
 psf_ns = 1.45  # sample medium refractive index
 
 # PSF support in data pixels — independent of pixel spacing.
-psf_axial_halfrange_px = 20  # data z-pixels on each side of focus
-psf_lateral_halfrange_px = 32  # data xy-pixels on each side of axis
+psf_lateral_halfrange_px = 40  # data xy-pixels on each side of axis
 
 # Output
 output_dir = Path(__file__).parent / "output"
-output_file = "restored_widefield_nlcg_demo.ims"
+output_file = "restored_widefield_erdecon_demo.ims"
 
 # =============================================================================
 # LOAD DATA
@@ -88,19 +97,7 @@ visible_pixel_spacing = tuple(
 bin_factors = tuple(1.0 / z for z in zoom_factors)
 visible_shape = compute_visible_shape(data_shape, bin_factor=bin_factors)
 
-# psf_nz = (
-#     2
-#     * int(
-#         round(
-#             psf_axial_halfrange_px
-#             * data_pixel_spacing[0]
-#             / visible_pixel_spacing[0]
-#         )
-#     )
-#     + 1
-# )
 psf_nz = Nz
-
 psf_nxy = (
     2
     * int(
@@ -142,33 +139,30 @@ detector = Crop(downsampled_shape, data_shape)
 operator = compose(detector, downsampler, convolver)
 
 # =============================================================================
-# INITIALIZATION
+# BACKGROUND
 # =============================================================================
-background_visible = background_data / np.prod(zoom_factors)
+# Proper Poisson background modeling: keep the RAW counts and let the solver fit
+# m = K g + b, with b = background_data. Do NOT subtract-and-clip -- clipping the
+# sub-pedestal pixels to zero would make the shot-noise I-divergence penalize the
+# model for the very background it is supposed to carry.
+#
+# The pedestal needs no pixel-spacing conversion: it is a per-camera-pixel offset
+# added at the detector, i.e. in data space, after the forward model. The
+# visible-space spacing enters only in the flat init below. A uniform
+# reconstruction that forward-models to a data-space level b must sit at
+# b / (visible voxels per data voxel) = b / prod(zoom_factors) per visible voxel,
+# because the flux-summing downsample aggregates that many visible voxels into
+# each data pixel (verified: uniform v -> ~v * prod(zoom) per data pixel).
+background_visible = background_data / float(np.prod(zoom_factors))
 initial = mx.full(padded_shape, float(background_visible), dtype=mxdata.dtype)
 
-# =============================================================================
-# REGULARIZATION (optional)
-# =============================================================================
-# NLCG minimizes phi(s) = Poisson_NLL(f) + reg_weight * ||C f||^2, f = s^2, with C
-# a linear operator (forward/adjoint). Use the built-in Hessian3D (smooth, second
-# order) or Gradient3D (first order, edge-preserving-ish); both are domain-
-# consistent (padded -> padded). The paper's g-difference term is NOT used: it
-# assumes object and data share one grid, which breaks under padding / super-res.
-#
-# r is the voxel spacing ratio (lateral/axial); see the Hessian3D docstring.
-# reg_weight (beta) is scene/SNR/scale dependent -- there is no universal value,
-# and it scales with the data magnitude (counts), so a value tuned on one dataset
-# will not transfer to another with different brightness. TUNE IT: start small
-# (e.g. 1e-5) and increase until axial streaking is controlled without blurring
-# real structure. Too large over-smooths AND, by shrinking the steps, can trip
-# the Eq. 17 stopping early. Default off -- early stopping alone is usually enough.
-reg_r = visible_pixel_spacing[1] / visible_pixel_spacing[0]
-regularizer = Hessian3D(r=reg_r)
-reg_weight = 0.0  # <-- set > 0 (and tune) to enable the smoothness prior
-use_reg = reg_weight > 0.0
+# No manual [0, 1] normalization: erdecon_with_operator does it internally
+# (normalize=True), so lambda/eps stay in [0, 1] amplitude units and the
+# restoration comes back in original counts -- no scale/rescale bookkeeping.
 
-eval_interval = 1
+# Anisotropic Hessian: weight axial curvature to the same physical unit as
+# lateral (see Hessian3D.from_spacing docstring).
+regularizer = Hessian3D.from_spacing(visible_pixel_spacing)
 
 
 def _timed(fn):
@@ -180,40 +174,51 @@ def _timed(fn):
 
 
 # =============================================================================
-# RUN NLCG
+# RUN ER-DECON
 # =============================================================================
-print(f"Running NLCG (reg_weight={reg_weight})...")
-nlcg_result, nlcg_time = _timed(
-    lambda: nlcg_with_operator(
+print(f"Running ER-Decon (lambda={reg_weight}, eps={eps_reg})...")
+result, elapsed = _timed(
+    lambda: erdecon_with_operator(
         observed=mxdata,
         blur_op=operator,
-        num_iter=num_iter,
-        slack=2.0,
-        background=background_data,
-        init=initial,
-        eval_interval=eval_interval,
-        regularizer=regularizer if use_reg else None,
+        data_term="poisson",
+        hessian=regularizer,
         reg_weight=reg_weight,
+        eps_reg=eps_reg,
+        newton_tol=1e-4,
+        num_iter=num_iter,
+        background=background_data,
+        init=None,
+        eval_interval=1,
         verbose=True,
     )
 )
 print(
-    f"  stopped at iter {nlcg_result.iterations} "
-    f"(converged={nlcg_result.converged}), "
-    f"final I-div {nlcg_result.loss_history[-1]:.6g}, "
-    f"wall time {nlcg_time:.2f}s"
+    f"  stopped at iter {result.iterations} "
+    f"(converged={result.converged}), "
+    f"final I-div {result.data_misfit_history[-1]:.4f}, "
+    f"wall time {elapsed:.2f}s"
+)
+
+# Bright-plane (axial collapse) diagnostic: the max per-plane mean over the
+# median, in the visible domain. ~1 = flux spread across z; >> 1 = collapsed.
+_vis = np.asarray(result.restored[valid_slices])
+_plane_mean = _vis.mean(axis=(1, 2))
+print(
+    f"  axial peak-plane excess = {_plane_mean.max() / (np.median(_plane_mean) + 1e-12):.2f} "
+    f"(near 1 = no collapse)"
 )
 
 # =============================================================================
-# SAVE OUTPUT
+# SAVE (result already in original data units -- see normalize above)
 # =============================================================================
 output_dir.mkdir(parents=True, exist_ok=True)
 
-restored = np.asarray(nlcg_result.restored, dtype=np.float32)
+restored = np.asarray(result.restored[valid_slices], dtype=np.float32)
 restored_5d = normalize_to_5d(restored, dims="zyx")
 metadata = {
     "scale": visible_pixel_spacing,
-    "channels": [{"name": "Deconvolved (NLCG)"}],
+    "channels": [{"name": "Deconvolved (ER-Decon)"}],
 }
 save_imaris(
     str(output_dir / output_file),

@@ -6,6 +6,7 @@ classes match empirically computed values via power iteration.
 """
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 from deconlib.deconvolution.linops_mlx import (
@@ -127,6 +128,46 @@ class TestHessianNorms:
         expected = 16.0 * (r**4) + 4.0 * (r**2) + 34.0
         assert abs(H.operator_norm_sq - expected) < 1e-10
         assert computed <= H.operator_norm_sq * 1.05
+
+    def test_hessian3d_from_spacing_matches_ratio(self):
+        """from_spacing(dz, dy, dx) picks r = dy / dz."""
+        dz, dy, dx = 0.15, 0.065, 0.065
+        H = Hessian3D.from_spacing((dz, dy, dx))
+        assert abs(H.r - dy / dz) < 1e-12
+
+    def test_hessian3d_from_spacing_rejects_anisotropic_lateral(self):
+        """from_spacing cannot represent dy != dx with a single ratio."""
+        with pytest.raises(ValueError):
+            Hessian3D.from_spacing((0.15, 0.065, 0.08))
+
+    def test_hessian3d_from_spacing_matches_physical_curvature(self):
+        """The weighted Hessian reproduces the true (spacing-scaled) curvature
+        of a quadratic phantom identically along every axis, regardless of the
+        voxel spacing anisotropy -- confirms the r-weighting is physically
+        correct, not just dimensionally plausible."""
+        dz, dy, dx = 0.15, 0.065, 0.065
+        H = Hessian3D.from_spacing((dz, dy, dx))
+
+        a, b, c = 2.0, 3.0, 5.0  # arbitrary curvatures (1/um^2)
+        shape = (12, 12, 12)
+        iz, iy, ix = np.meshgrid(
+            *[np.arange(n) - n // 2 for n in shape], indexing="ij"
+        )
+        z, y, x = iz * dz, iy * dy, ix * dx
+        f = 0.5 * (a * z**2 + b * y**2 + c * x**2)
+        g = mx.array(f.astype(np.float32))
+
+        Hg = np.asarray(H.forward(g))
+        i = tuple(s // 2 for s in shape)  # interior, away from Neumann edges
+        H_zz, H_yy, H_xx = Hg[0][i], Hg[1][i], Hg[2][i]
+        H_yz, H_xz, H_xy = Hg[3][i], Hg[4][i], Hg[5][i]
+
+        dy2 = dy**2
+        assert abs(H_zz - a * dy2) < 1e-4 * dy2
+        assert abs(H_yy - b * dy2) < 1e-4 * dy2
+        assert abs(H_xx - c * dy2) < 1e-4 * dy2
+        for cross in (H_yz, H_xz, H_xy):
+            assert abs(cross) < 1e-4 * dy2
 
 
 class TestConvolverNorms:

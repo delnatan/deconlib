@@ -97,6 +97,11 @@ from .nlcg_mlx import (
     nlcg_solver,
     NLCGResult,
 )
+from .erdecon_mlx import (
+    erdecon_with_operator,
+    erdecon_solver,
+    ERDeconResult,
+)
 
 from .linops_mlx import (
     FFTConvolver,
@@ -147,6 +152,7 @@ __all__ = [
     "MLXDeconvolutionResult",
     "RLResult",
     "NLCGResult",
+    "ERDeconResult",
     # MLX Algorithms - PDHG
     "solve_pdhg_mlx",
     "solve_pdhg_with_operator",
@@ -159,6 +165,9 @@ __all__ = [
     # MLX Algorithms - Nonlinear conjugate gradient (Schaefer 2001)
     "nlcg_with_operator",
     "nlcg_solver",
+    # MLX Algorithms - Entropy-regularized deconvolution (Arigovindan 2013)
+    "erdecon_with_operator",
+    "erdecon_solver",
     # Shape utilities
     "compute_visible_shape",
     "compute_padded_shape",

@@ -8,13 +8,21 @@ aberration is known to be low-order and smooth. This module fits a handful of
 Zernike coefficients instead — a physically meaningful, low-dimensional vector
 that is easy to interpret and to feed back into :class:`ZernikeAberration`.
 
-The refinement is a quick-and-dirty Wiener-deconvolution loop. Given a measured
-single-bead PSF stack, the current Zernike-parameterised model PSF is used to
-Wiener-deconvolve the data; the coefficients are nudged so the deconvolved
-object collapses toward a point (a delta at the FFT corner origin). When the
-model PSF matches the true PSF, the deconvolution is sharpest, so minimising the
-residual drives the coefficients toward the true aberration. MLX's autograd
-differentiates straight through the FFTs.
+Two fitting strategies are provided, both quick-and-dirty Wiener-deconvolution
+loops differentiated end-to-end with MLX autograd:
+
+- :func:`refine_zernike_wiener` -- for a measured *single-bead* PSF stack. The
+  current Zernike-parameterised model PSF Wiener-deconvolves the data, and the
+  coefficients are nudged so the result collapses toward a point (a delta at
+  the FFT corner origin). Requires an isolated point source as the known
+  ground truth.
+- :func:`refine_zernike_sharpness` -- for an ordinary (non-bead) image, where
+  there is no known ground truth. Nudges the coefficients to maximise the
+  *sharpness* (``sum(I^2)``) of the Wiener-deconvolved object -- the classical
+  Muller-Buffington wavefront-sensing functional. See its docstring for why a
+  more "obvious" ground-truth-free formulation (reconvolve the estimate with
+  the same PSF and compare to the input) does not work: it is algebraically
+  insensitive to phase aberrations.
 
 Typical usage::
 
@@ -44,6 +52,7 @@ __all__ = [
     "ZernikeRefineConfig",
     "ZernikeRefineResult",
     "refine_zernike_wiener",
+    "refine_zernike_sharpness",
 ]
 
 # Default modes to fit: all of radial orders n=2..4 except piston (0) and the
@@ -163,6 +172,79 @@ def _wiener(data: mx.array, psf: mx.array, reg: float) -> mx.array:
     return mx.real(obj)
 
 
+def _neg_sharpness(data: mx.array, psf: mx.array, reg: float) -> mx.array:
+    """Negative mean-squared intensity of the Wiener-deconvolved object.
+
+    A note on why this is used instead of the more obvious "reblur the
+    estimate and compare to the data" round trip: that round trip is
+    algebraically degenerate for this purpose. Substituting
+    ``obj = wiener(data, psf, reg)`` into ``reblur = ifft(fft(obj) * fft(psf))``
+    gives ``reblur = ifft(W(H) * fft(data))`` with
+    ``W(H) = |H|^2 / (|H|^2 + r)`` -- a filter that depends on the PSF only
+    through ``|H|^2`` (since ``conj(H) * H = |H|^2``), never through the OTF
+    *phase*. Zernike terms are pure phase aberrations, and OTF magnitude is a
+    classically first-order-insensitive quantity to phase aberrations (the
+    reason phase retrieval needs defocus/diversity rather than a single
+    in-focus image), so that round trip has ~zero gradient at the
+    unaberrated start and is biased toward preferring no aberration
+    regardless of the true optics.
+
+    Maximising the squared-intensity concentration of the deconvolved object
+    itself avoids this: ``obj`` depends on ``conj(H)``, not just ``|H|^2``, so
+    it does carry first-order phase sensitivity. This is the classical
+    Muller-Buffington image-sharpening functional used in wavefront sensing
+    (maximise ``sum(I^2)`` at fixed flux), applied here to the deconvolved
+    estimate rather than a raw image.
+    """
+    obj = _wiener(data, psf, reg)
+    return -mx.mean(obj * obj)
+
+
+def _run_adam(
+    loss_fn, c0: np.ndarray, config: "ZernikeRefineConfig", callback
+) -> tuple[np.ndarray, list[float]]:
+    """Shared Adam loop: optimise ``loss_fn(state)`` over ``state['c']``."""
+    state = {"c": mx.array(c0)}
+    value_and_grad = mx.value_and_grad(loss_fn)
+    opt = mopt.Adam(learning_rate=config.lr)
+    opt.init(state)
+
+    loss_history: list[float] = []
+    for it in range(1, config.max_iter + 1):
+        loss, g = value_and_grad(state)
+        state = opt.apply_gradients(g, state)
+        mx.eval(state)
+        loss_history.append(float(loss))
+        if callback is not None and config.log_every > 0:
+            if it == 1 or it % config.log_every == 0:
+                callback(it, loss_history[-1])
+
+    return np.array(state["c"]), loss_history
+
+
+def _pack_result(
+    coeffs: np.ndarray,
+    modes: tuple[int, ...],
+    ctx: dict,
+    support_weight: np.ndarray,
+    loss_history: list[float],
+) -> "ZernikeRefineResult":
+    """Build the final pupil and package a :class:`ZernikeRefineResult`."""
+    phase = np.tensordot(
+        coeffs.astype(np.float64),
+        np.array(ctx["basis"]).astype(np.float64),
+        axes=1,
+    )
+    pupil = support_weight * np.exp(1j * phase)
+    return ZernikeRefineResult(
+        coefficients={j: float(c) for j, c in zip(modes, coeffs)},
+        coeffs_array=coeffs,
+        modes=modes,
+        pupil=pupil.astype(np.complex128),
+        loss_history=loss_history,
+    )
+
+
 def refine_zernike_wiener(
     measured_psf: np.ndarray,
     z_planes: np.ndarray,
@@ -229,7 +311,6 @@ def refine_zernike_wiener(
                 f"coeffs_init shape {c0.shape} must equal ({len(modes)},)"
             )
 
-    state = {"c": mx.array(c0)}
     reg = float(config.wiener_reg)
     lam = float(config.lam_coeff)
 
@@ -242,32 +323,102 @@ def refine_zernike_wiener(
             loss = loss + lam * mx.sum(s["c"] * s["c"])
         return loss
 
-    value_and_grad = mx.value_and_grad(loss_fn)
-    opt = mopt.Adam(learning_rate=config.lr)
-    opt.init(state)
+    coeffs, loss_history = _run_adam(loss_fn, c0, config, callback)
+    return _pack_result(coeffs, modes, ctx, geom.support_weight, loss_history)
 
-    loss_history: list[float] = []
-    for it in range(1, config.max_iter + 1):
-        loss, g = value_and_grad(state)
-        state = opt.apply_gradients(g, state)
-        mx.eval(state)
-        loss_history.append(float(loss))
-        if callback is not None and config.log_every > 0:
-            if it == 1 or it % config.log_every == 0:
-                callback(it, loss_history[-1])
 
-    coeffs = np.array(state["c"])
-    phase = np.tensordot(
-        coeffs.astype(np.float64),
-        np.array(ctx["basis"]).astype(np.float64),
-        axes=1,
-    )
-    pupil = geom.support_weight * np.exp(1j * phase)
+def refine_zernike_sharpness(
+    image: np.ndarray,
+    z_planes: np.ndarray,
+    geom: Geometry,
+    optics: Optics,
+    *,
+    coeffs_init: np.ndarray | None = None,
+    config: ZernikeRefineConfig | None = None,
+    callback=None,
+) -> ZernikeRefineResult:
+    """Fit Zernike coefficients to an ordinary (non-bead) image via sharpness.
 
-    return ZernikeRefineResult(
-        coefficients={j: float(c) for j, c in zip(modes, coeffs)},
-        coeffs_array=coeffs,
-        modes=modes,
-        pupil=pupil.astype(np.complex128),
-        loss_history=loss_history,
-    )
+    :func:`refine_zernike_wiener` requires a single-bead PSF stack, because
+    its loss compares the Wiener-deconvolved result to a delta function — a
+    target that is only correct for an isolated point source. For an
+    arbitrary sample (e.g. a stained nucleus) there is no known ground truth
+    to compare against.
+
+    This instead maximises the *sharpness* of the Wiener-deconvolved object
+    itself (the classical Muller-Buffington wavefront-sensing functional,
+    ``sum(I^2)`` at fixed flux)::
+
+        loss(c) = -mean( wiener(image, model_psf(c), reg)^2 )
+            + lam_coeff * ||c||^2
+
+    A PSF that matches the true optics gives the best-resolved (most sharply
+    concentrated) deconvolution, so maximising sharpness over the Zernike
+    coefficients drives the model PSF toward the true aberration without
+    needing a bead. Optimised with Adam (MLX autograd).
+
+    Note: an earlier, more "obvious" formulation -- reconvolve the estimate
+    with the same model PSF and minimise RMSE against the input image -- is
+    algebraically degenerate for this purpose (see :func:`_neg_sharpness`
+    docstring): that round trip depends on the PSF only through OTF
+    *magnitude*, never phase, so it has ~zero gradient with respect to
+    (phase-only) Zernike coefficients at the unaberrated starting point.
+
+    Args:
+        image: Background-subtracted intensity image, shape ``(nz, ny, nx)``,
+            with the best-focus slice at z-index 0 (DC-at-corner), same as
+            :func:`refine_zernike_wiener`. The Wiener filter is a full 3-D FFT
+            (``mx.fft.fftn`` transforms all axes, not just the lateral ones),
+            so the axial axis needs the same corner-origin convention as the
+            lateral ones. Use ``np.roll`` to move the assumed focal plane to
+            index 0 before calling.
+        z_planes: z-position of each slice (um), shape ``(nz,)``, in the same
+            DC-at-corner order as ``image`` (e.g. via
+            :func:`deconlib.utils.fft_coords`).
+        geom: Precomputed geometry from :func:`make_geometry`, built with
+            ``shape=(ny, nx)`` matching ``image``.
+        optics: Optical parameters (unused by the scalar model beyond
+            ``geom``; kept for signature parity).
+        coeffs_init: Optional starting coefficients in ``config.modes`` order.
+            ``None`` -> zeros (unaberrated start).
+        config: :class:`ZernikeRefineConfig`. ``None`` -> defaults. Consider a
+            nonzero ``lam_coeff`` if the fit runs away, since nothing else
+            bounds how far sharpness-maximisation can push the coefficients.
+        callback: Optional ``(iter, loss)`` progress hook.
+
+    Returns:
+        :class:`ZernikeRefineResult` (``loss_history`` holds
+        ``-mean(obj^2)`` per iteration, lower is sharper).
+    """
+    if config is None:
+        config = ZernikeRefineConfig()
+
+    modes = tuple(int(m) for m in config.modes)
+    nz = len(z_planes)
+    if image.shape[0] != nz:
+        raise ValueError(f"image has {image.shape[0]} z-planes but z_planes has {nz}")
+
+    ctx = _precompute(geom, modes, z_planes)
+    data_mx = mx.array(np.asarray(image, dtype=np.float32))
+
+    if coeffs_init is None:
+        c0 = np.zeros(len(modes), dtype=np.float32)
+    else:
+        c0 = np.asarray(coeffs_init, dtype=np.float32)
+        if c0.shape != (len(modes),):
+            raise ValueError(
+                f"coeffs_init shape {c0.shape} must equal ({len(modes)},)"
+            )
+
+    reg = float(config.wiener_reg)
+    lam = float(config.lam_coeff)
+
+    def loss_fn(s):
+        psf = _model_psf(s["c"], ctx)
+        loss = _neg_sharpness(data_mx, psf, reg)
+        if lam > 0.0:
+            loss = loss + lam * mx.sum(s["c"] * s["c"])
+        return loss
+
+    coeffs, loss_history = _run_adam(loss_fn, c0, config, callback)
+    return _pack_result(coeffs, modes, ctx, geom.support_weight, loss_history)

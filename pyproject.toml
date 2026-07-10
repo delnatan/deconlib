@@ -38,13 +38,12 @@ dependencies = [
     "scipy>=1.10",
     "h5py>=3.0",
     "pytest",
-    "memsolve",
 ]
 
-[tool.uv.sources]
-memsolve = { path = "/Users/delnatan/Projects/github/memsolve", editable = true }
-
 [project.optional-dependencies]
+memsolve = [
+    "memsolve",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
@@ -55,6 +54,7 @@ docs = [
     "mkdocstrings[python]>=0.24",
 ]
 all = [
+    "memsolve",
     "pytest>=7.0",
     "pytest-cov",
     "mkdocs>=1.5",

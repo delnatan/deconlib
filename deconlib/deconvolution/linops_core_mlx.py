@@ -7,7 +7,14 @@ are implemented as forward/adjoint pairs satisfying <Lx, y> = <x, L*y>.
 
 import mlx.core as mx
 
+# Materialize eagerly: MLX >= 0.31.2 ties an unevaluated array's producer
+# graph to the stream of whichever thread first touches it. Left lazy, this
+# module-level constant gets bound to whatever thread first imports this
+# module (typically the GUI thread, via decon_nlcg.build_regularizer()),
+# and later blows up with "There is no Stream(gpu, 0) in current thread"
+# when a worker thread evaluates a Hessian regularizer that references it.
 SQRT2 = mx.sqrt(mx.array(2.0))
+mx.eval(SQRT2)
 
 
 # -----------------------------------------------------------------------------
