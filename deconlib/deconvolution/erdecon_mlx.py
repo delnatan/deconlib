@@ -154,6 +154,7 @@ def _weights(
     reg_weight: float,
     eps_reg: float,
     floor_frac: float = 0.0,
+    intensity_weight: float = 0.0,
 ):
     """Per-voxel Hessian magnitude ``q`` and edge-preserving IRLS weights ``w``.
 
@@ -164,6 +165,18 @@ def _weights(
     (eps + q)`` is the IRLS weight of the robust penalty ``log(eps + q)``: high
     where curvature is small (smooth away noise), low where curvature is large
     (preserve edges). See module docstring.
+
+    ``intensity_weight > 0`` restores the paper's intensity term inside the same
+    log: ``q = intensity_weight * g^2 + sum_i (H_i g)^2`` (``intensity_weight=1``
+    reproduces Arigovindan et al.'s ``E2 = g^2 + |Hg|^2``). It is the relative
+    *scaling* between the intensity (``g^2``, units of amplitude^2) and curvature
+    (``|Hg|^2``, units of squared second-difference) terms -- with equal weight
+    (``=1``) the intensity term dominates ``q`` in bright/flat regions where
+    ``|Hg|^2 ~ 0``, which is what drives the widefield missing-cone axial
+    flux-collapse (the ``log(eps + g^2)`` penalty is concave in ``g``, rewarding
+    concentration; a constant ``intensity_weight`` only shifts the knee, it does
+    not remove the concavity). Default ``0.0`` is the curvature-only regularizer
+    (no intensity term, no collapse driver -- see module docstring).
 
     ``floor_frac > 0`` adds a small quadratic-in-``q`` term to the penalty,
     ``w_floor = floor_frac * lam / eps`` (a fraction of the weight's value at
@@ -189,6 +202,8 @@ def _weights(
     """
     Hg = hessian.forward(g)
     q = mx.sum(Hg * Hg, axis=0, keepdims=True)
+    if intensity_weight > 0.0:
+        q = q + intensity_weight * (g * g)[None]
     w = reg_weight / (eps_reg + q)
     if floor_frac > 0.0:
         w = w + floor_frac * reg_weight / eps_reg
@@ -243,17 +258,21 @@ def erdecon_objective(
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
     floor_frac: float = 0.0,
+    intensity_weight: float = 0.0,
 ) -> float:
     """Restoration functional ``phi(s)`` (``g = s**2``, Hessian-log regularizer).
 
     ``phi = D(K g, f) + (lambda/2) sum log(eps + q) + (w_floor/2) sum q``,
-    ``q = |Hg|^2``, ``w_floor = floor_frac * lambda / eps``, where the data
-    misfit ``D`` is Gaussian least-squares (``data_term='gaussian'``) or the
-    Poisson I-divergence (``data_term='poisson'``). See :func:`_weights` for
-    ``floor_frac``.
+    ``q = intensity_weight * g^2 + |Hg|^2``, ``w_floor = floor_frac * lambda /
+    eps``, where the data misfit ``D`` is Gaussian least-squares
+    (``data_term='gaussian'``) or the Poisson I-divergence
+    (``data_term='poisson'``). See :func:`_weights` for ``floor_frac`` and
+    ``intensity_weight``.
     """
     g, m = _model(s, blur_op, background)
-    _, q, _ = _weights(g, hessian, reg_weight, eps_reg)
+    _, q, _ = _weights(
+        g, hessian, reg_weight, eps_reg, intensity_weight=intensity_weight
+    )
     data = _data_misfit(m, observed, data_term)
     reg = 0.5 * reg_weight * mx.sum(mx.log(eps_reg + q))
     if floor_frac > 0.0:
@@ -271,21 +290,28 @@ def erdecon_gradient(
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
     floor_frac: float = 0.0,
+    intensity_weight: float = 0.0,
 ):
     """Gradient of ``phi`` at ``s``.
 
     Returns ``(grad, (w, data_hess_w))`` where ``w`` holds the frozen per-voxel
     IRLS weights and ``data_hess_w`` the frozen data-term Newton diagonal, both
     reused by the Gauss-Newton Hessian-vector product so the outer step needs no
-    recomputation. See :func:`_weights` for ``floor_frac``.
+    recomputation. See :func:`_weights` for ``floor_frac``/``intensity_weight``.
     """
     g, m = _model(s, blur_op, background)
-    Hg, _, w = _weights(g, hessian, reg_weight, eps_reg, floor_frac)
+    Hg, _, w = _weights(
+        g, hessian, reg_weight, eps_reg, floor_frac, intensity_weight
+    )
 
     score, data_hess_w = _data_deriv(m, observed, data_term)
     data_grad = blur_op.adjoint(score)  # K^T(d D / d m)
     reg_hess = hessian.adjoint(w * Hg)  # H^T(w * H g)
     grad = 2.0 * s * data_grad + 2.0 * s * reg_hess
+    if intensity_weight > 0.0:
+        # d/dg of (lam/2) log(eps + q) through the intensity_weight*g^2 in q
+        # gives w * intensity_weight * g; chain rule g = s^2 adds the 2 s.
+        grad = grad + 2.0 * s * (intensity_weight * w[0] * g)
     return grad, (w, data_hess_w)
 
 
@@ -296,21 +322,26 @@ def erdecon_gn_hvp(
     hessian: LinearOperator,
     w: mx.array,
     data_hess_w: Union[float, mx.array] = 2.0,
+    intensity_weight: float = 0.0,
 ) -> mx.array:
     """Gauss-Newton Hessian-vector product ``H_GN v`` (weights frozen at s).
 
-        H_GN v = 4 s * K^T(d * K(s*v)) + 4 s * H^T(w * H(s*v)) ,
+        H_GN v = 4 s * K^T(d * K(s*v)) + 4 s * H^T(w * H(s*v))
+                 [+ 4 * intensity_weight * s * (w * (s*v))] ,
 
     where ``d = data_hess_w`` is the data-term Newton diagonal (``2`` for
     Gaussian LS -- recovering ``8 s K^T K(s v)`` -- or ``f / m^2`` for Poisson).
-    PSD by construction (a sum of ``J^T (positive) J`` blocks), so plain CG on it
-    never encounters negative curvature. ``w`` and ``data_hess_w`` come from
-    :func:`erdecon_gradient`'s ``aux``.
+    The bracketed term is the intensity block (identity operator), present only
+    when ``intensity_weight > 0``. PSD by construction (a sum of ``J^T (positive)
+    J`` blocks), so plain CG on it never encounters negative curvature. ``w`` and
+    ``data_hess_w`` come from :func:`erdecon_gradient`'s ``aux``.
     """
     sv = s * v
     data = 4.0 * s * blur_op.adjoint(data_hess_w * blur_op.forward(sv))
     Hsv = hessian.forward(sv)
     reg = 4.0 * s * hessian.adjoint(w * Hsv)
+    if intensity_weight > 0.0:
+        reg = reg + 4.0 * intensity_weight * s * (w[0] * sv)
     return data + reg
 
 
@@ -370,6 +401,7 @@ def erdecon_with_operator(
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
     floor_frac: float = 0.0,
+    intensity_weight: float = 0.0,
     num_iter: int = 50,
     background: float = 0.0,
     normalize: bool = True,
@@ -429,6 +461,16 @@ def erdecon_with_operator(
             drive). Start small (e.g. 0.01-0.05) -- it barely affects genuine
             multi-pixel edges but bounds runaway single-voxel concentration.
             See :func:`_weights`.
+        intensity_weight: If > 0, restores the paper's intensity term inside the
+            log, ``q = intensity_weight * g^2 + |Hg|^2`` (``1.0`` reproduces
+            Arigovindan et al.'s equal-weight ``g^2 + |Hg|^2``). This is the
+            relative scaling between the intensity and curvature terms. WARNING:
+            the ``g^2``-in-log term is concave in ``g`` and drives the widefield
+            missing-cone axial flux-collapse; a constant ``intensity_weight``
+            only shifts where intensity stops dominating curvature, it does not
+            remove the collapse. Provided mainly to reproduce/compare against the
+            original paper regularizer. Default ``0.0`` (curvature only). See
+            :func:`_weights`.
         num_iter: Maximum outer Newton iterations.
         background: Constant background added to the model, ``m = K g + b``, in
             original data units.
@@ -500,7 +542,7 @@ def erdecon_with_operator(
     def objective(s_):
         return erdecon_objective(
             s_, blur_op, observed, hessian, b, lam, eps_reg, data_term,
-            floor_frac,
+            floor_frac, intensity_weight,
         )
 
     loss_history: list = []
@@ -526,11 +568,13 @@ def erdecon_with_operator(
     for k in range(num_iter):
         grad, (w, data_hess_w) = erdecon_gradient(
             s, blur_op, observed, hessian, b, lam, eps_reg, data_term,
-            floor_frac,
+            floor_frac, intensity_weight,
         )
 
         def hvp(v):
-            return erdecon_gn_hvp(s, v, blur_op, hessian, w, data_hess_w)
+            return erdecon_gn_hvp(
+                s, v, blur_op, hessian, w, data_hess_w, intensity_weight
+            )
 
         rhs = -grad
         p = _cg_solve(hvp, rhs, cg_max_steps, cg_tol)

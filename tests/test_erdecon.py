@@ -156,6 +156,56 @@ class TestMath:
         analytic = float(mx.sum(grad * e))
         assert abs(fd - analytic) <= 1e-2 * (abs(analytic) + 1.0)
 
+    def test_gradient_matches_finite_difference_intensity_weight(self):
+        # The paper's intensity term (intensity_weight * g^2 inside the log)
+        # must be a correct gradient of its own objective.
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg, bg = 0.1, 1e-2, 0.05
+        iw = 0.7
+        grad, _ = erdecon_gradient(
+            s, blur, observed, hess, bg, lam, eps_reg, "gaussian", 0.0, iw,
+        )
+
+        np.random.seed(1)
+        e = mx.array(np.random.randn(*s.shape).astype(np.float32))
+        h = 1e-3
+        phi_p = erdecon_objective(
+            s + h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian",
+            0.0, iw,
+        )
+        phi_m = erdecon_objective(
+            s - h * e, blur, observed, hess, bg, lam, eps_reg, "gaussian",
+            0.0, iw,
+        )
+        fd = (phi_p - phi_m) / (2 * h)
+        analytic = float(mx.sum(grad * e))
+        assert abs(fd - analytic) <= 1e-2 * (abs(analytic) + 1.0)
+
+    def test_gn_hvp_quadratic_form_identity_intensity_weight(self):
+        # The GN-HVP must include the intensity block 4*iw*s*(w*(s*v)).
+        blur, observed, s, hess = self._setup()
+        lam, eps_reg = 0.1, 1e-2
+        iw = 0.7
+        g = s * s
+        _, _, w = _weights(g, hess, lam, eps_reg, intensity_weight=iw)
+
+        np.random.seed(2)
+        v = mx.array(np.random.randn(*s.shape).astype(np.float32))
+        quad = float(
+            mx.sum(v * erdecon_gn_hvp(s, v, blur, hess, w, 2.0, iw))
+        )
+
+        sv = s * v
+        Ksv = blur.forward(sv)
+        Hsv = hess.forward(sv)
+        explicit = (
+            8.0 * float(mx.sum(Ksv * Ksv))
+            + 4.0 * float(mx.sum(w * Hsv * Hsv))
+            + 4.0 * iw * float(mx.sum(w[0] * sv * sv))
+        )
+        assert abs(quad - explicit) <= 1e-3 * (abs(explicit) + 1.0)
+        assert quad >= -1e-4 * (abs(explicit) + 1.0)
+
     def test_floor_frac_raises_weight_at_high_curvature(self):
         # The whole point: without the floor, w -> 0 as q -> inf; with it,
         # w is bounded below by floor_frac * lam / eps regardless of q.
