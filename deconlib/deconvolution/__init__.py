@@ -116,6 +116,7 @@ from .linops_mlx import (
     Hessian1D,
     Hessian2D,
     Hessian3D,
+    OTFComplementOperator,
 )
 from .composition import (
     Compose,
@@ -186,6 +187,7 @@ __all__ = [
     "Hessian1D",
     "Hessian2D",
     "Hessian3D",
+    "OTFComplementOperator",
     # Composition / external-solver adapters
     "Compose",
     "LinearOperator",

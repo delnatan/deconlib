@@ -153,28 +153,17 @@ def _weights(
     hessian: LinearOperator,
     reg_weight: float,
     eps_reg: float,
-    combine_channels: bool = True,
     floor_frac: float = 0.0,
 ):
     """Per-voxel Hessian magnitude ``q`` and edge-preserving IRLS weights ``w``.
 
-    ``combine_channels=True`` (default, matches ``Hessian2D``/``Hessian3D``):
-    ``q = sum_i (H_i g)^2`` combines the stacked components into one shared
-    per-pixel curvature magnitude/weight -- correct when the channels are the
-    unique components of one physical tensor (the Hessian's Frobenius norm).
-    ``w = lam / (eps + q)`` is the IRLS weight of the robust penalty
-    ``log(eps + q)``: high where curvature is small (smooth away noise), low
-    where curvature is large (preserve edges). See module docstring.
-
-    ``combine_channels=False`` thresholds every stacked channel
-    independently instead: ``q_i = (H_i g)^2`` and ``w_i = lam / (eps +
-    q_i)``, each channel keeping its own weight. Use this for decorrelated
-    channels that should not share one verdict -- e.g. `AtrousAnalysisOperator`
-    wavelet scales, where letting a coarse scale's "this is an edge" verdict
-    silently zero out the fine scale's regularization too (the
-    ``combine_channels=True`` behavior) is what drives ringing: a preserved
-    coarse coefficient's synthesis support (~2^level pixels) then stacks
-    constructively with neighboring scales.
+    ``q = sum_i (H_i g)^2`` combines the stacked components of ``hessian.forward``
+    into one shared per-pixel curvature magnitude/weight -- the Frobenius norm of
+    the second-derivative tensor for ``Hessian2D``/``Hessian3D``, and a no-op for
+    a single-channel operator such as ``OTFComplementOperator``. ``w = lam /
+    (eps + q)`` is the IRLS weight of the robust penalty ``log(eps + q)``: high
+    where curvature is small (smooth away noise), low where curvature is large
+    (preserve edges). See module docstring.
 
     ``floor_frac > 0`` adds a small quadratic-in-``q`` term to the penalty,
     ``w_floor = floor_frac * lam / eps`` (a fraction of the weight's value at
@@ -194,15 +183,12 @@ def _weights(
     there.
 
     Returns ``(Hg, q, w)`` where ``Hg = hessian.forward(g)`` is reused by both
-    the gradient and the Hessian-vector product. ``w`` is always shaped to
-    broadcast directly against ``Hg`` (no ``w[None]`` needed at call sites):
-    shape ``(1, *spatial)`` when combined, ``(C, *spatial)`` when independent.
+    the gradient and the Hessian-vector product. ``w`` has shape
+    ``(1, *spatial)`` and broadcasts directly against ``Hg`` (no ``w[None]``
+    needed at call sites).
     """
     Hg = hessian.forward(g)
-    if combine_channels:
-        q = mx.sum(Hg * Hg, axis=0, keepdims=True)
-    else:
-        q = Hg * Hg
+    q = mx.sum(Hg * Hg, axis=0, keepdims=True)
     w = reg_weight / (eps_reg + q)
     if floor_frac > 0.0:
         w = w + floor_frac * reg_weight / eps_reg
@@ -256,7 +242,6 @@ def erdecon_objective(
     reg_weight: float = 0.05,
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
-    combine_channels: bool = True,
     floor_frac: float = 0.0,
 ) -> float:
     """Restoration functional ``phi(s)`` (``g = s**2``, Hessian-log regularizer).
@@ -265,10 +250,10 @@ def erdecon_objective(
     ``q = |Hg|^2``, ``w_floor = floor_frac * lambda / eps``, where the data
     misfit ``D`` is Gaussian least-squares (``data_term='gaussian'``) or the
     Poisson I-divergence (``data_term='poisson'``). See :func:`_weights` for
-    ``combine_channels``/``floor_frac``.
+    ``floor_frac``.
     """
     g, m = _model(s, blur_op, background)
-    _, q, _ = _weights(g, hessian, reg_weight, eps_reg, combine_channels)
+    _, q, _ = _weights(g, hessian, reg_weight, eps_reg)
     data = _data_misfit(m, observed, data_term)
     reg = 0.5 * reg_weight * mx.sum(mx.log(eps_reg + q))
     if floor_frac > 0.0:
@@ -285,7 +270,6 @@ def erdecon_gradient(
     reg_weight: float = 0.05,
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
-    combine_channels: bool = True,
     floor_frac: float = 0.0,
 ):
     """Gradient of ``phi`` at ``s``.
@@ -293,10 +277,10 @@ def erdecon_gradient(
     Returns ``(grad, (w, data_hess_w))`` where ``w`` holds the frozen per-voxel
     IRLS weights and ``data_hess_w`` the frozen data-term Newton diagonal, both
     reused by the Gauss-Newton Hessian-vector product so the outer step needs no
-    recomputation. See :func:`_weights` for ``combine_channels``/``floor_frac``.
+    recomputation. See :func:`_weights` for ``floor_frac``.
     """
     g, m = _model(s, blur_op, background)
-    Hg, _, w = _weights(g, hessian, reg_weight, eps_reg, combine_channels, floor_frac)
+    Hg, _, w = _weights(g, hessian, reg_weight, eps_reg, floor_frac)
 
     score, data_hess_w = _data_deriv(m, observed, data_term)
     data_grad = blur_op.adjoint(score)  # K^T(d D / d m)
@@ -385,7 +369,6 @@ def erdecon_with_operator(
     reg_weight: float = 0.05,
     eps_reg: float = 1e-2,
     data_term: str = "gaussian",
-    combine_channels: bool = True,
     floor_frac: float = 0.0,
     num_iter: int = 50,
     background: float = 0.0,
@@ -418,9 +401,13 @@ def erdecon_with_operator(
         observed: Observed detector image.
         blur_op: Positive forward operator with ``forward`` and ``adjoint``,
             mapping the reconstruction domain to data space.
-        hessian: Stacked second-derivative operator (the paper's L_i filters).
-            Defaults to ``Hessian2D`` / ``Hessian3D`` by rank; pass an instance
-            with a voxel-ratio ``r`` for anisotropic data.
+        hessian: High-pass regularizer operator whose per-voxel response
+            magnitude ``q = sum_i (H_i g)^2`` is thresholded by the log penalty.
+            Defaults to the stacked second-derivative ``Hessian2D`` /
+            ``Hessian3D`` by rank (the paper's L_i filters; pass an instance with
+            a voxel-ratio ``r`` for anisotropic data). Also accepts a
+            single-channel PSF-derived ``OTFComplementOperator`` (missing-cone
+            prior).
         reg_weight: Smoothness weight lambda.
         eps_reg: Curvature threshold epsilon, in units of ``|Hg|^2``. Curvature
             below it is smoothed as noise, above it preserved as an edge; larger
@@ -432,15 +419,6 @@ def erdecon_with_operator(
             ``sum(m - f log m)`` (``m = K g + b``), the statistically correct term
             for photon-limited data; it needs the pedestal modeled via
             ``background`` rather than pre-subtracted.
-        combine_channels: If True (default), the stacked components of
-            ``hessian.forward(g)`` are combined into one shared per-pixel
-            curvature/weight (correct for ``Hessian2D``/``Hessian3D``, whose
-            components are one physical tensor's unique entries). Set False to
-            threshold each stacked channel independently -- required for
-            decorrelated channels such as `AtrousAnalysisOperator` wavelet
-            scales, where sharing one weight across scales lets a coarse
-            scale's "this is an edge" verdict leak into finer scales and
-            causes ringing. See :func:`_weights`.
         floor_frac: If > 0, adds a quadratic-in-curvature floor to the IRLS
             weight (``w += floor_frac * reg_weight / eps_reg``) so it never
             fully redescends to 0. Without it, once a voxel's curvature
@@ -522,7 +500,7 @@ def erdecon_with_operator(
     def objective(s_):
         return erdecon_objective(
             s_, blur_op, observed, hessian, b, lam, eps_reg, data_term,
-            combine_channels, floor_frac,
+            floor_frac,
         )
 
     loss_history: list = []
@@ -548,7 +526,7 @@ def erdecon_with_operator(
     for k in range(num_iter):
         grad, (w, data_hess_w) = erdecon_gradient(
             s, blur_op, observed, hessian, b, lam, eps_reg, data_term,
-            combine_channels, floor_frac,
+            floor_frac,
         )
 
         def hvp(v):

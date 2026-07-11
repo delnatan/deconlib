@@ -259,9 +259,8 @@ def calibrate_noise_weights(
     empirically here so it adapts to any kernel/levels/axes combination
     instead of relying on a fixed literature table.
 
-    Use with :class:`AtrousAnalysisOperator` and
-    ``erdecon_with_operator(..., combine_channels=False)``. Validated (see
-    ``tests/test_erdecon.py``) up to ``levels=2``: a real edge's wavelet
+    Use with :class:`AtrousAnalysisOperator` when thresholding each wavelet
+    scale independently. Validated up to ``levels=2``: a real edge's wavelet
     coefficients are significant across many scales at once, and independent
     per-scale thresholding has no mechanism forcing those scales to agree, so
     at ``levels>=3`` several simultaneously "preserved" scales can stack

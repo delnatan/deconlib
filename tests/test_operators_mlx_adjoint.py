@@ -399,6 +399,67 @@ def test_fft_convolver_adjoint():
     return all_passed
 
 
+def test_otf_complement_adjoint():
+    """Test OTFComplementOperator adjoint correctness and channel shape."""
+    from deconlib.deconvolution.linops_mlx import OTFComplementOperator
+
+    print("\n" + "=" * 60)
+    print("Testing OTFComplementOperator")
+    print("=" * 60)
+
+    all_passed = True
+
+    # A small anisotropic PSF-like kernel embedded in a larger recon domain,
+    # mirroring how the operator is used (PSF smaller than padded_shape).
+    test_cases = [
+        ((8, 12, 16), (5, 7, 7), "3D, PSF < domain"),
+        ((16, 20), (9, 9), "2D, PSF < domain"),
+    ]
+
+    for shape, psf_shape, desc in test_cases:
+        psf = mx.abs(mx.random.normal(psf_shape))
+        psf = psf / mx.sum(psf)
+
+        for power in (1.0, 2.0):
+            R = OTFComplementOperator(np.asarray(psf), shape, power=power)
+            out_shape = (1, *shape)
+
+            x = mx.random.normal(shape)
+            y = mx.random.normal(out_shape)
+            Rx = R(x)
+            Rstar_y = R.adjoint(y)
+
+            lhs = mx.sum(Rx * y).item()
+            rhs = mx.sum(x * Rstar_y).item()
+            denom = max(abs(lhs), abs(rhs), 1e-10)
+            err = abs(lhs - rhs) / denom
+
+            passed = err < RTOL
+            status = "PASS" if passed else "FAIL"
+            print(
+                f"  [{status}] {desc} power={power}: <Rx,y>={lhs:.6f}, "
+                f"<x,R*y>={rhs:.6f}, err={err:.2e}"
+            )
+
+            shape_ok = Rx.shape == out_shape and Rstar_y.shape == shape
+            if not shape_ok:
+                print(
+                    f"       [FAIL] Shape mismatch: Rx={Rx.shape}, "
+                    f"R*y={Rstar_y.shape}"
+                )
+                passed = False
+
+            # DC must be unpenalized (W(0) == 0) regardless of power.
+            dc_w = R.weight.reshape(-1)[0].item()
+            if abs(dc_w) > 1e-6:
+                print(f"       [FAIL] DC weight not zero: {dc_w:.2e}")
+                passed = False
+
+            all_passed = all_passed and passed
+
+    return all_passed
+
+
 def main():
     print("=" * 60)
     print("   MLX Linear Operators - Adjoint Correctness Tests")
@@ -416,6 +477,7 @@ def main():
     results["Gradient3D"] = test_grad_3d_adjoint()
     results["Hessian3D"] = test_hessian_3d_adjoint()
     results["FFTConvolver"] = test_fft_convolver_adjoint()
+    results["OTFComplementOperator"] = test_otf_complement_adjoint()
 
     # Summary
     print("\n" + "=" * 60)

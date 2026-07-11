@@ -717,6 +717,124 @@ class CauchyICF:
         return self.forward(x)
 
 
+class OTFComplementOperator:
+    """Frequency-domain high-pass matched to the OTF null (missing cone + stopband).
+
+    A regularizer operator for ER-Decon, an alternative to the generic spatial
+    high-pass (``Hessian3D``). Instead of a filter only *correlated* with the
+    unrecoverable frequencies, this penalizes them directly. The weight is
+    derived entirely from the same PSF the forward model uses::
+
+        W(k) = (1 - |OTF(k)| / max|OTF|) ** power
+
+    where ``OTF = rfftn(psf)`` on the reconstruction grid. ``W`` is ~1 wherever
+    the microscope transfers no signal -- the axial missing cone *and* the outer
+    (super-resolution) stopband -- and ~0 across the well-measured passband, with
+    ``W = 0`` exactly at DC (which is always measured). Feeding ``q = |R g|^2``
+    into the ``log(eps + q)`` engine then demolishes precisely the low-amplitude
+    energy the data term cannot constrain -- the buildup the Hessian high-pass
+    only suppresses incidentally -- while leaving measured passband structure
+    untouched. Because the operator only fights the null, its ``eps`` optimum
+    sits lower than the Hessian's (more aggressive log-L0 without gouging real
+    edges).
+
+    The smooth ``1 - |OTF|/max`` rolloff (as opposed to a hard cone mask) is what
+    keeps the filter's spatial response ring-free; ``power`` sharpens the
+    passband/null transition.
+
+    ``W`` is real and even (a function of ``|OTF|``), so the filter is real and
+    **self-adjoint**. ``forward`` returns a single channel of shape
+    ``(1, *spatial)``; ``adjoint`` maps ``(1, *spatial)`` back.
+    ``operator_norm_sq = max(W**2)``.
+
+    Noise normalization (``normalize_noise=True``, default): the weight is scaled
+    at construction so the operator's response to unit-variance white noise has
+    ~unit per-voxel std, measured by a fixed-seed white-noise probe. This makes
+    ``eps_reg`` in the ``log(eps + q)`` engine read as "how many noise sigma of
+    response counts as signal" -- and, since a single-channel scale is *not*
+    fully absorbable into ``eps_reg`` once ``floor_frac > 0`` (it sets where the
+    quadratic floor bites relative to noise), it is folded here rather than left
+    to the caller. Pass ``normalize_noise=False`` for the raw OTF-complement
+    weight.
+
+    Args:
+        psf: Point-spread function (real array), the same one the forward
+            operator convolves with. Any scaling is fine -- ``W`` normalizes by
+            ``max|OTF|``, so it is invariant to PSF amplitude.
+        signal_shape: Shape of the reconstruction domain the operator acts on
+            (the PSF-padded domain ``g`` lives on, i.e. ``padded_shape``). The
+            PSF is embedded corner-origin into this shape before the FFT, so it
+            may be smaller than ``signal_shape``.
+        power: Exponent on the complement weight. ``1.0`` (default) is the plain
+            OTF complement; larger values push the weight toward a sharper
+            passband exclusion.
+        normalize_noise: If True (default), rescale the weight so the response to
+            unit white noise has ~unit std (see above).
+        noise_seed: Seed for the white-noise normalization probe (deterministic
+            construction).
+        noise_trials: Number of white-noise trials averaged for the probe.
+    """
+
+    def __init__(
+        self,
+        psf: Union[np.ndarray, mx.array],
+        signal_shape: Tuple[int, ...],
+        power: float = 1.0,
+        normalize_noise: bool = True,
+        noise_seed: int = 0,
+        noise_trials: int = 8,
+    ):
+        psf_np = np.asarray(psf, dtype=np.float32)
+        self.shape = tuple(int(s) for s in signal_shape)
+        if psf_np.ndim != len(self.shape):
+            raise ValueError(
+                f"psf ndim {psf_np.ndim} must match signal_shape "
+                f"ndim {len(self.shape)}"
+            )
+        self.axes = tuple(range(-len(self.shape), 0))
+        self.power = float(power)
+
+        kernel = pad_corner_origin_kernel(psf_np, self.shape)
+        otf_mag = np.abs(np.fft.rfftn(kernel))
+        weight = (1.0 - otf_mag / otf_mag.max()) ** self.power
+        if normalize_noise:
+            weight = weight * self._noise_scale(
+                weight, self.shape, self.axes, noise_seed, noise_trials
+            )
+        self.weight = mx.array(weight.astype(np.float32))
+        self.operator_norm_sq = float(mx.max(self.weight * self.weight))
+
+    @staticmethod
+    def _noise_scale(weight, shape, axes, seed, n_trials):
+        """``1 / std`` of the filter's response to unit-variance white noise.
+
+        Deterministic (fixed seed); returns 1.0 if the response is ~0 (a weight
+        that is zero everywhere, e.g. a flat OTF).
+        """
+        rng = np.random.default_rng(seed)
+        total = 0.0
+        for _ in range(n_trials):
+            x = rng.standard_normal(shape).astype(np.float32)
+            y = np.fft.irfftn(np.fft.rfftn(x) * weight, axes=axes, s=shape)
+            total += float(y.std())
+        std = total / n_trials
+        return 1.0 / std if std > 1e-8 else 1.0
+
+    def forward(self, x: mx.array) -> mx.array:
+        """Apply the null-space filter: returns shape ``(1, *signal_shape)``."""
+        x_ft = mx.fft.rfftn(x)
+        filtered = mx.fft.irfftn(
+            x_ft * self.weight, axes=self.axes, s=self.shape
+        )
+        return filtered[None]
+
+    def adjoint(self, y: mx.array) -> mx.array:
+        """Adjoint (self-adjoint filter): ``(1, *signal_shape)`` -> signal."""
+        y_ft = mx.fft.rfftn(y[0])
+        return mx.fft.irfftn(y_ft * self.weight, axes=self.axes, s=self.shape)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward(x)
 
 
 

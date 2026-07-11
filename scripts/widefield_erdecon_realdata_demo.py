@@ -34,12 +34,10 @@ import mlx.core as mx
 import numpy as np
 from deconlib import compute_widefield_psf, fft_coords
 from deconlib.deconvolution import (
-    AtrousAnalysisOperator,
-    AtrousTransform,
     Crop,
     FractionalAreaDownsample,
     LinearFFTConvolver,
-    calibrate_noise_weights,
+    OTFComplementOperator,
     compose,
     compute_padded_shape,
     compute_visible_shape,
@@ -52,7 +50,7 @@ from pyvistra.io import load_image, normalize_to_5d, save_imaris
 # PARAMETERS
 # =============================================================================
 datapath = Path("/Users/delnatan/Projects/Deconvolution/RMM_ASM_sample/")
-image_file = "inner_box_100x100.ims"
+image_file = "outer_box_120x120.ims"
 
 # Reconstruction
 zoom_factors = (1.0, 1.26, 1.26)  # visible / data pixel ratio (>1 = super-res)
@@ -64,26 +62,27 @@ background_data = 100.0  # background counts per camera pixel (data space)
 # intensity term, so no axial flux-collapse in the widefield missing cone and
 # no coercivity floor needed (see erdecon_mlx docstring). eps is a curvature
 # threshold; tune it up until noise is controlled (broad, flat optimum).
-# NOTE: these values were tuned for the discrete Hessian stencil, carried over
-# unchanged as a starting point for the a-trous wavelet regularizer below (see
-# REGULARIZER section) -- the two operators' `|Hg|^2` live in different units
-# (wavelet channels are noise-normalized to ~unit variance by
-# `calibrate_noise_weights`, so `eps` reads as "how many noise sigma of
-# curvature counts as an edge"), so they likely need re-tuning; re-run with
-# eval_interval/verbose to check the loss/I-div trend before trusting output.
-reg_weight = 3e-4  # lambda -- smoothness weight
-eps_reg = 0.1  # epsilon -- curvature threshold (edge vs noise)
+# NOTE: the cone operator's single channel is pre-normalized to ~unit noise
+# std internally (OTFComplementOperator(normalize_noise=True); see REGULARIZER
+# section), so eps_reg reads as "how many noise sigma counts as signal".
+# reg_weight/eps_reg (1e-4 / 0.125) work for the cone-alone prior; on this
+# dataset the restoration lands at I-divergence ~0.79 while spreading flux over
+# more axial planes than the old Hessian+wavelet recipe (2026-07-10 experiment).
+reg_weight = 1e-4  # lambda -- smoothness weight
+eps_reg = 0.125  # epsilon -- curvature threshold (edge vs noise)
 
-# Quadratic-in-curvature IRLS floor: without it, once a voxel's curvature
-# crosses eps_reg the log penalty's weight keeps falling all the way to 0 as
-# curvature grows further, so nothing pulls flux back -- the optimizer can
-# over-sharpen a real-but-modest bump into an isolated near-delta "hot pixel"
-# spike (verified on this dataset: a single 3D voxel reaching ~30000 counts
-# sandwiched between neighbors of ~2500-2700). floor_frac=0.1 tamed that
-# spike ~3.7x (30249 -> 9497) for a ~1.5% I-divergence cost in a sweep on
-# this dataset; push higher (0.2-0.3) if spikes are still bothersome, at a
-# steeper (but still modest) I-div cost. See erdecon_mlx._weights docstring.
-floor_frac = 0.5
+# Quadratic-in-curvature IRLS floor -- here it is load-bearing, not a safety
+# margin. The pure log penalty is redescending: once a channel's response
+# crosses eps_reg its weight keeps falling to 0, so nothing pulls flux back,
+# and for the cone operator that shows up as passband graininess (its weight
+# is ~0 across the measured band, so only the log term acts there, and it
+# concedes to strong noise). floor_frac adds a non-redescending quadratic
+# (Tikhonov) term, w += floor_frac * reg_weight / eps_reg, that keeps smoothing
+# the passband no matter how large the response grows -- this is what replaces
+# the separate Hessian noise-damper of the earlier recipe. ~1.0 matched/beat
+# Hessian+cone on this dataset (2026-07-10); raise it for more passband
+# smoothing at the cost of a little data fit.
+floor_frac = 1.0
 
 # PSF optics
 psf_wavelength = 0.6  # μm
@@ -183,31 +182,34 @@ initial = mx.full(padded_shape, float(background_visible), dtype=mxdata.dtype)
 # =============================================================================
 # REGULARIZER
 # =============================================================================
-# Single-scale a-trous wavelet regularizer instead of the discrete Hessian
-# stencil: `AtrousAnalysisOperator` reuses ER-Decon's log(eps + q) IRLS
-# machinery unchanged, but measures curvature via "image minus one smoothed
-# copy of itself" rather than a fixed second-difference stencil, which tests
-# on synthetic data found dominates the Hessian on both smoothness and
-# accuracy at levels=1 (see erdecon_wavelet_regularizer memory / test_erdecon
-# TestWaveletRegularizer). `calibrate_noise_weights` normalizes the one
-# detail channel to ~unit noise std and zeros the smooth/residual channel so
-# it is never penalized (no DC/flux-collapse driver, matching why the
-# Hessian-log regularizer itself carries no intensity term).
+# A single OTF-complement ("missing cone") regularizer -- no Hessian, no
+# wavelet. This is the whole prior, and it is derived straight from the same
+# `psf` the forward model uses (so it needs no separate tuning): its weight
+# W(k) = 1 - |OTF|/max|OTF| is ~1 exactly where the microscope transfers no
+# signal (the axial missing cone plus the outer stopband) and ~0 across the
+# measured passband, with W=0 at DC. The log(eps + q) penalty then demolishes
+# precisely the spurious low-amplitude flux the data term cannot constrain
+# (axial collapse, haze) -- which the old generic high-passes (wavelet /
+# Hessian) only suppressed incidentally.
 #
-# CAVEAT: unlike `Hessian3D.from_spacing`, this does not correct for the
-# axial/lateral physical anisotropy (r = lateral/axial ~= 0.42 here, i.e.
-# axial spacing is ~2.4x coarser) -- the transform dilates by the same
-# pixel-index step on every axis, so its one axial "detail" scale is
-# physically coarser than its lateral one. Bounded at levels=1 (a single
-# smoothing pass, not a cascade of mismatched scales); verified against
-# `Hessian3D.from_spacing(visible_pixel_spacing)` on this exact dataset
-# (2026-07-10): comparable axial-collapse diagnostic (2.68 vs 2.44 -- a
-# property of this data, not a wavelet-induced regression) and slightly
-# better I-divergence fit (0.778 vs 0.826) at the same iteration budget.
-levels = 1
-wavelet_weights = calibrate_noise_weights(levels=levels, ndim=3, n_trials=16)
-transform = AtrousTransform(levels=levels, weights=wavelet_weights, backend="mlx")
-regularizer = AtrousAnalysisOperator(transform)
+# Why no separate passband smoother: the cone weight is ~0 across the measured
+# band, so the cone operator does not smooth there, and on its own the *log*
+# penalty is redescending -- it concedes to strong passband noise and leaves
+# it as visible graininess. Earlier this was patched with a second operator
+# (an anisotropic Hessian3D as a k^2 high-k noise damper). But that job is
+# done more cheaply by `floor_frac` (below): its non-redescending quadratic
+# (Tikhonov) term supplies exactly the passband smoothing the log penalty
+# gives up, using this same single operator. Verified on this dataset
+# (2026-07-10): cone-alone with floor_frac ~1.0 matches or beats the
+# Hessian+cone combination on background smoothness, axial spread, and peak
+# suppression, at a fraction of the per-iteration cost (one FFT pair vs six
+# second-difference stencils) -- see the erdecon_otf_complement_regularizer
+# memory.
+#
+# `normalize_noise=True` (default) rescales the operator's single channel to
+# ~unit noise std internally, so `eps_reg` reads as "how many noise sigma counts
+# as signal".
+regularizer = OTFComplementOperator(psf, padded_shape, power=1.0)
 
 
 def _timed(fn):
