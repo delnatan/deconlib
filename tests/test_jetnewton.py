@@ -19,7 +19,6 @@ from deconlib.deconvolution import (
     AnisotropicHessian2D,
     AnisotropicHessian3D,
     LinearFFTConvolver,
-    OTFComplementOperator,
 )
 
 if mx is not None:
@@ -90,7 +89,7 @@ class TestMath:
         _, aux = jetnewton_gradient(
             x_tilde, blur, observed, hess, s0, bg, beta, eta, data_term,
         )
-        r, w, c, dhw, _ = aux
+        r, w, c, dhw = aux
 
         np.random.seed(2)
         v = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
@@ -116,7 +115,7 @@ class TestMath:
         _, aux = jetnewton_gradient(
             x_tilde, blur, observed, hess, s0, bg, beta, eta, "poisson",
         )
-        r, w, c, dhw, _ = aux
+        r, w, c, dhw = aux
 
         np.random.seed(3)
         u_ = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
@@ -145,119 +144,6 @@ class TestMath:
 
 
 @pytest.mark.skipif(mx is None, reason="MLX not available")
-class TestOTFComplementTerm:
-    """Gradient/HVP correctness for the ``otf_weight * |C~ x_tilde|^2`` term
-    added to ``u_i`` alongside curvature/intensity (see module docstring)."""
-
-    def _setup(self, seed=0):
-        np.random.seed(seed)
-        shape = (24, 24)
-        psf = _gaussian_psf((9, 9), 1.5)
-        blur = LinearFFTConvolver(psf, signal_shape=shape, normalize=True)
-        observed = mx.array(
-            (np.random.rand(*shape).astype(np.float32) * 5.0 + 0.5)
-        )
-        x_tilde = mx.array(np.random.rand(*shape).astype(np.float32) + 0.5)
-        hess = AnisotropicHessian2D(kappa=(1.3, 0.7))
-        otf = OTFComplementOperator(psf, shape)
-        return blur, observed, x_tilde, hess, otf
-
-    @pytest.mark.parametrize("data_term", ["gaussian", "poisson"])
-    def test_gradient_matches_finite_difference(self, data_term):
-        blur, observed, x_tilde, hess, otf = self._setup()
-        s0, beta, eta, bg, otf_weight = 0.8, 0.3, 1e-2, 0.1, 0.5
-        grad, _ = jetnewton_gradient(
-            x_tilde, blur, observed, hess, s0, bg, beta, eta, data_term,
-            otf, otf_weight,
-        )
-
-        np.random.seed(1)
-        v = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
-        h = 1e-3
-        phi_p = jetnewton_objective(
-            x_tilde + h * v, blur, observed, hess, s0, bg, beta, eta,
-            data_term, otf, otf_weight,
-        )
-        phi_m = jetnewton_objective(
-            x_tilde - h * v, blur, observed, hess, s0, bg, beta, eta,
-            data_term, otf, otf_weight,
-        )
-        fd = (phi_p - phi_m) / (2 * h)
-        analytic = float(mx.sum(grad * v))
-        assert abs(fd - analytic) <= 1e-2 * (abs(analytic) + 1.0)
-
-    @pytest.mark.parametrize("data_term", ["gaussian", "poisson"])
-    def test_hvp_matches_finite_difference(self, data_term):
-        blur, observed, x_tilde, hess, otf = self._setup()
-        s0, beta, eta, bg, otf_weight = 0.8, 0.3, 1e-2, 0.1, 0.5
-        _, aux = jetnewton_gradient(
-            x_tilde, blur, observed, hess, s0, bg, beta, eta, data_term,
-            otf, otf_weight,
-        )
-        r, w, c, dhw, r_otf = aux
-
-        np.random.seed(2)
-        v = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
-        hvp_analytic = jetnewton_hvp(
-            v, blur, hess, r, w, c, dhw, s0, data_term,
-            otf, otf_weight, r_otf,
-        )
-
-        h = 1e-4
-        grad_p, _ = jetnewton_gradient(
-            x_tilde + h * v, blur, observed, hess, s0, bg, beta, eta,
-            data_term, otf, otf_weight,
-        )
-        grad_m, _ = jetnewton_gradient(
-            x_tilde - h * v, blur, observed, hess, s0, bg, beta, eta,
-            data_term, otf, otf_weight,
-        )
-        hvp_fd = (grad_p - grad_m) / (2 * h)
-        err = float(mx.max(mx.abs(hvp_fd - hvp_analytic)))
-        scale = float(mx.max(mx.abs(hvp_analytic))) + 1e-8
-        assert err / scale < 5e-2
-
-    def test_hvp_symmetric(self):
-        blur, observed, x_tilde, hess, otf = self._setup()
-        s0, beta, eta, bg, otf_weight = 0.8, 0.3, 1e-2, 0.1, 0.5
-        _, aux = jetnewton_gradient(
-            x_tilde, blur, observed, hess, s0, bg, beta, eta, "poisson",
-            otf, otf_weight,
-        )
-        r, w, c, dhw, r_otf = aux
-
-        np.random.seed(3)
-        u_ = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
-        v = mx.array(np.random.randn(*x_tilde.shape).astype(np.float32))
-        Hu = jetnewton_hvp(
-            u_, blur, hess, r, w, c, dhw, s0, "poisson",
-            otf, otf_weight, r_otf,
-        )
-        Hv = jetnewton_hvp(
-            v, blur, hess, r, w, c, dhw, s0, "poisson",
-            otf, otf_weight, r_otf,
-        )
-        lhs = float(mx.sum(v * Hu))
-        rhs = float(mx.sum(u_ * Hv))
-        assert abs(lhs - rhs) <= 1e-4 * (abs(lhs) + 1.0)
-
-    def test_otf_weight_zero_matches_no_otf(self):
-        # otf_weight=0.0 (the default) must reduce exactly to omitting otf.
-        blur, observed, x_tilde, hess, otf = self._setup()
-        s0, beta, eta, bg = 0.8, 0.3, 1e-2, 0.1
-        grad_base, _ = jetnewton_gradient(
-            x_tilde, blur, observed, hess, s0, bg, beta, eta, "gaussian",
-        )
-        grad_unused_otf, _ = jetnewton_gradient(
-            x_tilde, blur, observed, hess, s0, bg, beta, eta, "gaussian",
-            otf, 0.0,
-        )
-        np.testing.assert_allclose(
-            np.asarray(grad_base), np.asarray(grad_unused_otf), atol=1e-6
-        )
-
-
-@pytest.mark.skipif(mx is None, reason="MLX not available")
 class TestNoiseFloorCalibration:
     """Sanity checks for estimate_penalty_noise_floor -- the noise-probe
     diagnostic added after a real incident where a fixed eta was off by ~8
@@ -281,43 +167,6 @@ class TestNoiseFloorCalibration:
         # exact.
         assert 5e3 < ratio < 2e4
 
-    def test_combined_includes_otf_contribution(self):
-        shape = (16, 32, 32)
-        hess = AnisotropicHessian3D(kappa=(1.0, 1.0, 1.0))
-        grids = np.meshgrid(
-            *[np.arange(n) - (n - 1) / 2.0 for n in (9, 9, 9)], indexing="ij"
-        )
-        r2 = sum(g**2 for g in grids)
-        psf3d = np.exp(-r2 / (2.0 * 1.5**2)).astype(np.float32)
-        psf3d /= psf3d.sum()
-        otf = OTFComplementOperator(psf3d, shape)
-
-        curvature_only = estimate_penalty_noise_floor(hess, shape, n_trials=4, seed=1)
-        with_otf = estimate_penalty_noise_floor(
-            hess, shape, otf=otf, otf_weight=1.0, n_trials=4, seed=1
-        )
-        assert "otf" in with_otf
-        assert with_otf["otf"]["median"] > 0.0
-        # combined must be at least as large as curvature alone, voxel-wise
-        # additive by construction (u = u_curv + otf_weight*u_otf, both >= 0)
-        assert with_otf["combined"]["mean"] >= curvature_only["curvature"]["mean"]
-
-    def test_otf_weight_scales_otf_term_linearly(self):
-        shape = (16, 24, 24)
-        hess = AnisotropicHessian3D(kappa=(1.0, 1.0, 1.0))
-        grids = np.meshgrid(
-            *[np.arange(n) - (n - 1) / 2.0 for n in (7, 7, 7)], indexing="ij"
-        )
-        r2 = sum(g**2 for g in grids)
-        psf3d = np.exp(-r2 / (2.0 * 1.2**2)).astype(np.float32)
-        psf3d /= psf3d.sum()
-        otf = OTFComplementOperator(psf3d, shape)
-
-        s1 = estimate_penalty_noise_floor(hess, shape, otf=otf, otf_weight=1.0, n_trials=4, seed=2)
-        s4 = estimate_penalty_noise_floor(hess, shape, otf=otf, otf_weight=4.0, n_trials=4, seed=2)
-        ratio = s4["otf"]["median"] / s1["otf"]["median"]
-        assert abs(ratio - 4.0) < 0.5
-
 
 @pytest.mark.skipif(mx is None, reason="MLX not available")
 class TestNegativeCurvature:
@@ -335,7 +184,7 @@ class TestNegativeCurvature:
 
         shape = x_tilde.shape
         n = int(np.prod(shape))
-        r, u, w, c, _ = _penalty_weights(x_tilde, hess, beta, eta)
+        r, u, w, c = _penalty_weights(x_tilde, hess, beta, eta)
         H = np.zeros((n, n), dtype=np.float64)
         for i in range(n):
             e = np.zeros(n, dtype=np.float32)
@@ -407,7 +256,7 @@ class TestActiveSetAndReducedPCG:
         grad, aux = jetnewton_gradient(
             x_tilde, blur, observed, hess, s0, bg, beta, eta, "gaussian"
         )
-        r, w, c, dhw, _ = aux
+        r, w, c, dhw = aux
         active, _ = identify_active_set(x_tilde, grad)
 
         def hvp_full(v):
@@ -490,38 +339,24 @@ class TestSolver:
         assert np.linalg.norm(restored - truth) < np.linalg.norm(observed - truth)
 
     def test_diagnostic_histories_populated(self):
-        # idiv_history/curvature_term_history/otf_term_history are pure
-        # logging (see JetNewtonResult docstring), computed for free from
-        # quantities the outer loop already has -- check they're present,
-        # aligned with loss_history, and that the otf term is exactly zero
-        # when its weight is unused (and nonzero when it is).
+        # idiv_history/curvature_term_history are pure logging (see
+        # JetNewtonResult docstring), computed for free from quantities the
+        # outer loop already has -- check they're present and aligned with
+        # loss_history.
         blur, psf, truth, observed = self._make_problem()
         hess = AnisotropicHessian2D(kappa=(1.0, 1.0))
-        otf = OTFComplementOperator(psf, truth.shape)
         s0 = 0.02
         res = jetnewton_with_operator(
             observed, blur, hess, s0, beta=20.0, eta=1.0,
-            otf=otf, otf_weight=0.3,
             data_term="gaussian", num_iter=20, tol=1e-3, eval_interval=1,
         )
         n = len(res.loss_history)
         assert n > 0
-        for hist in (
-            res.idiv_history,
-            res.curvature_term_history,
-            res.otf_term_history,
-        ):
+        for hist in (res.idiv_history, res.curvature_term_history):
             assert len(hist) == n
             assert all(np.isfinite(v) for v in hist)
 
-        assert all(v > 0.0 for v in res.otf_term_history)
         assert all(v > 0.0 for v in res.curvature_term_history)
-
-        res_off = jetnewton_with_operator(
-            observed, blur, hess, s0, beta=20.0, eta=1.0,
-            data_term="gaussian", num_iter=20, tol=1e-3, eval_interval=1,
-        )
-        assert all(v == 0.0 for v in res_off.otf_term_history)
 
     def test_no_permanent_stall_with_poisson_and_active_voxels(self):
         # Regression guard: an earlier bug (forcing-sequence tolerance

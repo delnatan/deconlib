@@ -1,21 +1,17 @@
 """Non-dimensional log-penalty deconvolution via active-set projected Newton.
 
-Companion to :mod:`erdecon_mlx`, built as a separate experiment: same kind of
-log-penalty regularizer that codebase's settled ER-Decon recipe already
-trusts (not the design doc's general ``p``-continuation homotopy family --
-see below), but a better *optimizer* around it -- non-dimensionalized against
-noise sigma (``s0``) and per-axis PSF length scale (``ell``) so the knobs
-transfer across datasets, the *exact* (indefinite) Hessian rather than a
-Gauss-Newton surrogate, and a two-metric active-set projected Newton method
-solving ``x >= 0`` directly (no ``x = s^2`` substitution).
+Companion to :mod:`erdecon_mlx`: same kind of log-penalty regularizer
+ER-Decon already trusts, but a better *optimizer* around it --
+non-dimensionalized against noise sigma (``s0``) and per-axis PSF length
+scale (``ell``), the *exact* (indefinite) Hessian rather than a Gauss-Newton
+surrogate, and a two-metric active-set projected Newton method solving
+``x >= 0`` directly (no ``x = s^2`` substitution). Unpreconditioned plain CG.
 
 Design reference: "MAP Reconstruction with a Non-Dimensional Jet Prior"
-(``~/Downloads/map-projected-newton-spec.md``). Deliberately narrower than
-that spec in two ways: (1) only the fixed ``log(eta+u)`` penalty (the spec's
-``p -> 0`` limit) is implemented, not the ``p in [1,0]`` continuation
-schedule -- the point of this module is a better optimizer for a penalty
-already known to work well, not a new penalty family; (2) ``s0``/``ell`` are
-required, explicit arguments -- no auto-estimation.
+(``~/Downloads/map-projected-newton-spec.md``). Implements only the fixed
+``log(eta+u)`` penalty (the spec's ``p -> 0`` limit), not the ``p in [1,0]``
+continuation schedule. ``s0``/``ell`` are required, explicit arguments -- no
+auto-estimation.
 
 Unit contract (the thing most likely to go silently wrong -- read this before
 touching ``jetnewton_gradient``/``jetnewton_hvp``)::
@@ -30,52 +26,39 @@ touching ``jetnewton_gradient``/``jetnewton_hvp``)::
 needs no extra chain-rule factor; the *data* term is defined in physical
 units and needs explicit chain-rule scale factors (see
 :func:`_data_scale_factors`). For Poisson, ``grad_scale=s0``,
-``hvp_scale=s0^2`` -- the Poisson NLL is intrinsically properly scaled (shot
-noise ~ sqrt(counts) is built into the formula), so this is the whole story.
-For Gaussian, ``erdecon_mlx``'s reused ``_data_deriv`` is a *raw*
-least-squares term, not the spec's ``Sigma^-1``-weighted NLL -- an extra
-``1/(2*s0)`` (gradient) / ``1/2`` (HVP, the ``s0`` cancels entirely) is
-needed, using ``s0`` itself as the Gaussian noise sigma (spec Sec 2.1: that
-*is* what ``s0`` means). Getting this wrong doesn't break anything within a
-single run (gradient/HVP/objective all still agree with each other) -- it
-silently breaks scale invariance *across* runs at different gains, which is
-the entire point of Sec 2 and exactly what the scale-invariance tests below
-are for. ``g(mu)``/``W_D`` are exactly :func:`~.erdecon_mlx._data_deriv`'s
-outputs, reused unmodified.
+``hvp_scale=s0^2`` -- shot noise ~ sqrt(counts) is intrinsic to the Poisson
+NLL, so this is the whole story. For Gaussian, ``erdecon_mlx``'s reused
+``_data_deriv`` is a *raw* least-squares term, not a ``Sigma^-1``-weighted
+NLL -- an extra ``1/(2*s0)`` (gradient) / ``1/2`` (HVP, the ``s0`` cancels
+entirely) is needed, using ``s0`` itself as the Gaussian noise sigma.
+Dropping this factor doesn't break anything within a single run (gradient/
+HVP/objective still agree with each other) -- it silently breaks scale
+invariance *across* runs at different detector gains. ``g(mu)``/``W_D`` are
+exactly :func:`~.erdecon_mlx._data_deriv`'s outputs, reused unmodified.
 
 The penalty, non-dimensionalized (``H~`` is :class:`~.linops_mlx.AnisotropicHessian3D`
-/ ``2D``, ``kappa_a = ell_a / h_a``; ``C~`` is an optional
-:class:`~.linops_mlx.OTFComplementOperator` built with
-``normalize_noise=True``, so its response to ``x_tilde`` sits on the same
-noise-sigma footing as ``H~``'s and needs no separate unit conversion)::
+/ ``2D``, ``kappa_a = ell_a / h_a``)::
 
-    u_i(x_tilde) = sum_c (H~ x_tilde)_{i,c}^2 + otf_weight * (C~ x_tilde)_i^2
+    u_i(x_tilde) = sum_c (H~ x_tilde)_{i,c}^2
     R(x_tilde)   = (beta/2) * sum_i log(eta + u_i)
     w_i = beta / (eta + u_i)            (>= 0, matches erdecon_mlx's reg-weight convention)
     c_i = -w_i^2 / beta                 (<= 0, the negative-curvature term the
                                             Gauss-Newton surrogate in erdecon_mlx drops)
 
-Both terms share one ``eta``/``w``/``c`` -- a single saturation threshold on
-one combined non-dimensional curvature+missing-cone quantity, rather than a
-separate penalty per term.
-
-No intensity (``x_tilde_i^2``) term: an earlier version had one, gated by an
-``intensity_weight`` knob mirroring ``erdecon_mlx``'s own -- removed, not
-just defaulted off, after confirming it stayed unused experimentally (see
-[[jetnewton_projected_newton]]) and to match ``erdecon_mlx``'s own settled
-curvature-only recipe (see its module docstring for the axial flux-collapse
-risk that motivated dropping it there too). ``otf_weight`` defaults to
-``0.0`` (no missing-cone term) -- opt in via ``otf``/``otf_weight`` once you
-have an :class:`~.linops_mlx.OTFComplementOperator` built for your PSF.
-
-No Fourier preconditioner: an earlier version of this module had one
-(``JetHessianPreconditioner``, built on the shared circulant machinery in
-``fourier_precond_mlx.py``), since removed -- it only supported a bare
-convolution or convolution+crop forward model, not real downsampling
-(``zoom != 1``), which is exactly the super-resolution regime this solver is
-otherwise meant to support, and its Jacobi diagonal produced visible
-dark-hole artifacts in practice. The active-set projected Newton method
-itself (Sec 4, below) is unpreconditioned plain CG.
+Curvature-only, deliberately: an earlier version also supported an optional
+``otf``/``otf_weight`` term (an :class:`~.linops_mlx.OTFComplementOperator`
+missing-cone penalty, sharing one ``eta``/``w``/``c`` with the curvature
+term). It was removed 2026-07-13 after three controlled synthetic tests
+(matched-PSF at two photon levels, and a spherically-aberrated-vs-ideal PSF
+mismatch case -- ground truth known in all three, so recovery error was
+measured directly, not proxied via idiv/axial-excess) found curvature-only
+matched or beat every ``otf``/``power``/``otf_weight`` configuration tried on
+every metric, and converged more reliably. See
+``scripts/widefield_jetnewton_synthetic_shell_demo.py`` to re-run or extend
+that test if a future variant of the idea is worth checking against ground
+truth again. (``erdecon_mlx``'s own use of ``OTFComplementOperator`` --
+*as* its Hessian argument, not blended in -- is unrelated and unaffected;
+see that module's own settled recipe.)
 """
 
 from dataclasses import dataclass, field
@@ -130,35 +113,25 @@ def _penalty_weights(
     hessian: LinearOperator,
     beta: float,
     eta: float,
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 0.0,
-) -> Tuple[mx.array, mx.array, mx.array, mx.array, Optional[mx.array]]:
-    """Per-voxel ``(r, u, w, c, r_otf)`` for the non-dimensional log penalty.
+) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+    """Per-voxel ``(r, u, w, c)`` for the non-dimensional log penalty.
 
     ``r = H~ x_tilde`` (cached, reused by the gradient and HVP), ``u`` the
     per-voxel penalty argument, ``w = dR/du``-derived weight (already
     includes ``beta``), ``c = dw/du`` the negative-curvature coefficient.
-    ``r``/``r_otf`` have an extra leading stacked-component axis matching
-    ``hessian.forward``/``otf.forward``'s output; the rest match
-    ``x_tilde.shape``. ``r_otf`` is ``None`` when ``otf`` is not supplied or
-    ``otf_weight <= 0.0`` (no missing-cone term).
+    ``r`` has an extra leading stacked-component axis matching
+    ``hessian.forward``'s output; the rest match ``x_tilde.shape``.
     """
     r = hessian.forward(x_tilde)
     u = mx.sum(r * r, axis=0)
-    r_otf = None
-    if otf is not None and otf_weight > 0.0:
-        r_otf = otf.forward(x_tilde)
-        u = u + otf_weight * mx.sum(r_otf * r_otf, axis=0)
     w = beta / (eta + u)
     c = -(w * w) / beta
-    return r, u, w, c, r_otf
+    return r, u, w, c
 
 
 def estimate_penalty_noise_floor(
     hessian: LinearOperator,
     shape: Tuple[int, ...],
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 1.0,
     n_trials: int = 8,
     seed: int = 0,
 ) -> dict:
@@ -167,63 +140,42 @@ def estimate_penalty_noise_floor(
     ``eta`` is a threshold on ``u_i`` meant to separate noise from real
     structure (see module docstring), but nothing about a fixed default
     value (e.g. the spec's ``O(1)``) accounts for how much a given
-    ``hessian``'s ``kappa`` (or a given ``otf``) amplifies noise passed
-    through it -- get ``kappa`` wrong (or just large, e.g. from an
-    aggressive super-resolution zoom) and a fixed ``eta`` can be off by many
-    orders of magnitude, silently making the regularizer numerically inert
-    (verified: a real incident, not a hypothetical -- see
-    [[jetnewton_projected_newton]]). This runs ``n_trials`` independent
-    unit-variance white-noise realizations of ``x_tilde`` through
-    ``hessian``/``otf`` exactly as :func:`_penalty_weights` would, and
-    reports percentile statistics of the resulting ``u_i`` -- since real
-    noise in ``x_tilde = x/s0`` is unit-variance by construction, this
-    directly answers "what does a pure-noise voxel's ``u`` look like," which
-    is what ``eta`` needs to sit near (typically the median, or higher for a
-    more conservative noise/signal threshold).
+    ``hessian``'s ``kappa`` amplifies noise passed through it -- get
+    ``kappa`` wrong (or just large, e.g. from an aggressive super-resolution
+    zoom) and a fixed ``eta`` can be off by many orders of magnitude,
+    silently making the regularizer numerically inert (verified: a real
+    incident, not a hypothetical -- see [[jetnewton_projected_newton]]).
+    This runs ``n_trials`` independent unit-variance white-noise
+    realizations of ``x_tilde`` through ``hessian`` exactly as
+    :func:`_penalty_weights` would, and reports percentile statistics of the
+    resulting ``u_i`` -- since real noise in ``x_tilde = x/s0`` is
+    unit-variance by construction, this directly answers "what does a
+    pure-noise voxel's ``u`` look like," which is what ``eta`` needs to sit
+    near (typically the median, or higher for a more conservative
+    noise/signal threshold).
 
     Deliberately a diagnostic, not an auto-estimator -- this module makes no
     automatic parameter choices (see module docstring); read the returned
-    statistics and set ``eta``/``otf_weight`` yourself. Also useful for
-    picking a starting ``otf_weight`` before ``eta`` is chosen: compare the
-    ``"curvature"`` and ``"otf"`` entries' medians and scale ``otf_weight``
-    so the two are on comparable footing, the same way ``eta`` should be
-    comparable to ``"combined"``'s median.
+    statistics and set ``eta`` yourself.
 
     Args:
         hessian: The curvature regularizer operator (e.g.
             ``AnisotropicHessian3D.from_lengths(ell, spacing)``).
         shape: ``x_tilde``'s shape (the reconstruction/padded domain).
-        otf: Optional missing-cone operator; omit to probe curvature alone.
-        otf_weight: Weight to apply when combining the ``otf`` term into
-            ``u`` (matches :func:`jetnewton_with_operator`'s own parameter);
-            ignored if ``otf`` is ``None``.
         n_trials: Independent noise realizations averaged over.
         seed: RNG seed (deterministic).
 
     Returns:
-        Dict with keys ``"curvature"``, ``"combined"`` (always present), and
-        ``"otf"`` (only if ``otf`` is given), each mapping to a
+        Dict with key ``"curvature"`` mapping to a
         ``{"mean", "median", "p1", "p99"}`` dict over all
         ``n_trials * prod(shape)`` samples.
     """
     rng = np.random.default_rng(seed)
     curvature_samples = []
-    otf_samples = []
-    combined_samples = []
     for _ in range(n_trials):
         noise = mx.array(rng.standard_normal(shape).astype(np.float32))
         Hx = hessian.forward(noise)
-        u_curv = mx.sum(Hx * Hx, axis=0)
-        u = u_curv
-        u_otf = None
-        if otf is not None and otf_weight > 0.0:
-            Cx = otf.forward(noise)
-            u_otf = otf_weight * mx.sum(Cx * Cx, axis=0)
-            u = u + u_otf
-        curvature_samples.append(np.asarray(u_curv))
-        if u_otf is not None:
-            otf_samples.append(np.asarray(u_otf))
-        combined_samples.append(np.asarray(u))
+        curvature_samples.append(np.asarray(mx.sum(Hx * Hx, axis=0)))
 
     def _stats(samples: list) -> dict:
         arr = np.concatenate([s.ravel() for s in samples])
@@ -234,13 +186,7 @@ def estimate_penalty_noise_floor(
             "p99": float(np.percentile(arr, 99)),
         }
 
-    result = {
-        "curvature": _stats(curvature_samples),
-        "combined": _stats(combined_samples),
-    }
-    if otf_samples:
-        result["otf"] = _stats(otf_samples)
-    return result
+    return {"curvature": _stats(curvature_samples)}
 
 
 def jetnewton_objective(
@@ -253,15 +199,13 @@ def jetnewton_objective(
     beta: float = 1.0,
     eta: float = 1e-2,
     data_term: str = "poisson",
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 0.0,
 ) -> float:
     """Objective ``F(x_tilde) = D(mu) + R(x_tilde)`` (see module docstring)."""
     _check_data_term(data_term)
     obj_scale, _, _ = _data_scale_factors(data_term, s0)
     mu = s0 * blur_op.forward(x_tilde) + background
     data = obj_scale * _data_misfit(mu, observed, data_term)
-    _, u, _, _, _ = _penalty_weights(x_tilde, hessian, beta, eta, otf, otf_weight)
+    _, u, _, _ = _penalty_weights(x_tilde, hessian, beta, eta)
     reg = 0.5 * beta * mx.sum(mx.log(eta + u))
     return float(data + reg)
 
@@ -276,12 +220,10 @@ def jetnewton_gradient(
     beta: float = 1.0,
     eta: float = 1e-2,
     data_term: str = "poisson",
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 0.0,
 ):
     """Exact gradient of ``F`` w.r.t. ``x_tilde``.
 
-    Returns ``(grad, aux)`` where ``aux = (r, w, c, data_hess_w, r_otf)`` is
+    Returns ``(grad, aux)`` where ``aux = (r, w, c, data_hess_w)`` is
     threaded to :func:`jetnewton_hvp` so the outer iteration needs no
     recomputation.
     """
@@ -291,12 +233,10 @@ def jetnewton_gradient(
     score, data_hess_w = _data_deriv(mu, observed, data_term)
     data_grad = grad_scale * blur_op.adjoint(score)
 
-    r, _, w, c, r_otf = _penalty_weights(x_tilde, hessian, beta, eta, otf, otf_weight)
+    r, _, w, c = _penalty_weights(x_tilde, hessian, beta, eta)
     reg_grad = hessian.adjoint(w[None] * r)
-    if r_otf is not None:
-        reg_grad = reg_grad + otf_weight * otf.adjoint(w[None] * r_otf)
 
-    return data_grad + reg_grad, (r, w, c, data_hess_w, r_otf)
+    return data_grad + reg_grad, (r, w, c, data_hess_w)
 
 
 def jetnewton_hvp(
@@ -309,33 +249,28 @@ def jetnewton_hvp(
     data_hess_w: Union[float, mx.array],
     s0: float,
     data_term: str = "poisson",
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 0.0,
-    r_otf: Optional[mx.array] = None,
 ) -> mx.array:
     """Exact Hessian-vector product ``hvp_x_tilde F(v)`` -- the actual point of
     this module: no Gauss-Newton surrogate, ``c`` (<=0) contributes the real
     negative-curvature correction the frozen-weight approximation in
     ``erdecon_mlx`` drops. Takes no ``x_tilde`` argument -- with the intensity
-    term gone, every regularizer term's curvature action only needs the
-    cached ``(r, w, c, r_otf)`` from :func:`jetnewton_gradient`'s ``aux``, not
-    the base point itself.
+    term gone, the regularizer's curvature action only needs the cached
+    ``(r, w, c)`` from :func:`jetnewton_gradient`'s ``aux``, not the base
+    point itself.
 
-        q     = H~ v                                   # ONE H~ apply
-        q_otf = C~ v                                    # ONE C~ apply (if otf given)
-        g_i   = <r_i,q_i> + otf_weight*<r_otf_i,q_otf_i>
-        m     = c * g
+        q = H~ v                                   # ONE H~ apply
+        g = <r,q>
+        m = c * g
 
-        hvp R(v) = H~^T(w*q + 2*m*r) + otf_weight*C~^T(w*q_otf + 2*m*r_otf)
+        hvp R(v) = H~^T(w*q + 2*m*r)
         hvp F(v) = hvp_scale * A^T(data_hess_w * A(v)) + hvp R(v)             # ONE A, ONE A^T
 
     ``hvp_scale`` is ``s0^2`` for Poisson, ``0.5`` for the properly
     variance-normalized Gaussian data term (see :func:`_data_scale_factors`
     -- must match whatever ``data_term`` was used to build ``aux`` in
     :func:`jetnewton_gradient`, or gradient and HVP silently disagree).
-    ``r``, ``w``, ``c``, ``data_hess_w``, ``r_otf`` come from
-    :func:`jetnewton_gradient`'s ``aux``; ``otf``/``otf_weight`` must match
-    what was passed there (``r_otf`` is ``None`` iff they weren't).
+    ``r``, ``w``, ``c``, ``data_hess_w`` come from :func:`jetnewton_gradient`'s
+    ``aux``.
     """
     _, _, hvp_scale = _data_scale_factors(data_term, s0)
     Av = blur_op.forward(v)
@@ -343,17 +278,9 @@ def jetnewton_hvp(
 
     q = hessian.forward(v)
     g = mx.sum(r * q, axis=0)
-    q_otf = None
-    if r_otf is not None and otf is not None and otf_weight > 0.0:
-        q_otf = otf.forward(v)
-        g = g + otf_weight * mx.sum(r_otf * q_otf, axis=0)
     m = c * g
 
     reg_hvp = hessian.adjoint(w[None] * q + 2.0 * m[None] * r)
-    if q_otf is not None:
-        reg_hvp = reg_hvp + otf_weight * otf.adjoint(
-            w[None] * q_otf + 2.0 * m[None] * r_otf
-        )
 
     return data_hvp + reg_hvp
 
@@ -562,15 +489,9 @@ class JetNewtonResult:
             regardless of ``data_term``), noise-floor-calibrated (~0.5 for
             well-fit raw-count data) and comparable across runs/datasets/gains,
             unlike ``data_misfit_history``.
-        curvature_term_history: Mean per-voxel ``|H~ x_tilde|^2`` (the
-            curvature contribution to ``u_i``, unweighted -- it always enters
-            ``u`` with implicit weight 1) at each logged iteration.
-        otf_term_history: Mean per-voxel ``otf_weight * (C~ x_tilde)^2`` (the
-            OTF-complement contribution to ``u_i``, already weighted -- 0 if
-            ``otf`` is unused) at each logged iteration.
-            ``curvature_term_history``/``otf_term_history`` are each reported
-            exactly as they enter ``u_i = curvature_term + otf_term``, so
-            they are directly comparable to each other and to ``eta``.
+        curvature_term_history: Mean per-voxel ``|H~ x_tilde|^2`` (i.e.
+            ``u_i`` itself) at each logged iteration -- directly comparable
+            to ``eta``.
         proj_grad_history: ``||x - P+(x - grad_F)||_inf`` (the KKT residual,
             logged as a diagnostic -- NOT the primary stopping test, see
             ``newton_decrement_history``) at each logged iteration. This is a
@@ -613,7 +534,6 @@ class JetNewtonResult:
     data_misfit_history: list = field(default_factory=list)
     idiv_history: list = field(default_factory=list)
     curvature_term_history: list = field(default_factory=list)
-    otf_term_history: list = field(default_factory=list)
     proj_grad_history: list = field(default_factory=list)
     newton_decrement_history: list = field(default_factory=list)
     converged: bool = False
@@ -629,8 +549,6 @@ def jetnewton_with_operator(
     beta: float = 1.0,
     eta: float = 1.0,
     data_term: str = "poisson",
-    otf: Optional[LinearOperator] = None,
-    otf_weight: float = 0.0,
     num_iter: int = 100,
     init: Optional[Union[np.ndarray, mx.array]] = None,
     cg_max_steps: int = 50,
@@ -669,16 +587,8 @@ def jetnewton_with_operator(
         beta: Overall regularization weight.
         eta: Penalty saturation threshold, noise-variance units (spec
             default range ``[1, 4]``; ``1.0`` here since there is no
-            continuation schedule to anneal it). Shared by the curvature and
-            OTF-complement terms -- see module docstring.
+            continuation schedule to anneal it).
         data_term: ``'poisson'`` (default) or ``'gaussian'``.
-        otf: Optional missing-cone regularizer operator (an
-            :class:`~.linops_mlx.OTFComplementOperator` built with
-            ``normalize_noise=True`` on ``x_tilde``'s domain). ``None``
-            (default) omits the term.
-        otf_weight: Weight of the OTF-complement term in ``u_i`` (default
-            ``0.0``, no term -- see module docstring). Ignored if ``otf`` is
-            ``None``.
         num_iter: Maximum outer Newton iterations.
         init: Optional initial estimate of ``x`` (physical units); default
             ``max(blur_op.adjoint(observed - background), s0)/s0``.
@@ -724,14 +634,13 @@ def jetnewton_with_operator(
     def objective_fn(xt):
         return jetnewton_objective(
             xt, blur_op, observed, hessian, s0, background, beta, eta,
-            data_term, otf, otf_weight,
+            data_term,
         )
 
     loss_history: list = []
     data_misfit_history: list = []
     idiv_history: list = []
     curvature_term_history: list = []
-    otf_term_history: list = []
     active_set_size_history: list = []
     cg_iterations_history: list = []
     proj_grad_history: list = []
@@ -744,9 +653,9 @@ def jetnewton_with_operator(
     for k in range(num_iter):
         grad, aux = jetnewton_gradient(
             x_tilde, blur_op, observed, hessian, s0, background, beta, eta,
-            data_term, otf, otf_weight,
+            data_term,
         )
-        r, w, c, dhw, r_otf = aux
+        r, w, c, dhw = aux
         active, eps = active_state.update(
             x_tilde, grad, eps_bar, freeze_tau, freeze_delta
         )
@@ -754,7 +663,7 @@ def jetnewton_with_operator(
         def hvp_full(v):
             return jetnewton_hvp(
                 v, blur_op, hessian, r, w, c, dhw, s0,
-                data_term, otf, otf_weight, r_otf,
+                data_term,
             )
 
         d_free, n_cg, hit_neg = solve_reduced_newton(
@@ -794,11 +703,6 @@ def jetnewton_with_operator(
             data_misfit_history.append(float(data_val))
             idiv_history.append(poisson_i_divergence(observed, mu))
             curvature_term_history.append(float(mx.mean(mx.sum(r * r, axis=0))))
-            otf_term_history.append(
-                float(otf_weight * mx.mean(mx.sum(r_otf * r_otf, axis=0)))
-                if r_otf is not None
-                else 0.0
-            )
             active_set_size_history.append(int(mx.sum(active.astype(mx.int32))))
             proj_grad_history.append(pg)
             newton_decrement_history.append(nd)
@@ -808,9 +712,7 @@ def jetnewton_with_operator(
                     f"I-div = {idiv_history[-1]:.4g}, "
                     f"nd = {nd:.3g}, |proj-grad| = {pg:.3g}, cg_iter = {n_cg}, "
                     f"|I| = {active_set_size_history[-1]}, t = {t:.3g}, "
-                    f"u-terms(curvature/otf) = "
-                    f"{curvature_term_history[-1]:.3g}/"
-                    f"{otf_term_history[-1]:.3g}"
+                    f"u = {curvature_term_history[-1]:.3g}"
                 )
 
         if not accepted:
@@ -876,7 +778,6 @@ def jetnewton_with_operator(
         data_misfit_history=data_misfit_history,
         idiv_history=idiv_history,
         curvature_term_history=curvature_term_history,
-        otf_term_history=otf_term_history,
         proj_grad_history=proj_grad_history,
         newton_decrement_history=newton_decrement_history,
         converged=converged,

@@ -31,64 +31,69 @@ flux-summing downsample, unlike the mean-flux ``1/prod(zoom_factors)``
 script (not part of the library), as the PSF's per-axis second moment
 (radius of gyration) in physical units, after zeroing a small tail threshold.
 
-Tuning recipe (eta, otf_weight, beta)
----------------------------------------
+Tuning recipe (eta, beta)
+--------------------------
 Calibrate what has a computable target; only ``beta`` is a genuinely free
 choice. In order (steps 1-2 are the "s0/ell bookkeeping" above; this picks
 up from there):
 
-3. ``eta``/``otf_weight``: call ``estimate_penalty_noise_floor(hessian,
-   padded_shape, otf=otf, otf_weight=1.0)`` first to read off curvature's
-   and otf's raw per-unit-weight noise-floor medians. Set ``otf_weight =
-   curvature_median / otf_median`` so the two terms start on *equal footing
-   under pure noise* -- not a claim that they end up equal once real
-   structure appears (they don't, see step 4). Re-probe at that
-   ``otf_weight`` and set ``eta`` to the combined median: the threshold
-   separating "this ``u_i`` looks like noise" from "this looks like signal"
-   should sit at what a typical pure-noise voxel actually produces, not a
-   guessed constant (a real incident: a stale default was once off by ~8
-   orders of magnitude relative to this dataset's actual noise-floor ``u``,
-   silently making the regularizer numerically inert -- see
-   [[jetnewton_projected_newton]]).
+3. ``eta``: call ``estimate_penalty_noise_floor(hessian, padded_shape)`` to
+   read off curvature's raw noise-floor median, and set ``eta`` to it: the
+   threshold separating "this ``u_i`` looks like noise" from "this looks
+   like signal" should sit at what a typical pure-noise voxel actually
+   produces, not a guessed constant (a real incident: a stale default was
+   once off by ~8 orders of magnitude relative to this dataset's actual
+   noise-floor ``u``, silently making the regularizer numerically inert --
+   see [[jetnewton_projected_newton]]).
 
-4. Is ``otf`` worth using at all? Run a matched-``beta`` A/B: (a) otf off,
-   ``eta`` from curvature's own noise floor; (b) otf on at the calibrated
-   ``otf_weight``, ``eta`` from the combined noise floor. Compare ``idiv``
-   (data fit) and the axial peak-plane-excess diagnostic (missing-cone
-   collapse) -- do NOT assume otf is automatically beneficial. On this
-   dataset it earned its keep: axial excess ``1.92 -> 1.72`` at a small
-   ``idiv`` cost (``0.785 -> 0.895``), plus a less aggressively sparse
-   solution (718k -> 515k pinned voxels) -- a sensible trade for a
-   missing-cone *structural* prior, not a fit-quality booster. If otf
-   instead moved axial excess barely at all, or cost much more than a
-   little ``idiv``, the right call is to leave it off.
-
-5. ``beta``: sweep log-spaced (e.g. ``1e-4`` to ``1e-1``) at the ``eta``/
-   ``otf_weight`` from steps 3-4, watching ``idiv`` and axial excess
-   *together* -- they trade off (lower ``idiv`` is better fit; lower axial
-   excess is less collapse; pushing ``beta`` up buys the latter at the
-   former's expense, and convergence gets markedly slower too -- 48
-   iterations at ``beta=0.1`` vs. 13-25 for everything below ``3e-2`` here).
-   Do not expect ``idiv`` to reach the idealized ~0.5 Poisson noise floor on
-   real data -- on this dataset it plateaued around ``0.77-0.9`` across
-   nearly three decades of ``beta``, which is the dataset's real achievable
-   floor (PSF model mismatch, ``noise_sigma_data`` estimation error, etc.),
-   not a sign ``beta`` is wrong; chasing ``idiv`` further down by shrinking
-   ``beta`` past that plateau buys nothing. ``beta=1e-3`` (below) sits in a
+4. ``beta``: sweep log-spaced (e.g. ``1e-4`` to ``1e-1``) at the ``eta``
+   from step 3, watching ``idiv`` and axial excess *together* -- they trade
+   off (lower ``idiv`` is better fit; lower axial excess is less collapse;
+   pushing ``beta`` up buys the latter at the former's expense, and
+   convergence gets markedly slower too -- 48 iterations at ``beta=0.1``
+   vs. 13-25 for everything below ``3e-2`` here). Do not expect ``idiv`` to
+   reach the idealized ~0.5 Poisson noise floor on real data -- on this
+   dataset it plateaued around ``0.77-0.9`` across nearly three decades of
+   ``beta``, which is the dataset's real achievable floor (PSF model
+   mismatch, ``noise_sigma_data`` estimation error, etc.), not a sign
+   ``beta`` is wrong; chasing ``idiv`` further down by shrinking ``beta``
+   past that plateau buys nothing. ``beta=1e-3`` (below) sits in a
    well-behaved part of that landscape: ``idiv=0.89``, axial excess
    ``1.72``, converges in ~14 iterations.
 
-Steps 4-5 were run once as ``widefield_jetnewton_otf_ablation_and_beta_scan.py``;
-rerun it (updating the calibration/data-loading preamble for a new dataset)
-rather than trusting these specific numbers to transfer.
+No OTF-complement term (removed 2026-07-13): an earlier version of this
+demo also calibrated and used an ``otf``/``otf_weight`` missing-cone term
+(the ablation script ``widefield_jetnewton_otf_ablation_and_beta_scan.py``,
+now stale, found a modest one-dataset win from it -- axial excess
+``1.92 -> 1.72`` at a small ``idiv`` cost). That result didn't replicate:
+three controlled synthetic ground-truth tests (see
+``scripts/widefield_jetnewton_synthetic_shell_demo.py``) found curvature-only
+matched or beat every ``otf``/``power``/``otf_weight`` configuration tried,
+across matched and even severely PSF-mismatched setups, and ``jetnewton_mlx``
+dropped the feature entirely as a result -- see its module docstring.
 
-Curvature-only (no intensity term): the intensity (``x_tilde^2``) term that
-used to be an opt-in ``intensity_weight`` knob has been removed from
-``jetnewton_mlx`` entirely -- no clean physical grounding (unlike curvature,
-from PSF geometry, or ``otf_weight``, targeting the OTF's actual null
-space), a documented missing-cone collapse risk, and empirically required a
-wildly dataset-specific value just to become non-negligible. Matches
-``erdecon_mlx``'s own already-settled curvature-only default.
+Curvature-only (no intensity term either): the intensity (``x_tilde^2``)
+term that used to be an opt-in ``intensity_weight`` knob has also been
+removed from ``jetnewton_mlx`` entirely -- no clean physical grounding
+(unlike curvature, from PSF geometry), a documented missing-cone collapse
+risk, and empirically required a wildly dataset-specific value just to
+become non-negligible. Matches ``erdecon_mlx``'s own already-settled
+curvature-only default.
+
+UI design notes (what to expose vs. compute)
+----------------------------------------------
+Only ``beta`` is a genuine user-facing knob (regularization strength -- a
+single log-scale slider, ~``1e-4`` to ``1e-1``). Everything else is either a
+required acquisition-metadata input -- PSF optics, pixel spacing,
+``background_data``, ``noise_sigma_data`` -- normally a saved microscope/
+camera preset, not typed per run, or fully auto-computed and should NOT be
+exposed as a knob at all: ``s0``, ``ell``/``kappa``, ``eta`` are all derived
+below from the inputs above, never guessed. Optimizer knobs
+(``cg_max_steps``, ``newton_tol``, ``tol``) are advanced/hidden -- sane fixed
+defaults, not something to sweep from the UI. There is deliberately no
+missing-cone/otf knob: one was built, tested against synthetic ground truth,
+and removed for not helping (see ``jetnewton_mlx`` module docstring) --
+don't add a UI slider for it without repeating that validation.
 
 Three-space model
 ------------------
@@ -113,7 +118,6 @@ from deconlib.deconvolution import (
     Crop,
     FractionalAreaDownsample,
     LinearFFTConvolver,
-    OTFComplementOperator,
     compose,
     compute_padded_shape,
     compute_visible_shape,
@@ -130,25 +134,26 @@ datapath = Path("/Users/delnatan/Projects/Deconvolution/RMM_ASM_sample/")
 image_file = "outer_box_120x120.ims"
 
 # Reconstruction
-zoom_factors = (1.0, 1.26, 1.26)  # crop-only forward model -- see module docstring
-num_iter = 60  # headroom above the ~14 iterations beta=1e-3 actually needs (see below)
-background_data = 100.0  # camera baseline clamp -- forward-model pedestal only
-noise_sigma_data = 15.0  # measured noise sigma, data-space counts -- s0's source (see module docstring)
+zoom_factors = (1.0, 1.26, 1.26)  # [advanced] super-res zoom; crop-only (1,1,1) is the exercised default
+num_iter = 60  # [fixed] headroom only -- newton_tol below is what actually stops the solve
+background_data = 100.0  # [required input] camera baseline clamp -- from acquisition/camera preset
+noise_sigma_data = 15.0  # [required input] measured noise sigma -- from camera calibration, NOT guessed
 
-# Regularizer knobs -- see module docstring's "Tuning recipe". eta/otf_weight
-# are computed below from estimate_penalty_noise_floor, not guessed here.
-# beta has no calibration target (a prior-strength choice) -- 1e-3 is the
-# validated pick from widefield_jetnewton_otf_ablation_and_beta_scan.py:
-# idiv=0.89, axial excess=1.72, well inside the well-behaved (fast-
-# converging, idiv-plateau) part of the beta landscape -- see the recipe.
+# Regularizer knob -- see module docstring's "Tuning recipe"/"UI design notes".
+# eta is [auto] below, never user-set. beta is the [primary UI knob]: the one
+# genuinely free choice, a log-scale slider -- 1e-3 is the validated pick
+# from widefield_jetnewton_otf_ablation_and_beta_scan.py: idiv=0.89, axial
+# excess=1.72, well inside the well-behaved (fast-converging, idiv-plateau)
+# part of the beta landscape -- see the recipe.
 beta = 1e-2
 
-# Optimizer knobs.
+# [advanced/hidden] Optimizer knobs -- sane fixed defaults, not UI-facing.
 cg_max_steps = 150
 newton_tol = 1e-4
 tol = 0.0
 
-# PSF optics
+# [required input] PSF optics -- from a saved microscope/objective preset,
+# not typed per run.
 psf_wavelength = 0.6  # μm
 psf_na = 1.4
 psf_ni = 1.515  # immersion medium refractive index
@@ -231,10 +236,10 @@ operator = compose(detector, downsampler, convolver)
 background_visible = background_data / float(np.prod(zoom_factors))
 initial = mx.full(padded_shape, float(background_visible), dtype=mxdata.dtype)
 
-# s0: visible-space noise sigma, converted from the measured data-space sigma
-# via 1/sqrt(prod(zoom_factors)) -- see module docstring's "s0/ell
-# bookkeeping". Do NOT derive this from background_data (that incident is
-# exactly why this is called out here).
+# [auto -- do not expose] s0: visible-space noise sigma, converted from the
+# measured data-space sigma via 1/sqrt(prod(zoom_factors)) -- see module
+# docstring's "s0/ell bookkeeping". Do NOT derive this from background_data
+# (that incident is exactly why this is called out here).
 s0 = float(noise_sigma_data / np.sqrt(np.prod(zoom_factors)))
 
 
@@ -271,6 +276,8 @@ def estimate_psf_length_scales(psf_arr, spacing, tail_threshold=0.01):
     return tuple(ell)
 
 
+# [auto -- do not expose] ell/kappa: derived entirely from the PSF optics
+# inputs above; a UI never needs a separate "ell" or "kappa" field.
 ell = estimate_psf_length_scales(psf, visible_pixel_spacing)
 print(f"Estimated PSF length scales (ell, z/y/x): {ell} um")
 print(f"Voxel spacing (visible, z/y/x): {visible_pixel_spacing} um")
@@ -280,37 +287,18 @@ hessian = AnisotropicHessian3D.from_lengths(ell, visible_pixel_spacing)
 print(f"kappa (z/y/x) = {hessian.kappa}")
 
 # =============================================================================
-# OTF-COMPLEMENT OPERATOR + eta/otf_weight CALIBRATION
+# eta CALIBRATION -- see module docstring's "Tuning recipe"
 # =============================================================================
-# normalize_noise=True: response to unit white noise has ~unit per-voxel
-# std, putting it on the same noise-sigma footing as hessian's kappa-scaled
-# response without a separate unit conversion -- see linops_mlx.py's
-# OTFComplementOperator docstring.
-otf = OTFComplementOperator(psf, padded_shape, normalize_noise=True)
-
-# Calibrate otf_weight so its noise-floor contribution to u starts on
-# comparable footing with curvature's, then calibrate eta from the combined
-# noise floor at that otf_weight -- see module docstring's "eta/otf_weight
-# calibration" and estimate_penalty_noise_floor's own docstring. Both are
-# starting points, not validated final values.
-probe_unit = estimate_penalty_noise_floor(hessian, padded_shape, otf=otf, otf_weight=1.0)
-otf_weight = probe_unit["curvature"]["median"] / probe_unit["otf"]["median"]
-probe_calibrated = estimate_penalty_noise_floor(
-    hessian, padded_shape, otf=otf, otf_weight=otf_weight
-)
-eta = probe_calibrated["combined"]["median"]
+# [auto -- do not expose] eta always comes from this probe, never a UI field
+# or a guessed constant (see the module docstring's incident note on why).
+probe = estimate_penalty_noise_floor(hessian, padded_shape)
+eta = probe["curvature"]["median"]
 print(
-    f"noise floor @ otf_weight=1: curvature median={probe_unit['curvature']['median']:.4g}, "
-    f"otf median={probe_unit['otf']['median']:.4g}"
+    f"noise floor: curvature mean={probe['curvature']['mean']:.4g}, "
+    f"median={probe['curvature']['median']:.4g}, "
+    f"p1/p99={probe['curvature']['p1']:.4g}/{probe['curvature']['p99']:.4g}"
 )
-print(f"calibrated otf_weight = {otf_weight:.4g}")
-print(
-    f"noise floor @ calibrated otf_weight: combined "
-    f"mean={probe_calibrated['combined']['mean']:.4g}, "
-    f"median={probe_calibrated['combined']['median']:.4g}, "
-    f"p1/p99={probe_calibrated['combined']['p1']:.4g}/{probe_calibrated['combined']['p99']:.4g}"
-)
-print(f"eta (set to combined median) = {eta:.4g}")
+print(f"eta (set to curvature median) = {eta:.4g}")
 
 
 def _timed(fn):
@@ -324,7 +312,7 @@ def _timed(fn):
 # =============================================================================
 # RUN JETNEWTON
 # =============================================================================
-print(f"Running jetnewton (beta={beta}, eta={eta:.4g}, otf_weight={otf_weight:.4g})...")
+print(f"Running jetnewton (beta={beta}, eta={eta:.4g})...")
 result, elapsed = _timed(
     lambda: jetnewton_with_operator(
         observed=mxdata,
@@ -335,8 +323,6 @@ result, elapsed = _timed(
         beta=beta,
         eta=eta,
         data_term="poisson",
-        otf=otf,
-        otf_weight=otf_weight,
         num_iter=num_iter,
         init=initial,
         cg_max_steps=cg_max_steps,
