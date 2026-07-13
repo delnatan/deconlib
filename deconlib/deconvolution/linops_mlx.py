@@ -262,6 +262,120 @@ class Hessian3D:
         return self.forward(f)
 
 
+class AnisotropicHessian2D:
+    """2D Hessian operator with three independent per-axis coefficients.
+
+    Generalizes :class:`Hessian2D` (which is always isotropic, ``kappa=(1,1)``)
+    to independent per-axis scaling ``kappa = (kappa_y, kappa_x)`` -- e.g. the
+    non-dimensional jet prior's ``kappa_a = ell_a / h_a`` (PSF length scale
+    over voxel spacing), as opposed to :class:`Hessian3D`'s single voxel-
+    spacing-only ratio ``r``. ``Hessian2D()`` is exactly
+    ``AnisotropicHessian2D(kappa=(1.0, 1.0))``.
+
+    Attributes:
+        kappa: Per-axis coefficients ``(kappa_y, kappa_x)``.
+        operator_norm_sq: Squared spectral norm, sum of each stencil's max
+            squared response: ``16*(ky^4+kx^4) + 2*ky^2*kx^2``.
+    """
+
+    def __init__(self, kappa: Tuple[float, float]):
+        self.kappa = tuple(float(k) for k in kappa)
+        ky, kx = self.kappa
+        self.operator_norm_sq = 16.0 * (ky**4 + kx**4) + 2.0 * (ky**2) * (kx**2)
+
+    @classmethod
+    def from_lengths(
+        cls, ell: Tuple[float, float], spacing: Tuple[float, float]
+    ) -> "AnisotropicHessian2D":
+        """Build from physical length scales ``ell`` and voxel ``spacing``
+        (same per-axis order), ``kappa_a = ell_a / h_a``."""
+        return cls(kappa=tuple(e / h for e, h in zip(ell, spacing)))
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute weighted Hessian components. Returns shape (3, H, W)."""
+        ky, kx = self.kappa
+        H_yy = (ky**2) * d2(f, axis=0)
+        H_xx = (kx**2) * d2(f, axis=1)
+        H_xy = (ky * kx * SQRT2) * d1_cen(d1_cen(f, axis=0), axis=1)
+        return mx.stack([H_yy, H_xx, H_xy], axis=0)
+
+    def adjoint(self, H: mx.array) -> mx.array:
+        """Compute adjoint of weighted Hessian. Returns shape (H, W)."""
+        ky, kx = self.kappa
+        adj_yy = (ky**2) * d2_adj(H[0], axis=0)
+        adj_xx = (kx**2) * d2_adj(H[1], axis=1)
+        adj_xy = (ky * kx * SQRT2) * d1_cen_adj(d1_cen_adj(H[2], axis=0), axis=1)
+        return adj_yy + adj_xx + adj_xy
+
+    def __call__(self, f: mx.array) -> mx.array:
+        return self.forward(f)
+
+
+class AnisotropicHessian3D:
+    """3D Hessian operator with three independent per-axis coefficients.
+
+    Generalizes :class:`Hessian3D` (which weights only one axis, via a single
+    ratio ``r = dy/dz``, and assumes the other two are isotropic) to
+    independent per-axis scaling ``kappa = (kappa_z, kappa_y, kappa_x)`` --
+    e.g. the non-dimensional jet prior's ``kappa_a = ell_a / h_a`` (PSF length
+    scale over voxel spacing along axis ``a``), rather than voxel spacing
+    alone. ``Hessian3D(r=r)`` is exactly ``AnisotropicHessian3D(kappa=(r, 1, 1))``.
+
+    Attributes:
+        kappa: Per-axis coefficients ``(kappa_z, kappa_y, kappa_x)``.
+        operator_norm_sq: Squared spectral norm, sum of each stencil's max
+            squared response:
+            ``16*(kz^4+ky^4+kx^4) + 2*(ky^2*kz^2 + kx^2*kz^2 + kx^2*ky^2)``.
+    """
+
+    def __init__(self, kappa: Tuple[float, float, float]):
+        self.kappa = tuple(float(k) for k in kappa)
+        kz, ky, kx = self.kappa
+        self.operator_norm_sq = 16.0 * (kz**4 + ky**4 + kx**4) + 2.0 * (
+            (ky**2) * (kz**2) + (kx**2) * (kz**2) + (kx**2) * (ky**2)
+        )
+
+    @classmethod
+    def from_lengths(
+        cls,
+        ell: Tuple[float, float, float],
+        spacing: Tuple[float, float, float],
+    ) -> "AnisotropicHessian3D":
+        """Build from physical length scales ``ell`` and voxel ``spacing``
+        (both ``(z, y, x)``), ``kappa_a = ell_a / h_a``."""
+        return cls(kappa=tuple(e / h for e, h in zip(ell, spacing)))
+
+    def forward(self, f: mx.array) -> mx.array:
+        """Compute weighted Hessian. Returns shape (6, Z, Y, X)."""
+        kz, ky, kx = self.kappa
+        H_zz = (kz**2) * d2(f, axis=0)
+        H_yy = (ky**2) * d2(f, axis=1)
+        H_xx = (kx**2) * d2(f, axis=2)
+
+        Dz = d1_cen(f, axis=0)
+        Dy = d1_cen(f, axis=1)
+        H_yz = (ky * kz * SQRT2) * d1_cen(Dz, axis=1)
+        H_xz = (kx * kz * SQRT2) * d1_cen(Dz, axis=2)
+        H_xy = (kx * ky * SQRT2) * d1_cen(Dy, axis=2)
+
+        return mx.stack([H_zz, H_yy, H_xx, H_yz, H_xz, H_xy], axis=0)
+
+    def adjoint(self, H: mx.array) -> mx.array:
+        """Compute adjoint of weighted Hessian. Returns shape (Z, Y, X)."""
+        kz, ky, kx = self.kappa
+        adj_zz = (kz**2) * d2_adj(H[0], axis=0)
+        adj_yy = (ky**2) * d2_adj(H[1], axis=1)
+        adj_xx = (kx**2) * d2_adj(H[2], axis=2)
+        adj_yz = (ky * kz * SQRT2) * d1_cen_adj(d1_cen_adj(H[3], axis=1), axis=0)
+        adj_xz = (kx * kz * SQRT2) * d1_cen_adj(d1_cen_adj(H[4], axis=2), axis=0)
+        adj_xy = (kx * ky * SQRT2) * d1_cen_adj(d1_cen_adj(H[5], axis=2), axis=1)
+
+        return adj_zz + adj_yy + adj_xx + adj_yz + adj_xz + adj_xy
+
+    def __call__(self, f: mx.array) -> mx.array:
+        return self.forward(f)
+
+
 # -----------------------------------------------------------------------------
 # FFT convolution operators
 # -----------------------------------------------------------------------------

@@ -102,6 +102,18 @@ from .erdecon_mlx import (
     erdecon_solver,
     ERDeconResult,
 )
+from .jetnewton_mlx import (
+    jetnewton_objective,
+    jetnewton_gradient,
+    jetnewton_hvp,
+    identify_active_set,
+    ActiveSetState,
+    solve_reduced_newton,
+    projected_armijo,
+    JetNewtonResult,
+    jetnewton_with_operator,
+    estimate_penalty_noise_floor,
+)
 
 from .linops_mlx import (
     FFTConvolver,
@@ -116,6 +128,8 @@ from .linops_mlx import (
     Hessian1D,
     Hessian2D,
     Hessian3D,
+    AnisotropicHessian2D,
+    AnisotropicHessian3D,
     OTFComplementOperator,
 )
 from .composition import (
@@ -169,6 +183,16 @@ __all__ = [
     # MLX Algorithms - Entropy-regularized deconvolution (Arigovindan 2013)
     "erdecon_with_operator",
     "erdecon_solver",
+    "jetnewton_objective",
+    "jetnewton_gradient",
+    "jetnewton_hvp",
+    "identify_active_set",
+    "ActiveSetState",
+    "solve_reduced_newton",
+    "projected_armijo",
+    "JetNewtonResult",
+    "jetnewton_with_operator",
+    "estimate_penalty_noise_floor",
     # Shape utilities
     "compute_visible_shape",
     "compute_padded_shape",
@@ -187,6 +211,8 @@ __all__ = [
     "Hessian1D",
     "Hessian2D",
     "Hessian3D",
+    "AnisotropicHessian2D",
+    "AnisotropicHessian3D",
     "OTFComplementOperator",
     # Composition / external-solver adapters
     "Compose",
